@@ -1,0 +1,391 @@
+{
+  "eval_set_result_id": "text_summarizer_summarizer_simple_test_1789942495.5946388",
+  "eval_set_result_name": "text_summarizer_summarizer_simple_test_1789942495.5946388",
+  "eval_set_id": "summarizer_simple_test",
+  "eval_case_results": [
+    {
+      "eval_set_file": "summarizer_simple_test",
+      "eval_set_id": "summarizer_simple_test",
+      "eval_id": "basic_summary",
+      "final_eval_status": 1,
+      "eval_metric_results": null,
+      "overall_eval_metric_results": [
+        {
+          "metric_name": "tool_trajectory_avg_score",
+          "threshold": 1.0,
+          "criterion": {
+            "threshold": 1.0,
+            "include_intermediate_responses_in_final": false
+          },
+          "custom_function_path": null,
+          "score": 1.0,
+          "eval_status": 1,
+          "details": {
+            "rubric_scores": null
+          }
+        },
+        {
+          "metric_name": "response_match_score",
+          "threshold": 0.5,
+          "criterion": {
+            "threshold": 0.5,
+            "include_intermediate_responses_in_final": false
+          },
+          "custom_function_path": null,
+          "score": 0.7916666666666667,
+          "eval_status": 1,
+          "details": {
+            "rubric_scores": null
+          }
+        }
+      ],
+      "eval_metric_result_per_invocation": [
+        {
+          "actual_invocation": {
+            "invocation_id": "e-8b18057f-aca2-4102-9fca-44694e452d4d",
+            "user_content": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "Summarize: Dogs are domesticated mammals known for their loyalty and companionship. They are often called man's best friend. Dogs come in many breeds, varying in size, color, and temperament. They have been bred for various purposes including hunting, herding, guarding, and companionship. Dogs are social animals that thrive on interaction with humans and other dogs.",
+                  "thought": null,
+                  "thought_signature": null,
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null,
+                  "audio_transcription": null,
+                  "media_processing": null
+                }
+              ],
+              "role": "user"
+            },
+            "final_response": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "- Dogs are domesticated mammals known for their loyalty and companionship and are often called man's best friend.\n- Dogs come in many breeds, varying in size, color, and temperament.\n- They have been bred for various purposes including hunting, herding, guarding, and companionship.\n- Dogs are social animals that thrive on interaction with humans and other dogs.",
+                  "thought": null,
+                  "thought_signature": "El4KXAFpFH0TgpCfD7UxC4oE--X_e3ppQ5BuSsRfnz41StaEPzdTrYCIcgnYBEThNtLo6xO_DmoS4EgeCmnGVLGeeff_ZIXJNSdL_zlfIhVByvpPb6KRlnx8YpqbxR9W",
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null,
+                  "audio_transcription": null,
+                  "media_processing": null
+                }
+              ],
+              "role": "model"
+            },
+            "intermediate_data": {
+              "invocation_events": []
+            },
+            "creation_timestamp": 1789942495.588792,
+            "rubrics": null,
+            "app_details": {
+              "agent_details": {
+                "text_summarizer": {
+                  "name": "text_summarizer",
+                  "instructions": "You are a text summarization agent. Your job is to take long text provided by the user and convert it into a short, clear bullet-point summary.\n\nRules:\n1. Always respond with bullet points using the - prefix (dash followed by space).\n2. Each bullet point should be a single concise sentence.\n3. Capture the main ideas by closely mirroring the key terms, phrasing, and sentence structures found in the source text.\n4. Aim for 3-5 bullet points depending on the length and complexity of the input.\n5. Do not add information that is not present in the original text.\n6. Use clear, professional language, maintaining a direct, factual tone that reflects the core statements of the input.\n\nYou are an agent. Your internal name is \"text_summarizer\". The description about you is \"A text summarization agent that converts long text into concise bullet-point summaries.\".",
+                  "tool_declarations": []
+                }
+              }
+            }
+          },
+          "expected_invocation": {
+            "invocation_id": "test-001",
+            "user_content": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "Summarize: Dogs are domesticated mammals known for their loyalty and companionship. They are often called man's best friend. Dogs come in many breeds, varying in size, color, and temperament. They have been bred for various purposes including hunting, herding, guarding, and companionship. Dogs are social animals that thrive on interaction with humans and other dogs.",
+                  "thought": null,
+                  "thought_signature": null,
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null,
+                  "audio_transcription": null,
+                  "media_processing": null
+                }
+              ],
+              "role": "user"
+            },
+            "final_response": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "- Dogs are domesticated mammals valued for loyalty and companionship.\n- They come in many breeds with varying size, color, and temperament.\n- Dogs have been bred for hunting, herding, guarding, and companionship.\n- They are social animals that thrive on human and canine interaction.",
+                  "thought": null,
+                  "thought_signature": null,
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null,
+                  "audio_transcription": null,
+                  "media_processing": null
+                }
+              ],
+              "role": "model"
+            },
+            "intermediate_data": {
+              "tool_uses": [],
+              "tool_responses": [],
+              "intermediate_responses": []
+            },
+            "creation_timestamp": 0.0,
+            "rubrics": null,
+            "app_details": null
+          },
+          "eval_metric_results": [
+            {
+              "metric_name": "tool_trajectory_avg_score",
+              "threshold": 1.0,
+              "criterion": {
+                "threshold": 1.0,
+                "include_intermediate_responses_in_final": false
+              },
+              "custom_function_path": null,
+              "score": 1.0,
+              "eval_status": 1,
+              "details": {
+                "rubric_scores": null
+              }
+            },
+            {
+              "metric_name": "response_match_score",
+              "threshold": 0.5,
+              "criterion": {
+                "threshold": 0.5,
+                "include_intermediate_responses_in_final": false
+              },
+              "custom_function_path": null,
+              "score": 0.7916666666666667,
+              "eval_status": 1,
+              "details": {
+                "rubric_scores": null
+              }
+            }
+          ]
+        }
+      ],
+      "session_id": "___eval___session___242abcd8-f0e8-48cd-b46d-dcf76fabb3de",
+      "session_details": {
+        "id": "___eval___session___242abcd8-f0e8-48cd-b46d-dcf76fabb3de",
+        "app_name": "text_summarizer",
+        "user_id": "test_user",
+        "state": {
+          "__llm_request_key__": "1efac90e-0785-455e-b4d7-65e57af110bf"
+        },
+        "events": [
+          {
+            "model_version": null,
+            "content": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "Summarize: Dogs are domesticated mammals known for their loyalty and companionship. They are often called man's best friend. Dogs come in many breeds, varying in size, color, and temperament. They have been bred for various purposes including hunting, herding, guarding, and companionship. Dogs are social animals that thrive on interaction with humans and other dogs.",
+                  "thought": null,
+                  "thought_signature": null,
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null,
+                  "audio_transcription": null,
+                  "media_processing": null
+                }
+              ],
+              "role": "user"
+            },
+            "grounding_metadata": null,
+            "partial": null,
+            "turn_complete": null,
+            "turn_complete_reason": null,
+            "interaction_status": null,
+            "finish_reason": null,
+            "error_code": null,
+            "error_message": null,
+            "interrupted": null,
+            "custom_metadata": null,
+            "usage_metadata": null,
+            "live_session_resumption_update": null,
+            "live_session_id": null,
+            "go_away": null,
+            "voice_activity": null,
+            "input_transcription": null,
+            "output_transcription": null,
+            "avg_logprobs": null,
+            "logprobs_result": null,
+            "cache_metadata": null,
+            "citation_metadata": null,
+            "interaction_id": null,
+            "environment_id": null,
+            "invocation_id": "e-8b18057f-aca2-4102-9fca-44694e452d4d",
+            "author": "user",
+            "actions": {
+              "skip_summarization": null,
+              "state_delta": {},
+              "artifact_delta": {},
+              "transfer_to_agent": null,
+              "transfer_reason": null,
+              "escalate": null,
+              "requested_auth_configs": {},
+              "requested_tool_confirmations": {},
+              "compaction": null,
+              "end_of_agent": null,
+              "agent_state": null,
+              "rewind_before_invocation_id": null,
+              "route": null,
+              "render_ui_widgets": null,
+              "set_model_response": null
+            },
+            "output": null,
+            "node_info": {
+              "path": "",
+              "output_for": null,
+              "message_as_output": null
+            },
+            "long_running_tool_ids": null,
+            "branch": null,
+            "isolation_scope": null,
+            "id": "7932be8e-c972-4183-8a10-15b799ecfe03",
+            "timestamp": 1789942493.634658
+          },
+          {
+            "model_version": "gemini-3.5-flash-lite",
+            "content": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "- Dogs are domesticated mammals known for their loyalty and companionship and are often called man's best friend.\n- Dogs come in many breeds, varying in size, color, and temperament.\n- They have been bred for various purposes including hunting, herding, guarding, and companionship.\n- Dogs are social animals that thrive on interaction with humans and other dogs.",
+                  "thought": null,
+                  "thought_signature": "El4KXAFpFH0TgpCfD7UxC4oE--X_e3ppQ5BuSsRfnz41StaEPzdTrYCIcgnYBEThNtLo6xO_DmoS4EgeCmnGVLGeeff_ZIXJNSdL_zlfIhVByvpPb6KRlnx8YpqbxR9W",
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null,
+                  "audio_transcription": null,
+                  "media_processing": null
+                }
+              ],
+              "role": "model"
+            },
+            "grounding_metadata": null,
+            "partial": null,
+            "turn_complete": null,
+            "turn_complete_reason": null,
+            "interaction_status": null,
+            "finish_reason": "STOP",
+            "error_code": null,
+            "error_message": null,
+            "interrupted": null,
+            "custom_metadata": {
+              "__llm_request_key__": "1efac90e-0785-455e-b4d7-65e57af110bf"
+            },
+            "usage_metadata": {
+              "cache_tokens_details": null,
+              "cached_content_token_count": null,
+              "candidates_token_count": 74,
+              "candidates_tokens_details": null,
+              "prompt_token_count": 263,
+              "prompt_tokens_details": [
+                {
+                  "modality": "TEXT",
+                  "token_count": 263
+                }
+              ],
+              "thoughts_token_count": null,
+              "tool_use_prompt_token_count": null,
+              "tool_use_prompt_tokens_details": null,
+              "total_token_count": 337,
+              "traffic_type": null
+            },
+            "live_session_resumption_update": null,
+            "live_session_id": null,
+            "go_away": null,
+            "voice_activity": null,
+            "input_transcription": null,
+            "output_transcription": null,
+            "avg_logprobs": null,
+            "logprobs_result": null,
+            "cache_metadata": null,
+            "citation_metadata": null,
+            "interaction_id": null,
+            "environment_id": null,
+            "invocation_id": "e-8b18057f-aca2-4102-9fca-44694e452d4d",
+            "author": "text_summarizer",
+            "actions": {
+              "skip_summarization": null,
+              "state_delta": {
+                "__llm_request_key__": "1efac90e-0785-455e-b4d7-65e57af110bf"
+              },
+              "artifact_delta": {},
+              "transfer_to_agent": null,
+              "transfer_reason": null,
+              "escalate": null,
+              "requested_auth_configs": {},
+              "requested_tool_confirmations": {},
+              "compaction": null,
+              "end_of_agent": null,
+              "agent_state": null,
+              "rewind_before_invocation_id": null,
+              "route": null,
+              "render_ui_widgets": null,
+              "set_model_response": null
+            },
+            "output": null,
+            "node_info": {
+              "path": "text_summarizer@1",
+              "output_for": null,
+              "message_as_output": null
+            },
+            "long_running_tool_ids": null,
+            "branch": null,
+            "isolation_scope": null,
+            "id": "e1651a65-d085-4d3f-ab3e-7c5a8b6fc487",
+            "timestamp": 1789942494.2227695
+          }
+        ],
+        "last_update_time": 1789942494.2227695
+      },
+      "user_id": "test_user"
+    }
+  ],
+  "creation_timestamp": 1789942495.5946388
+}

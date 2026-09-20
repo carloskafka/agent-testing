@@ -1,0 +1,12 @@
+[project]
+name = "text-summarizer"
+version = "0.1.0"
+description = "A text summarization agent built with ADK"
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends._legacy:_Backend"

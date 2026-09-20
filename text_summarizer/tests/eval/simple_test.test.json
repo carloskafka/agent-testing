@@ -1,0 +1,40 @@
+{
+  "eval_set_id": "summarizer_simple_test",
+  "name": "Simple Summarizer Test",
+  "description": "Basic test case for the text summarizer agent.",
+  "eval_cases": [
+    {
+      "eval_id": "basic_summary",
+      "conversation": [
+        {
+          "invocation_id": "test-001",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Summarize: Dogs are domesticated mammals known for their loyalty and companionship. They are often called man's best friend. Dogs come in many breeds, varying in size, color, and temperament. They have been bred for various purposes including hunting, herding, guarding, and companionship. Dogs are social animals that thrive on interaction with humans and other dogs."
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "- Dogs are domesticated mammals valued for loyalty and companionship.\n- They come in many breeds with varying size, color, and temperament.\n- Dogs have been bred for hunting, herding, guarding, and companionship.\n- They are social animals that thrive on human and canine interaction."
+              }
+            ],
+            "role": "model"
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "text_summarizer",
+        "user_id": "test_user",
+        "state": {}
+      }
+    }
+  ]
+}
