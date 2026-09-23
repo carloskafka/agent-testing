@@ -2,6 +2,8 @@ import os
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 
+from .obsidian_tools import build_obsidian_tools
+
 MODEL_PROVIDER = os.environ.get("MODEL_PROVIDER", "gemini")
 
 MODELS = {
@@ -40,4 +42,5 @@ Rules:
 4. Aim for 3-5 bullet points depending on the length and complexity of the input.
 5. Do not add information that is not present in the original text.
 6. Use clear, professional language, maintaining a direct, factual tone that reflects the core statements of the input.""",
+    tools=build_obsidian_tools(),
 )

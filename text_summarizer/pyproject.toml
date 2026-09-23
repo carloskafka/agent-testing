@@ -4,9 +4,16 @@ version = "0.1.0"
 description = "A text summarization agent built with ADK"
 requires-python = ">=3.11"
 dependencies = [
-    "google-adk",
+    "google-adk[mcp,extensions]",
+    "langfuse",
+    "openinference-instrumentation-google-adk",
+    "python-dotenv",
 ]
 
 [build-system]
 requires = ["setuptools"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["text_summarizer"]
+package-dir = {"text_summarizer" = "."}
