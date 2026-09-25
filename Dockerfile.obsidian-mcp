@@ -1,0 +1,21 @@
+FROM debian:trixie-slim
+
+ARG OBSIDIAN_MCP_VERSION=3.1.0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL \
+        -o /tmp/obsidian-mcp.tar.gz \
+        "https://github.com/lstpsche/obsidian-mcp/releases/download/v${OBSIDIAN_MCP_VERSION}/obsidian-mcp-${OBSIDIAN_MCP_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+    && tar -xzf /tmp/obsidian-mcp.tar.gz -C /usr/local/bin obsidian-mcp \
+    && rm -f /tmp/obsidian-mcp.tar.gz \
+    && chmod +x /usr/local/bin/obsidian-mcp
+
+# Semantic search daemon downloads itself on first run; keep its state inside a volume.
+VOLUME ["/root/.local"]
+
+EXPOSE 37842
+
+CMD ["obsidian-mcp", "--http", "--host", "0.0.0.0", "--port", "37842", "/vault"]

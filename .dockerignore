@@ -1,0 +1,15 @@
+.git
+.venv
+**/.venv
+__pycache__
+**/__pycache__
+*.pyc
+.sdk
+.adk
+.env
+optimization_history.json
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md
+*.log

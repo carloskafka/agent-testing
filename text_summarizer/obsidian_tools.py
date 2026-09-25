@@ -53,7 +53,7 @@ def build_obsidian_tools() -> list:
                 "note_read",
                 "note_create",
                 "note_write",
-                "note_append",
+                "note_insert",
                 "search_text",
                 "search_metadata",
             ],

@@ -1,0 +1,30 @@
+services:
+  obsidian-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.obsidian-mcp
+    container_name: obsidian-mcp
+    restart: unless-stopped
+    network_mode: service:agent-testing
+    depends_on:
+      - agent-testing
+    volumes:
+      - /home/vboxuser/Downloads/apps/obsidian/config/ck-vault/ck:/vault
+
+  agent-testing:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent-testing
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    environment:
+      LANGFUSE_BASE_URL: http://host.docker.internal:3099
+      OBSIDIAN_MCP_URL: http://127.0.0.1:37842/mcp
+    volumes:
+      - /home/vboxuser/Downloads/apps/obsidian/config/ck-vault/ck:/vault
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
