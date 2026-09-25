@@ -1,11 +1,14 @@
 import os
+import re
 
 from google.adk.agents import LlmAgent
 from google.adk.models import FallbackModel, LlmResponse
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import FunctionTool
 from google.genai.types import Content, Part
+from opentelemetry import trace as otel_trace
 
+from .observability import langfuse_client
 from .obsidian_tools import build_obsidian_tools
 from .second_brain import find_cached_summary, log_conversation, save_summary_to_second_brain
 
@@ -85,11 +88,97 @@ def cache_hit_before_model(callback_context, llm_request):
     )
 
 
+def _score_generation(user_text: str = "", model_text: str = "") -> dict:
+    """Compute cheap, deterministic quality metrics for the agent response.
+
+    Returns a name->score map that is pushed to Langfuse per call:
+      - bullet_count: number of '-' bullet points (0..1 normalized, ideal 3-5)
+      - source_overlap: fraction of source words present in the summary
+      - fidelity: capped bullets + overlap combined 0..1
+    """
+    bullets = re.findall(r"(?m)^\s*-\s+", model_text or "")
+    n = len(bullets)
+    bullet_score = 1.0 if 3 <= n <= 5 else max(0.0, 1.0 - abs(n - 4) * 0.2)
+
+    source_words = set(re.findall(r"\b\w+\b", (user_text or "").lower()))
+    model_words = set(re.findall(r"\b\w+\b", (model_text or "").lower()))
+    overlap = 0.0
+    if source_words and model_words:
+        overlap = len(source_words & model_words) / len(source_words)
+
+    fidelity = min(1.0, (bullet_score + overlap) / 2)
+    return {
+        "bullet_count": round(n, 3),
+        "source_overlap": round(overlap, 3),
+        "fidelity": round(fidelity, 3),
+    }
+
+
+def _current_trace_id() -> str | None:
+    """Best-effort OTel trace id (32-char hex) of the running agent invocation."""
+    span = otel_trace.get_current_span()
+    ctx = span.get_span_context()
+    if ctx and ctx.trace_id and ctx.trace_id != otel_trace.INVALID_TRACE_ID:
+        return f"{ctx.trace_id:032x}"
+    return None
+
+
+def report_scores_after_agent(callback_context, agent_response_list=None):
+    """Attach deterministic quality scores to the current trace in Langfuse."""
+    client = langfuse_client()
+    if client is None:
+        return None
+    trace_id = _current_trace_id()
+    if not trace_id:
+        return None
+
+    user_text = _last_session_user_text(callback_context)
+    model_text = _last_session_model_text(callback_context)
+    for name, value in _score_generation(user_text, model_text).items():
+        try:
+            client.create_score(
+                trace_id=trace_id,
+                name=f"quality.{name}",
+                value=value,
+                data_type="NUMERIC",
+            )
+        except Exception as exc:  # pragma: no cover - observability must never break the agent
+            print(f"[observability] score '{name}' failed: {exc}")
+    return None
+
+
+def _part_texts(content) -> list[str]:
+    if content is None:
+        return []
+    parts = getattr(content, "parts", None) or []
+    return [str(p.text) for p in parts if getattr(p, "text", None) is not None]
+
+
+def _last_session_user_text(callback_context) -> str:
+    events = (callback_context.session.events or []) if callback_context.session else []
+    for event in reversed(events):
+        if getattr(event, "author", "") == "user":
+            return "".join(_part_texts(getattr(event, "content", None)))
+    return ""
+
+
+def _last_session_model_text(callback_context) -> str:
+    events = (callback_context.session.events or []) if callback_context.session else []
+    for event in reversed(events):
+        if getattr(event, "author", "") == "user":
+            continue
+        text = "".join(_part_texts(getattr(event, "content", None)))
+        if text.strip():
+            return text
+    return ""
+
+
 root_agent = LlmAgent(
     name="text_summarizer",
     model=model,
     description="A text summarization agent that converts long text into concise bullet-point summaries and stores them in an Obsidian vault (second brain).",
     before_model_callback=cache_hit_before_model,
+    after_agent_callback=report_scores_after_agent,
     instruction="""You are a text summarization agent backed by an Obsidian vault that acts as a second brain. Your job is to take long text provided by the user, convert it into a short, clear bullet-point summary, and persist it in the vault so the knowledge is graph-aware and reusable.
 
 Rules:
