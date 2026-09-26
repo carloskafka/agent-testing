@@ -546,6 +546,50 @@ td code { white-space: nowrap; }
   to   { background-position: 140% 0; }
 }
 
+/* Clicking the recording toggles it. The button is transparent and covers the
+   stage; the glyph is only a hint that the surface is live. */
+.player__hit {
+  position: absolute;
+  /* -1px, not 0: the stage has a 1px border and an absolutely positioned child
+     resolves against the padding box, so inset: 0 leaves the frame itself
+     dead to clicks. */
+  inset: -1px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.player__hit:disabled { cursor: default; }
+.player__hit .icon {
+  width: 64px;
+  height: 64px;
+  padding: 16px;
+  border-radius: var(--shape-full);
+  background: rgba(13, 16, 20, .62);
+  color: #e7ecf2;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .45);
+  opacity: .78;
+  transition: opacity var(--dur-short) var(--ease-standard),
+              transform var(--dur-short) var(--ease-standard);
+}
+.player__hit:hover .icon,
+.player__hit:focus-visible .icon { opacity: 1; transform: scale(1.06); }
+.player__hit:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+/* While it is playing the glyph is only there on hover or focus: a permanent
+   badge in the middle of a moving frame is noise. Paused, it stays, because
+   that is the state a reader most needs the hint in. */
+.walkthrough__stage[data-playing="true"] .player__hit .icon { opacity: 0; }
+.walkthrough__stage[data-playing="true"]:hover .player__hit .icon,
+.walkthrough__stage[data-playing="true"] .player__hit:focus-visible .icon { opacity: .9; }
+/* Text selection across a surface that is one big click target is never wanted. */
+.walkthrough__stage { user-select: none; -webkit-user-select: none; }
+
 .player { margin-top: 10px; }
 
 .player__seek {
@@ -1586,6 +1630,10 @@ breeds, varying in size, color, and temperament.</code></pre>
   var fullscreenEvent = document.fullscreenEnabled ? "fullscreenchange"
                                                    : "webkitfullscreenchange";
 
+  var ICON_PLAY =
+    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+  var ICON_PAUSE =
+    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6zm8-14v14h4V5h-4z"/></svg>';
   var ICON_FULLSCREEN =
     '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
   var ICON_FULLSCREEN_EXIT =
@@ -1668,6 +1716,25 @@ breeds, varying in size, color, and temperament.</code></pre>
     this.el("[data-role=loop]").addEventListener("change", function (ev) {
       self.loop = ev.target.checked;
     });
+
+    /* Clicking the recording itself is the obvious thing to try, so it is a
+     * real <button> laid over it rather than a click handler on a div: that
+     * way it is focusable, activates on Enter and Space for free, and is
+     * announced as what it is, none of which a div with a click listener and
+     * an aria-label bolted on afterwards reliably manages. */
+    this.hit = document.createElement("button");
+    this.hit.type = "button";
+    this.hit.className = "player__hit";
+    /* Named from the start: the label is otherwise only written when playback
+       starts, so a player that is loaded but not yet playing -- reduced
+       motion, or a figure that scrolled away -- has an unnamed button. */
+    this.hit.setAttribute("aria-label", "Play the recording");
+    this.stage.appendChild(this.hit);
+    this.hit.addEventListener("click", function () {
+      if (self.gif) { self.playing ? self.pause() : self.play(); }
+    });
+
+    if (this.hit) this.hit.disabled = true;
 
     this.fullBtn = this.el('[data-act="full"]');
     if (this.fullBtn) {
@@ -1774,6 +1841,7 @@ breeds, varying in size, color, and temperament.</code></pre>
 
     this.buttons.forEach(function (b) { b.disabled = false; });
     this.seek.disabled = false;
+    if (this.hit) this.hit.disabled = false;
     this.stage.setAttribute("data-state", "ready");
     this.setStatus("");
 
@@ -1875,6 +1943,7 @@ breeds, varying in size, color, and temperament.</code></pre>
     this.pause();
     this.clearWatchdog();
     if (this.canvas) { this.canvas.remove(); this.canvas = null; }
+    if (this.hit) { this.hit.remove(); this.hit = null; }
     this.poster.hidden = false;
     this.poster.setAttribute("src", this.src);
     var bar = this.el(".player");
@@ -2024,11 +2093,16 @@ breeds, varying in size, color, and temperament.</code></pre>
   };
 
   GifPlayer.prototype.setPlayIcon = function (playing) {
-    if (!this.playBtn) return;
-    this.playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
-    this.playBtn.innerHTML = playing
-      ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6zm8-14v14h4V5h-4z"/></svg>'
-      : '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+    var label = playing ? "Pause" : "Play";
+    if (this.playBtn) {
+      this.playBtn.setAttribute("aria-label", label);
+      this.playBtn.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+    }
+    if (this.hit) {
+      this.hit.setAttribute("aria-label", label + " the recording");
+      this.hit.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+      this.stage.setAttribute("data-playing", playing ? "true" : "false");
+    }
   };
 
   GifPlayer.prototype.step = function (delta) {

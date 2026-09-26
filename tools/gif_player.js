@@ -172,6 +172,10 @@
   var fullscreenEvent = document.fullscreenEnabled ? "fullscreenchange"
                                                    : "webkitfullscreenchange";
 
+  var ICON_PLAY =
+    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+  var ICON_PAUSE =
+    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6zm8-14v14h4V5h-4z"/></svg>';
   var ICON_FULLSCREEN =
     '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
   var ICON_FULLSCREEN_EXIT =
@@ -254,6 +258,25 @@
     this.el("[data-role=loop]").addEventListener("change", function (ev) {
       self.loop = ev.target.checked;
     });
+
+    /* Clicking the recording itself is the obvious thing to try, so it is a
+     * real <button> laid over it rather than a click handler on a div: that
+     * way it is focusable, activates on Enter and Space for free, and is
+     * announced as what it is, none of which a div with a click listener and
+     * an aria-label bolted on afterwards reliably manages. */
+    this.hit = document.createElement("button");
+    this.hit.type = "button";
+    this.hit.className = "player__hit";
+    /* Named from the start: the label is otherwise only written when playback
+       starts, so a player that is loaded but not yet playing -- reduced
+       motion, or a figure that scrolled away -- has an unnamed button. */
+    this.hit.setAttribute("aria-label", "Play the recording");
+    this.stage.appendChild(this.hit);
+    this.hit.addEventListener("click", function () {
+      if (self.gif) { self.playing ? self.pause() : self.play(); }
+    });
+
+    if (this.hit) this.hit.disabled = true;
 
     this.fullBtn = this.el('[data-act="full"]');
     if (this.fullBtn) {
@@ -360,6 +383,7 @@
 
     this.buttons.forEach(function (b) { b.disabled = false; });
     this.seek.disabled = false;
+    if (this.hit) this.hit.disabled = false;
     this.stage.setAttribute("data-state", "ready");
     this.setStatus("");
 
@@ -461,6 +485,7 @@
     this.pause();
     this.clearWatchdog();
     if (this.canvas) { this.canvas.remove(); this.canvas = null; }
+    if (this.hit) { this.hit.remove(); this.hit = null; }
     this.poster.hidden = false;
     this.poster.setAttribute("src", this.src);
     var bar = this.el(".player");
@@ -610,11 +635,16 @@
   };
 
   GifPlayer.prototype.setPlayIcon = function (playing) {
-    if (!this.playBtn) return;
-    this.playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
-    this.playBtn.innerHTML = playing
-      ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6zm8-14v14h4V5h-4z"/></svg>'
-      : '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+    var label = playing ? "Pause" : "Play";
+    if (this.playBtn) {
+      this.playBtn.setAttribute("aria-label", label);
+      this.playBtn.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+    }
+    if (this.hit) {
+      this.hit.setAttribute("aria-label", label + " the recording");
+      this.hit.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+      this.stage.setAttribute("data-playing", playing ? "true" : "false");
+    }
   };
 
   GifPlayer.prototype.step = function (delta) {
