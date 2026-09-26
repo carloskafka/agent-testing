@@ -211,12 +211,12 @@
       if (act === "play") { self.playing ? self.pause() : self.play(); }
       else if (act === "prev") { self.pause(); self.step(-1); }
       else if (act === "next") { self.pause(); self.step(1); }
-      else if (act === "stop") { self.pause(); self.seekTo(0); self.render(); }
+      else if (act === "stop") { self.pause(); self.seekTo(0); self.guarded("stop", self.render); }
     });
     this.seek.addEventListener("input", function () {
       self.pause();
       self.seekTo(parseInt(self.seek.value, 10) || 0);
-      self.render();
+      self.guarded("seek", self.render);
     });
     this.el("[data-role=speed]").addEventListener("change", function (ev) {
       self.speed = parseFloat(ev.target.value) || 1;
@@ -364,9 +364,11 @@
     var frames = this.gif.frames;
     var i = this.index;
 
-    if (i === this.drawn + 1) {
+    if (this.drawn >= 0 && i === this.drawn + 1) {
       /* The common case: one step forward, so only the previous frame's
-       * disposal has to be honoured. */
+       * disposal has to be honoured. drawn === -1 has to stay out of this
+       * branch -- there is no previous frame to dispose of yet, and taking
+       * frames[-1] throws before a single frame is ever painted. */
       this.clearFrame(frames[i - 1]);
       this.paint(frames[i]);
     } else {
@@ -397,8 +399,30 @@
       "frame " + (this.index + 1) + " of " + this.gif.frames.length);
   };
 
+  /* Any throw in here would otherwise leave the transport claiming to play
+   * with no animation frame scheduled, and the play button doing nothing. Fail
+   * loudly in the status line and stop instead. */
+  GifPlayer.prototype.guarded = function (what, fn) {
+    try {
+      fn.call(this);
+      return true;
+    } catch (err) {
+      this.pause();
+      this.setStatus("Playback stopped: " + (err && err.message ? err.message : err));
+      if (window.console) console.error("walkthrough " + what + " failed", err);
+      return false;
+    }
+  };
+
   GifPlayer.prototype.tick = function (now) {
     if (!this.playing) return;
+    var self = this;
+    this.guarded("tick", function () { self.advance(now); });
+    if (!this.playing) return;
+    this.raf = requestAnimationFrame(this.tick);
+  };
+
+  GifPlayer.prototype.advance = function (now) {
     /* A backgrounded tab stops rAF and comes back with one enormous delta;
      * clamping keeps that from fast-forwarding through the whole recording. */
     var dt = Math.min(now - this.last, 250);
@@ -419,18 +443,21 @@
       this.index++;
       this.render();
     }
-    this.raf = requestAnimationFrame(this.tick);
   };
 
   GifPlayer.prototype.play = function () {
-    if (!this.gif || this.playing) return;
+    if (!this.gif) return;
     this.canvas.hidden = false;   // laid over the poster, which stays put
     this.playing = true;
     this.last = window.performance ? performance.now() : Date.now();
     this.acc = 0;
-    this.render();
     this.setPlayIcon(true);
+    /* Restart the loop rather than returning early when already playing: that
+     * makes the button self-healing if the loop was ever lost, and stops "the
+     * play button does nothing" from being a reachable state. */
+    if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = requestAnimationFrame(this.tick);
+    this.guarded("first frame", this.render);
   };
 
   GifPlayer.prototype.pause = function () {
@@ -454,7 +481,7 @@
     var n = this.gif.frames.length;
     this.index = Math.max(0, Math.min(n - 1, this.index + delta));
     this.acc = 0;
-    this.render();
+    this.guarded("step", this.render);
   };
 
   GifPlayer.prototype.seekTo = function (i) {
@@ -472,6 +499,19 @@
       players.forEach(function (p) { p.load(); });
       return;
     }
+    /* A tab that goes to the background stops getting animation frames
+     * entirely, so a player left running would sit there claiming to play.
+     * Pause on the way out and pick up again on the way back. */
+    document.addEventListener("visibilitychange", function () {
+      players.forEach(function (p) {
+        if (document.hidden) {
+          if (p.playing) { p.wasPlaying = true; p.pause(); }
+        } else if (p.wasPlaying && p.visible) {
+          p.play();
+        }
+      });
+    });
+
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (entry) {
         var player = players[figures.indexOf(entry.target)];
@@ -489,6 +529,12 @@
       });
     }, { rootMargin: "300px 0px" });
     figures.forEach(function (f) { io.observe(f); });
+
+    /* Exposed deliberately. Hand-decoded canvas playback is the kind of thing
+     * that misbehaves on someone else's machine, and `walkthroughs[0].gif &&
+     * walkthroughs[0].status` answers "did it load, what does it think is
+     * going wrong" without a debugger. */
+    window.walkthroughs = players;
   }
 
   if (document.readyState === "loading") {
