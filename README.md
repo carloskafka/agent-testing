@@ -1,3 +1,6 @@
+> **Live demo → <https://carloskafka.github.io/agent-testing/#/overview>**
+> A Material 3 walkthrough of the whole thing: quick start, integrations, the vault, troubleshooting.
+
 # Text Summarizer Agent — ADK Evaluation Loop Demo
 
 A text summarization agent built with Google's **Agent Development Kit (ADK)** that demonstrates how to use evaluation loops to systematically improve agent prompts and outputs.
@@ -25,7 +28,8 @@ That picks your Obsidian vault, builds and starts both containers, and prints
 the URLs:
 
 - **Agent web UI:** http://localhost:8001
-- **Onboarding guide:** [docs/getting-started.md](docs/getting-started.md)
+- **Onboarding guide:** [docs/getting-started.md](docs/getting-started.md), or the
+  [live walkthrough](https://carloskafka.github.io/agent-testing/#/overview)
 
 Already use Obsidian? `./run.sh` finds your existing vaults — including the ones
 in your Obsidian config — and asks which one the agent should use, then remembers
@@ -127,6 +131,7 @@ CACHE_ENABLED=false uv run adk eval text_summarizer \
 | Doc | Contents |
 |---|---|
 | [docs/getting-started.md](docs/getting-started.md) | Onboarding: keys, run, first prompts, troubleshooting |
+| [Live walkthrough](https://carloskafka.github.io/agent-testing/#/overview) | Same material as a Material 3 web app, published with GitHub Pages |
 | [docs/EVALUATION.md](docs/EVALUATION.md) | Eval criteria, running evals, hands-on experiments, auto-optimization, creating test cases |
 | [docs/TESTING.md](docs/TESTING.md) | Prompt examples for the web UI (good / bad / edge cases) |
 | [docs/MODELS.md](docs/MODELS.md) | Switching between Gemini and OpenRouter free models |

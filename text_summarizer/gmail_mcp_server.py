@@ -67,13 +67,23 @@ def _decoded_body(payload: dict[str, Any]) -> str:
     data = body.get("data")
     if data:
         try:
-            return base64.urlsafe_b64decode(data).decode("utf-8", "replace")
+            # Padding is restored first. Anything whose byte length is not a
+            # multiple of 3 needs "=" characters, and b64decode raises without
+            # them -- which the bare `except` below would turn into an empty
+            # string, i.e. a silently bodyless email rather than an error.
+            padded = data + "=" * (-len(data) % 4)
+            return base64.urlsafe_b64decode(padded).decode("utf-8", "replace")
         except Exception:
             return ""
     chunks = []
     for part in payload.get("parts") or []:
         mime = str(part.get("mimeType", ""))
-        if mime.startswith("text/"):
+        # Recurse into nested multiparts as well as text parts. A forwarded or
+        # rich email is normally multipart/mixed wrapping a multipart/alternative
+        # (plain + html) next to its attachments, and descending only into text/*
+        # skipped that inner container entirely -- returning "" for exactly the
+        # messages a person most wants summarised.
+        if mime.startswith("text/") or mime.startswith("multipart/"):
             chunks.append(_decoded_body(part))
     return "\n".join(part for part in chunks if part)
 
@@ -159,7 +169,10 @@ def gmail_read(message_id: str) -> dict[str, Any]:
             .execute()
         )
         return _full(msg)
-    except HttpError as exc:
+    except (HttpError, ValueError) as exc:
+        # ValueError is _env's "credential is not set". It is caught here for the
+        # same reason as in the list tools: a missing credential must reach the
+        # model as a readable {"error": ...}, not as a tool crash.
         return {"error": str(exc)}
 
 
@@ -171,7 +184,7 @@ def gmail_get_thread(thread_id: str) -> list[dict[str, Any]]:
             _service().users().threads().get(userId="me", id=thread_id).execute()
         )
         return [_full(m) for m in (thread.get("messages") or [])]
-    except HttpError as exc:
+    except (HttpError, ValueError) as exc:
         return [{"error": str(exc)}]
 
 

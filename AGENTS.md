@@ -55,6 +55,7 @@ agent-testing/
         |-- test_vaults.py                 # Vault selection + resolve-vault.sh parity
         |-- test_run_script.py             # run.sh: discovery, menu, import, .env persistence
         |-- test_adk_devui_patch.py       # The mobile patch + its guards against ADK drift
+        |-- test_gmail.py                 # Gmail MCP server logic + the toolset that spawns it
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
             |-- summarizer_eval_set.evalset.json # 4 eval cases
