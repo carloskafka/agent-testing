@@ -207,9 +207,57 @@ def test_vault_name_comes_from_the_vault_root_when_unset(monkeypatch, tmp_path):
     monkeypatch.delenv("VAULT_NAME", raising=False)
     monkeypatch.setenv("SECOND_BRAIN_VAULT", str(vault))
     monkeypatch.setattr(second_brain, "VAULT_ROOT", str(vault))
+    monkeypatch.setattr(agent_module, "VAULT_ROOT", str(vault))
     events = [_event(_model_text("Dogs Overview"), model_version="m1")]
     text = _rendered_text(agent_module.report_scores_after_agent(_context(events)))
     assert "[obsidian][ck][m1]" in text
+
+
+def test_response_names_the_vault_not_the_mounted_parent(monkeypatch, tmp_path):
+    """The Sources block must name the vault, not the parent directory holding it.
+
+    This is the shape Docker actually runs: ``SECOND_BRAIN_VAULT`` is the parent
+    that gets bind-mounted (``/vaults``) and the active vault is its single child
+    (``/vaults/ck``). Every other test in this module sets ``VAULT_NAME`` instead,
+    which is a resolution step the compose file deliberately never takes, so the
+    path production uses was covered by nothing -- and rendering the parent's
+    basename is a wrong answer that looks right.
+    """
+    parent = tmp_path / "vaults"
+    vault = parent / "ck"
+    vault.mkdir(parents=True)
+    monkeypatch.delenv("VAULT_NAME", raising=False)
+    monkeypatch.setenv("SECOND_BRAIN_VAULT", str(parent))
+    monkeypatch.setattr(agent_module, "VAULT_ROOT", str(vault))
+    events = [_event(_model_text("Dogs Overview"), model_version="m1")]
+    text = _rendered_text(agent_module.report_scores_after_agent(_context(events)))
+    assert "[obsidian][ck][m1]" in text
+    assert f"[{parent.name}]" not in text
+
+
+def test_response_and_note_agree_on_the_vault_name(monkeypatch, tmp_path):
+    """The frontmatter and the response are written by different call sites.
+
+    ``second_brain.note_provenance`` reads ``second_brain.VAULT_ROOT`` and
+    ``agent._render_final_response`` reads the name imported into ``agent``, so
+    they can drift apart; a real recorded turn put ``ck`` in the note and
+    ``vaults`` in the answer. They are the same value in a real deployment, so
+    pin them to the same one here.
+    """
+    from text_summarizer import second_brain
+
+    parent = tmp_path / "vaults"
+    vault = parent / "ck"
+    vault.mkdir(parents=True)
+    monkeypatch.delenv("VAULT_NAME", raising=False)
+    monkeypatch.setenv("SECOND_BRAIN_VAULT", str(parent))
+    monkeypatch.setattr(second_brain, "VAULT_ROOT", str(vault))
+    monkeypatch.setattr(agent_module, "VAULT_ROOT", str(vault))
+    from_note = second_brain.note_provenance(None)[second_brain.GENERATED_IN_VAULT_KEY]
+    events = [_event(_model_text("Dogs Overview"), model_version="m1")]
+    text = _rendered_text(agent_module.report_scores_after_agent(_context(events)))
+    assert from_note == "ck"
+    assert f"[{from_note}][m1]" in text
 
 
 def test_vault_name_comes_from_a_mcp_vault_info_call(monkeypatch):

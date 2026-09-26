@@ -92,6 +92,15 @@ Every fresh, uncached response ends with a block like:
 - **One block, always.** The renderer discards whatever heading the model wrote (`**Sources**`, `## Sources`, none at all) and re-emits exactly one canonical block in the same position, so a model that ignores the format still cannot produce duplicates. Legacy `[vault] [[Note]]` lines from pre-existing output are adopted and normalized, not dropped.
 - **Served model — `Event.model_version`.** `Event` subclasses `LlmResponse`, and `_finalize_model_response_event` (`google/adk/flows/llm_flows/base_llm_flow.py`) merges every non-`None` `LlmResponse` field onto the model-response event. `model_version` is set by `LlmResponse.create` from `generate_content_response.model_version` (Gemini, `google/adk/models/google_llm.py`) and from `response.model` (`google/adk/models/lite_llm.py`). `FallbackModel` yields the sub-model's response unmodified, so the value is whichever backend actually answered. Read it via `sources.served_model_from_events`, which walks the session **backwards** and takes the last non-partial model event that has text *or* a function call.
 - **Unresolvable provenance renders as the literal `unknown`** — never a guess, never back-filled from the currently-serving model. A cached replay carries no `model_version`, so if the callback ever ran on one it would say `unknown`; in practice it returns `None` first (below).
+- **Both call sites pass the *resolved* root.** `second_brain.note_provenance` and
+  `agent._render_final_response` must both call `resolve_vault_name(vault_root=VAULT_ROOT, ...)`.
+  Under Docker `SECOND_BRAIN_VAULT` is the **parent** that gets bind-mounted (`/vaults`) and the
+  active vault is its single child (`/vaults/ck`), so a caller that lets the helper fall back to
+  the env var renders the parent's basename: a plausible-looking `[vaults]` in the response while
+  the note's own frontmatter correctly says `ck`. Every test in `test_agent_callback.py` used to
+  set `VAULT_NAME` instead, which is a resolution step `docker-compose.yml` deliberately never
+  takes, so nothing covered the path production actually uses. Two tests now pin the parent/child
+  shape; if you touch either call site, they are the ones that will catch it.
 - **Notes record their own provenance.** `save_summary_to_second_brain` writes `generated_by_model` and `generated_in_vault` into the note frontmatter, read from the live invocation via the framework-injected `tool_context` (a parameter named `tool_context` is supplied by ADK and hidden from the model's schema — do not "fix" its absence from the JSON schema). Notes written **before** these fields existed have no recorded model; that is surfaced as `unknown` and never invented. Such a field is omitted entirely when unresolvable.
 - **Cache hits are untouched.** `report_scores_after_agent` returns `None` before any rendering when `state["vault_cache_hit"]` is true, so a stored note replays verbatim (including the old `## From the vault` shape in notes saved before this change). Scoring is likewise skipped on a hit, as before.
 

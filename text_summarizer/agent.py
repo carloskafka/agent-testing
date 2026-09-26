@@ -18,7 +18,12 @@ from .observability import (
     tag_trace_identity,
 )
 from .obsidian_tools import build_obsidian_tools
-from .second_brain import find_cached_summary, log_conversation, save_summary_to_second_brain
+from .second_brain import (
+    VAULT_ROOT,
+    find_cached_summary,
+    log_conversation,
+    save_summary_to_second_brain,
+)
 from .sources import (
     mcp_vault_name_from_events,
     render_sources,
@@ -281,13 +286,24 @@ def _render_final_response(callback_context):
     Both identifiers are resolved at runtime: the vault name via
     ``resolve_vault_name`` and the served model via ``Event.model_version``
     (see ``sources.py``). Nothing is hardcoded and nothing is asked of the model.
+
+    The resolved vault root has to be passed in explicitly. Under Docker
+    ``SECOND_BRAIN_VAULT`` is the *parent* that gets bind-mounted (``/vaults``)
+    and the active vault is its single child (``/vaults/ck``), so letting
+    ``resolve_vault_name`` fall back to the env var renders the parent's name --
+    a plausible-looking ``[vaults]`` where every note's frontmatter correctly
+    says ``ck``. ``second_brain.note_provenance`` already passes the root; this
+    is the same call on the response side.
     """
     events = _session_events(callback_context)
     text = _last_session_model_text(callback_context)
     if not text.strip():
         return None
 
-    vault = resolve_vault_name(mcp_reported=mcp_vault_name_from_events(events))
+    vault = resolve_vault_name(
+        vault_root=VAULT_ROOT,
+        mcp_reported=mcp_vault_name_from_events(events),
+    )
     model = served_model_from_events(events)
     rendered = render_sources(text, vault_name=vault.name, model_name=model)
     if rendered == text:
