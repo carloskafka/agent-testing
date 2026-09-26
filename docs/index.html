@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Text Summarizer Agent — ADK + Obsidian second brain</title>
+<meta name="description" content="An ADK text-summarization agent with an evaluation loop, an Obsidian second brain, and optional read-only Gmail access.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0;
+    --surface: #f6f8fa; --accent: #0969da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --line:#3d444d;
+            --surface:#161b22; --accent:#4493f8; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6; color: var(--fg); background: var(--bg);
+    margin: 0 auto; max-width: 46rem; padding: 3rem 1.5rem 5rem;
+  }
+  h1 { font-size: 1.9rem; margin: 0 0 .3rem; letter-spacing: -.02em; }
+  .tagline { color: var(--muted); margin: 0 0 2.5rem; font-size: 1.05rem; }
+  h2 { font-size: 1.15rem; margin: 2.5rem 0 .75rem; padding-bottom: .3rem;
+       border-bottom: 1px solid var(--line); letter-spacing: -.01em; }
+  p, li { color: var(--fg); }
+  .lede { margin: 0 0 .5rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: var(--surface); padding: .15em .4em; border-radius: 5px;
+         font-size: .88em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+        padding: .9rem 1rem; overflow-x: auto; font-size: .85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; font-size: 1em; }
+  ol, ul { padding-left: 1.3rem; }
+  li { margin: .3rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: .75rem 0; font-size: .93rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .82rem;
+       text-transform: uppercase; letter-spacing: .04em; }
+  td code { white-space: nowrap; }
+  .cards { list-style: none; padding: 0; margin: .5rem 0; }
+  .cards li { border: 1px solid var(--line); border-radius: 8px;
+              padding: .7rem .9rem; margin: .5rem 0; background: var(--surface); }
+  .cards b { display: block; }
+  .cards span { color: var(--muted); font-size: .93rem; }
+  footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: .88rem; }
+  .note { color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<h1>Text Summarizer Agent</h1>
+<p class="tagline">A text-summarization agent built on Google's <b>Agent Development Kit</b>,
+with an evaluation loop, an Obsidian <em>second brain</em>, and optional read-only Gmail access.</p>
+
+<p class="lede">Every turn is summarised into your vault as a linked note, so the notes
+form a graph you can browse in Obsidian. Ask the same thing again and it is answered
+<b>from the vault with no model call at all</b>.</p>
+
+<p class="lede">The part most people find interesting is the <b>evaluation loop</b>:
+edit the agent's instructions, run ADK evals, and watch the score change.</p>
+
+<h2>Quick start</h2>
+<ol>
+  <li>Get a free key at <a href="https://aistudio.google.com/app/apikey">Google AI Studio</a>
+      and put it in <code>GEMINI_API_KEY</code> in <code>.env</code>
+      (<code>./run.sh</code> creates that file from <code>.env.example</code> on first run).</li>
+  <li>Run it — this picks your vault, builds both containers and starts them:
+      <pre><code>./run.sh</code></pre></li>
+  <li>Open the agent web UI on your machine at <code>http://localhost:8001</code>
+      and try a prompt.</li>
+</ol>
+
+<h2>Optional integrations</h2>
+<p class="note">Everything except the model key is optional and loads automatically
+when configured.</p>
+<table>
+  <tr><th>Integration</th><th>Adds</th><th>Configure</th></tr>
+  <tr><td>OpenRouter</td><td>free models as a fallback when Gemini rate-limits you</td><td><code>MODEL_PROVIDER=openrouter</code></td></tr>
+  <tr><td>Langfuse</td><td>traces every turn: latency, cache hit/miss, quality scores</td><td><code>LANGFUSE_*</code></td></tr>
+  <tr><td>Gmail</td><td>read-only inbox tools</td><td><code>GOOGLE_CLIENT_ID</code>, <code>GOOGLE_CLIENT_SECRET</code>, <code>GOOGLE_REFRESH_TOKEN</code></td></tr>
+  <tr><td>Obsidian</td><td>retrieval tools over your vault</td><td>set by <code>./run.sh</code></td></tr>
+</table>
+
+<h2>Documentation</h2>
+<p class="note">These render on GitHub, not on this site — each link opens the
+Markdown source in the repository.</p>
+<ul class="cards">
+  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/getting-started.md">Getting started</a></b>
+      <span>Keys, running it, first prompts, troubleshooting</span></li>
+  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/EVALUATION.md">Evaluation loop</a></b>
+      <span>Criteria, running evals, hands-on experiments, auto-optimization</span></li>
+  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/INTEGRATIONS.md">Integrations</a></b>
+      <span>Read-only Gmail, and using an Obsidian vault you already have</span></li>
+  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/ARCHITECTURE.md">Architecture</a></b>
+      <span>How a turn flows, source provenance, vault selection, the cache, Docker topology</span></li>
+  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/MODELS.md">Models</a></b>
+      <span>Switching between Gemini and free OpenRouter models</span></li>
+  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/TESTING.md">Testing</a></b>
+      <span>Prompt examples for the web UI: good, bad, and edge cases</span></li>
+  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md">AGENTS.md</a></b>
+      <span>Why each design decision was made, and which traps are easy to fall into again</span></li>
+</ul>
+
+<footer>
+  <a href="https://github.com/carloskafka/agent-testing">github.com/carloskafka/agent-testing</a>
+  &middot; <code>./run.sh</code> to run, <code>adk eval</code> to measure.
+</footer>
+
+</body>
+</html>
