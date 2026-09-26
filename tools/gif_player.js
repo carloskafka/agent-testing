@@ -161,6 +161,26 @@
 
   /* --- player ------------------------------------------------------------- */
 
+  /* requestFullscreen needs a user gesture, which a click is, and is not
+   * available at all on some mobile browsers -- so the button is only built
+   * where it can work, rather than shipped as a control that does nothing.
+   *
+   * The element to display is the *receiver* of the call. Document
+   * .requestFullscreen() takes an options object, not an element, so
+   * documentElement.requestFullscreen(figure) full-screens the document and
+   * quietly discards the argument. */
+  var fullscreenEvent = document.fullscreenEnabled ? "fullscreenchange"
+                                                   : "webkitfullscreenchange";
+
+  var ICON_FULLSCREEN =
+    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
+  var ICON_FULLSCREEN_EXIT =
+    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>';
+
+  function activeFullscreen() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
   function GifPlayer(figure) {
     this.figure = figure;
     this.stage = figure.querySelector(".walkthrough__stage");
@@ -205,13 +225,22 @@
 
     var self = this;
     this.figure.addEventListener("click", function (ev) {
-      var btn = ev.target.closest ? ev.target.closest("[data-act]") : null;
+      /* Walk up by hand rather than relying on Element.closest: the click
+       * lands on the <path> inside the button's SVG, and closest() on SVG
+       * elements is exactly the sort of thing that differs between browsers.
+       * A control that silently swallows its click is the failure this whole
+       * player keeps having to be careful about, so do not lean on it. */
+      var btn = null;
+      for (var node = ev.target; node && node !== self.figure; node = node.parentNode) {
+        if (node.getAttribute && node.getAttribute("data-act")) { btn = node; break; }
+      }
       if (!btn) return;
       var act = btn.getAttribute("data-act");
       if (act === "play") { self.playing ? self.pause() : self.play(); }
       else if (act === "prev") { self.pause(); self.step(-1); }
       else if (act === "next") { self.pause(); self.step(1); }
       else if (act === "stop") { self.pause(); self.seekTo(0); self.guarded("stop", self.render); }
+      else if (act === "full") { self.toggleFullscreen(); }
     });
     this.seek.addEventListener("input", function () {
       self.pause();
@@ -225,7 +254,26 @@
       self.loop = ev.target.checked;
     });
 
-    this.buttons.forEach(function (b) { b.disabled = true; });
+    this.fullBtn = this.el('[data-act="full"]');
+    if (this.fullBtn) {
+      var canFull = !!(this.figure.requestFullscreen || this.figure.webkitRequestFullscreen);
+      if (!canFull) {
+        this.fullBtn.remove();
+        this.fullBtn = null;
+      } else {
+        /* No listener of its own: the figure delegates every [data-act] click,
+         * so the button is already wired. Only the document-wide state change
+         * needs subscribing, because Escape and the browser's own exit never
+         * pass through here. */
+        document.addEventListener(fullscreenEvent, function () { self.syncFullscreen(); });
+      }
+    }
+
+    /* Play stays live while the bytes are in flight so the click can be queued;
+     * stepping and seeking need a decoded frame, so they start disabled. */
+    this.buttons.forEach(function (b) {
+      if (b.getAttribute("data-act") !== "play") b.disabled = true;
+    });
     this.seek.disabled = true;
     this.setStatus("Loads when it scrolls into view");
   };
@@ -266,6 +314,7 @@
   };
 
   GifPlayer.prototype.fallback = function () {
+    this.wantPlay = false;
     this.stage.setAttribute("data-state", "native");
     this.poster.setAttribute("src", this.src);
     var bar = this.el(".player");
@@ -318,7 +367,10 @@
     this.stage.setAttribute("data-state", "ready");
     this.setStatus("");
 
-    if (!window.matchMedia || !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (this.wantPlay) {
+      this.wantPlay = false;          // asked for while the bytes were in flight
+      this.play();
+    } else if (!window.matchMedia || !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       this.play();
     } else {
       this.setStatus("Reduced motion: press play");
@@ -425,10 +477,17 @@
   GifPlayer.prototype.advance = function (now) {
     /* A backgrounded tab stops rAF and comes back with one enormous delta;
      * clamping keeps that from fast-forwarding through the whole recording. */
-    var dt = Math.min(now - this.last, 250);
+    /* Clamped at both ends: a backgrounded tab comes back with an enormous
+     * delta, and rAF's timestamp is the frame's start time, which can predate
+     * the performance.now() that seeded `last`, making the first delta
+     * slightly negative. */
+    var dt = Math.max(0, Math.min(now - this.last, 250));
     this.last = now;
     this.acc += dt * this.speed;
-    var guard = this.gif.frames.length * 2;
+    /* Each pass consumes at least MIN_FRAME_MS, and acc can grow by at most
+     * 250ms * speed, so this is unreachable in practice -- it is here so that a
+     * future edit to the clamps cannot turn into a hang. */
+    var guard = 64;
     while (guard-- > 0 && this.acc >= this.delayOf(this.index)) {
       this.acc -= this.delayOf(this.index);
       if (this.index >= this.gif.frames.length - 1) {
@@ -446,7 +505,18 @@
   };
 
   GifPlayer.prototype.play = function () {
-    if (!this.gif) return;
+    if (!this.gif) {
+      /* Pressed before the bytes arrived. A recording is a couple of hundred
+       * kilobytes and the load starts when the figure comes within 300px of
+       * the viewport, so this is the window a reader who scrolls straight to
+       * the controls and hits play lands in. Swallowing the click silently is
+       * indistinguishable from a broken button, so keep the intent and start
+       * the moment it can. */
+      this.wantPlay = true;
+      this.setStatus("Loading the recording…");
+      this.load();
+      return;
+    }
     this.canvas.hidden = false;   // laid over the poster, which stays put
     this.playing = true;
     this.last = window.performance ? performance.now() : Date.now();
@@ -461,11 +531,45 @@
   };
 
   GifPlayer.prototype.pause = function () {
+    this.wantPlay = false;
     if (!this.playing) return;
     this.playing = false;
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.setPlayIcon(false);
+  };
+
+  /* The figure rather than the image: the controls are inside it, and going
+   * full-screen with the transport left behind is no better than not having it.
+   * Escape and the browser's own exit both fire fullscreenchange, so the icon
+   * is synced from the document's state rather than from what we last asked
+   * for. */
+  GifPlayer.prototype.toggleFullscreen = function () {
+    var request = this.figure.requestFullscreen || this.figure.webkitRequestFullscreen;
+    var exit = document.exitFullscreen || document.webkitExitFullscreen;
+    try {
+      if (activeFullscreen()) {
+        if (exit) exit.call(document);
+      } else if (request) {
+        request.call(this.figure);
+      }
+    } catch (err) {
+      /* Refused -- no user activation, or a policy. Say so rather than
+       * leaving a button that appears to have done nothing. */
+      this.setStatus("Full screen was refused by the browser");
+    }
+    /* Read the state back instead of trusting the call: a browser can turn the
+     * request into a window-level fullscreen, and an exit can quietly do
+     * nothing, so the icon follows the document rather than our intent. */
+    var self = this;
+    window.setTimeout(function () { self.syncFullscreen(); }, 60);
+  };
+
+  GifPlayer.prototype.syncFullscreen = function () {
+    if (!this.fullBtn) return;
+    var on = !!activeFullscreen();
+    this.fullBtn.setAttribute("aria-label", on ? "Exit full screen" : "Full screen");
+    this.fullBtn.innerHTML = on ? ICON_FULLSCREEN_EXIT : ICON_FULLSCREEN;
   };
 
   GifPlayer.prototype.setPlayIcon = function (playing) {
