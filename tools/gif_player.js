@@ -195,6 +195,7 @@
     this.playing = false;
     this.drawn = -1;
     this.raf = 0;
+    this.watchdog = 0;
     this.visible = false;
     this.wasPlaying = false;
     this.canvas = null;
@@ -314,12 +315,7 @@
   };
 
   GifPlayer.prototype.fallback = function () {
-    this.wantPlay = false;
-    this.stage.setAttribute("data-state", "native");
-    this.poster.setAttribute("src", this.src);
-    var bar = this.el(".player");
-    if (bar) bar.remove();
-    this.setStatus("Playing natively (controls unavailable)");
+    this.native("This browser would not let the page read the file");
   };
 
   GifPlayer.prototype.lut = function (pal) {
@@ -434,6 +430,43 @@
     }
     this.drawn = i;
     this.update();
+    this.clearWatchdog();
+  };
+
+  /* If the animation loop is not actually running -- rAF never fires, or every
+   * pass throws in a way the status line did not catch -- the reader is left
+   * staring at a frozen box with controls that do nothing. That is the worst
+   * outcome available, and it is strictly better to hand the file back to the
+   * browser, which animates a GIF natively everywhere, and drop the controls
+   * rather than leave them lying. Give the loop a moment to prove itself
+   * first, because a slow first frame is not a failure. */
+  GifPlayer.prototype.armWatchdog = function () {
+    var self = this;
+    this.clearWatchdog();
+    if (this.gif.frames.length < 2) return;      // a single frame cannot advance
+    this.watchdog = window.setTimeout(function () {
+      self.watchdog = 0;
+      if (self.moved) return;
+      self.native("Animation did not start");
+    }, 2000);
+  };
+
+  GifPlayer.prototype.clearWatchdog = function () {
+    if (this.watchdog) { window.clearTimeout(this.watchdog); this.watchdog = 0; }
+  };
+
+  /* Back to a plain animated <img>, which is what a browser does with a GIF
+   * when nobody interferes with it. */
+  GifPlayer.prototype.native = function (why) {
+    this.pause();
+    this.clearWatchdog();
+    if (this.canvas) { this.canvas.remove(); this.canvas = null; }
+    this.poster.hidden = false;
+    this.poster.setAttribute("src", this.src);
+    var bar = this.el(".player");
+    if (bar) bar.remove();
+    this.stage.setAttribute("data-state", "native");
+    if (why) this.stage.setAttribute("data-why", why);
   };
 
   GifPlayer.prototype.elapsed = function () {
@@ -500,6 +533,7 @@
         this.index = -1;                 // wrap: the next step draws frame 0
       }
       this.index++;
+      this.moved = true;
       this.render();
     }
   };
@@ -526,12 +560,15 @@
      * makes the button self-healing if the loop was ever lost, and stops "the
      * play button does nothing" from being a reachable state. */
     if (this.raf) cancelAnimationFrame(this.raf);
+    this.moved = false;
     this.raf = requestAnimationFrame(this.tick);
     this.guarded("first frame", this.render);
+    this.armWatchdog();
   };
 
   GifPlayer.prototype.pause = function () {
     this.wantPlay = false;
+    this.clearWatchdog();
     if (!this.playing) return;
     this.playing = false;
     if (this.raf) cancelAnimationFrame(this.raf);
@@ -585,6 +622,7 @@
     var n = this.gif.frames.length;
     this.index = Math.max(0, Math.min(n - 1, this.index + delta));
     this.acc = 0;
+    this.moved = true;
     this.guarded("step", this.render);
   };
 
