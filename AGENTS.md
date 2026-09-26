@@ -20,6 +20,7 @@ agent-testing/
 |-- Dockerfile.obsidian-mcp     # Standalone obsidian-mcp HTTP server on :37842
 |-- resolve-vault.sh            # Startup vault resolver for that server (mirrors second_brain.resolve_vault_root)
 |-- run-agent.ps1               # Windows helper: adk web --port 8000 text_summarizer
+|-- patch-adk-devui-mobile.py   # Injects 100dvh/safe-area CSS into the bundled ADK dev UI (see below)
 |-- .env / .env.example         # Model provider + observability + MCP config (keys)
 |-- .dockerignore / .gitignore
 |-- docs/                       # Split-out documentation (EVALUATION, TESTING, MODELS,
@@ -53,6 +54,7 @@ agent-testing/
         |-- test_trace_identity.py         # before_agent_callback: trace name + userId/sessionId
         |-- test_vaults.py                 # Vault selection + resolve-vault.sh parity
         |-- test_run_script.py             # run.sh: discovery, menu, import, .env persistence
+        |-- test_adk_devui_patch.py       # The mobile patch + its guards against ADK drift
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
             |-- summarizer_eval_set.evalset.json # 4 eval cases
@@ -236,6 +238,76 @@ Only the schema sent to the model changes — arguments are still forwarded to t
 - Enabled only when all three of `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` are set; otherwise returns `[]` (no tools).
 - Tool filter: `gmail_search`, `gmail_get_latest_messages`, `gmail_read`, `gmail_get_thread`.
 - Credentials: the client id/secret come from a Desktop-app OAuth client in the Google Cloud Console; the refresh token is minted once via `python -m text_summarizer.gmail_oauth` (opens a browser, read-only scope `gmail.readonly`).
+
+### The ADK dev UI on a phone — `patch-adk-devui-mobile.py`
+
+`adk web` serves a **prebuilt** Angular app from `google/adk/cli/browser/index.html`
+inside the installed wheel. It is a desktop developer tool with no mobile support,
+and the failure is specific: **messages render fine, the chat composer does not.**
+
+Measured across both of its style blocks and all 100 JS bundles:
+
+| | occurrences |
+|---|---|
+| `dvh` / `svh` | **0** |
+| `safe-area-inset-*` | **0** |
+| `viewport-fit=cover` | absent |
+
+Three layers pin their height to the legacy `100vh`, and two of them hide overflow:
+
+```css
+body                     { height:100vh; overflow:hidden }
+[_nghost-*]              { height:100vh; overflow:hidden }   /* app shell */
+.builder-mode-container  { height:100vh }
+```
+
+On a phone `100vh` is the **largest** viewport — the height you get with the URL bar
+retracted — not the visible one, so the shell is 15–20% taller than the screen. The
+composer is the last row of that fixed-height flex column, so it lands below the
+fold, and because `body` and the shell are both `overflow:hidden` the overflow is
+**unreachable**: no scrolling, no pinch-zoom. The on-screen keyboard then halves the
+visible height and the composer is gone entirely.
+
+It is not a width problem, which is why the symptom is so specific: the chat bubbles
+are `max-width:800px` in a centred flex column and shrink correctly. The breakage is
+purely vertical.
+
+**The patch** (`RUN` step in `Dockerfile`, after `uv sync` so it cannot be clobbered)
+injects one stylesheet before `</head>` rather than rewriting vendor rules, so it is
+verifiable and removable. Everything is wrapped in `@supports (height: 100dvh)`, so a
+browser without it keeps vendor behaviour untouched:
+
+- `100dvh` heights on `html`, `body` and `app-root` — this is the actual fix, and it
+  is what makes the URL bar *and* the keyboard behave
+- `padding-bottom: calc(20px + env(safe-area-inset-bottom))` on `.chat-input-container`
+- `.assistant-panel` capped to `min(400px, 100vw)` (it is a hard 400px, which
+  overflows a 390px phone)
+
+It also edits the viewport meta, which CSS cannot reach: `viewport-fit=cover`
+(without it `env(safe-area-inset-*)` is always `0`, so the CSS above would be inert
+on a notched device) and `interactive-widget=resizes-content` (Chromium overlays the
+keyboard by default, covering the composer; Safari has no equivalent and relies on
+`dvh`).
+
+**Why bare class names, not the app's own selectors.** Every rule in the bundle is
+qualified with `[_ngcontent-<hash>]`, and that hash is rebuilt per ADK release, so
+there is no stable selector to write. The overrides match `.chat-input-container` and
+`.assistant-panel` by class and use `!important`, which beats a higher-specificity
+vendor rule. `app-root` is a tag name and is stable.
+
+**The known weakness, stated plainly:** because the overrides key on class names, an
+ADK release that renames them would make the fix silently stop applying — no error,
+just the old broken composer. The script therefore asserts the strings it depends on
+and **exits non-zero if they are gone, failing the Docker build** rather than shipping
+a patch that does nothing. `tests/test_adk_devui_patch.py` additionally asserts those
+assumptions against the *installed* package, so the next `uv sync` surfaces a
+dependency upgrade in seconds instead of on someone's phone. Idempotent: the marker
+comment makes a re-run a no-op, and it is verified byte-for-byte on the real file.
+
+**Not verified:** no mobile browser was available here, so the visual result is
+unconfirmed. What *is* confirmed is that the served page carries the patch (marker
+present, 6 × `100dvh`, correct meta, vendor rule intact, injected exactly once before
+`</head>`). Check it on a real device before calling it fixed.
 
 ### Docker topology — `docker-compose.yml`
 
