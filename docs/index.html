@@ -147,6 +147,7 @@ h1, h2, h3 { margin: 0; font-weight: 400; letter-spacing: -.01em; }
 h1 { font-size: 2.25rem; line-height: 2.75rem; }   /* headline-medium */
 h2 { font-size: 1.5rem;  line-height: 2rem;     }   /* headline-small */
 h3 { font-size: 1.375rem; line-height: 1.75rem; font-weight: 500; } /* title-large */
+h4 { margin: 0; font-size: 1rem; line-height: 1.5rem; font-weight: 500; } /* title-medium */
 p  { margin: 0 0 1rem; }
 a  { color: var(--primary); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -427,6 +428,170 @@ td code { white-space: nowrap; }
 }
 .note .icon { color: var(--primary); }
 
+/* --- End-to-end walkthroughs ------------------------------------------------
+
+   Three recordings of the agent running, with transport controls. The GIFs are
+   the only raster assets on the page, so they get a dark surface of their own
+   rather than a border on the light theme: a recording is a dark UI, and
+   framing it as an inset panel stops the flash of a black rectangle.
+
+   The player is hand-written rather than pulled from a CDN, for the same reason
+   the styles are inlined: the page has to work with no build step and no
+   network. It decodes the GIF itself (see the script at the foot of the page)
+   because CSS cannot pause an animated image, and "play/pause" on a plain
+   <img> does not exist. --- */
+
+.walkthrough { margin-top: 1.75rem; scroll-margin-top: calc(var(--app-bar-h) + 16px); }
+.walkthrough > h4 { scroll-margin-top: calc(var(--app-bar-h) + 16px); }
+
+.walkthrough__head {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px;
+  margin-bottom: 10px;
+}
+.walkthrough__head h4 { margin: 0; }
+
+.walkthrough .figure { margin: 0; }
+
+.walkthrough__stage {
+  position: relative;
+  border-radius: var(--shape-md);
+  border: 1px solid var(--outline-variant);
+  background: #0d1014;
+  overflow: hidden;
+}
+.walkthrough__stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 920 / 640;
+  background: #0d1014;
+}
+/* The canvas is laid over the poster at the poster's size and only shown once
+   the frames are decoded; before that the poster is what the reader sees. */
+.walkthrough__stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #0d1014;
+}
+/* [hidden] is a UA rule, so an explicit display here would beat it. */
+.walkthrough__stage [hidden] { display: none; }
+
+/* While the bytes are in flight the poster stays put; the status line says so,
+   rather than the frame flashing empty. */
+.walkthrough__stage[data-state="loading"]::after {
+  content: "";
+  position: absolute; inset: auto 0 0 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: player-load 1.1s linear infinite;
+}
+@keyframes player-load {
+  from { background-position: -40% 0; }
+  to   { background-position: 140% 0; }
+}
+
+.player { margin-top: 10px; }
+
+.player__seek {
+  display: block;
+  width: 100%;
+  height: 28px;                 /* a comfortable touch target, thin track */
+  margin: 0;
+  accent-color: var(--primary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.player__row {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.player__btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px;
+  border: 0; border-radius: var(--shape-full);
+  background: transparent;
+  color: var(--on-surface);
+  cursor: pointer;
+  transition: background-color var(--dur-short) var(--ease-standard);
+}
+.player__btn:hover { background: color-mix(in srgb, var(--on-surface) 10%, transparent); }
+.player__btn:active { background: color-mix(in srgb, var(--on-surface) 14%, transparent); }
+.player__btn .icon { width: 22px; height: 22px; }
+.player__btn[data-act="play"] {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+.player__btn[data-act="play"]:hover {
+  background: color-mix(in srgb, var(--primary-container) 88%, var(--primary));
+}
+.player__btn:disabled { opacity: .38; cursor: default; }
+.player__btn:disabled:hover { background: transparent; }
+
+.player__time {
+  font-family: var(--mono);
+  font-size: .75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--on-surface-variant);
+  white-space: nowrap;
+}
+
+.player__field,
+.player__check {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: .75rem;
+  color: var(--on-surface-variant);
+  white-space: nowrap;
+}
+.player__field select {
+  font: inherit;
+  font-size: .75rem;
+  color: var(--on-surface);
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--shape-xs);
+  padding: 3px 6px;
+  cursor: pointer;
+}
+.player__check input { accent-color: var(--primary); margin: 0; }
+
+.player__status {
+  font-size: .6875rem;
+  color: var(--on-surface-variant);
+  margin-left: auto;
+}
+
+.walkthrough figcaption {
+  margin-top: 10px;
+  font-size: .8125rem;
+  line-height: 1.5;
+  color: var(--on-surface-variant);
+}
+.walkthrough figcaption .num { font-weight: 500; color: var(--on-surface); }
+.walkthrough figcaption a { white-space: nowrap; }
+
+/* The per-scene legend: a compact index of what the recording actually shows,
+   so it is legible before it plays and findable after it does. */
+.walkthrough__foot {
+  display: flex; flex-wrap: wrap; gap: 6px 8px;
+  margin: 10px 0 0;
+  padding: 0; list-style: none;
+}
+.walkthrough__foot li {
+  font-family: var(--mono);
+  font-size: .6875rem;
+  color: var(--on-surface-variant);
+  background: var(--surface-container);
+  border-radius: var(--shape-xs);
+  padding: 3px 7px;
+}
+
 .footer {
   max-width: 60rem; margin: 0 auto;
   padding: 24px var(--gutter) 8px;
@@ -575,12 +740,139 @@ td code { white-space: nowrap; }
       everything else exists to make the loop measurable.
     </p>
 
-    <div class="note">
+    <!-- End to end ------------------------------------------------------------>
+
+    <h3 id="h-e2e">End to end</h3>
+    <p>
+      Three recordings of the agent actually running, in the order the work
+      happens. Same agent, same rules, same vault in all three — only the entry
+      point differs. The screenshots are the dev UI at <code>:8001</code> taken
+      while a real turn was in flight; the panels are read back out of the live
+      vault or transcribed from the code, never invented.
+    </p>
+
+    <ul class="chips">
+      <li class="chip"><a href="#e2e-main">Main flow</a></li>
+      <li class="chip"><a href="#e2e-obsidian">Obsidian graph &amp; look-up</a></li>
+      <li class="chip"><a href="#e2e-gmail">Gmail summarization</a></li>
+    </ul>
+
+    <article class="walkthrough" aria-labelledby="e2e-main">
+      <div class="walkthrough__head">
+        <h4 id="e2e-main">Main flow — text in, note out, repeat for free</h4>
+        <span class="tag">6 scenes</span>
+      </div>
+      <figure class="figure">
+        <div class="walkthrough__stage" data-state="idle">
+          <img src="assets/e2e-main-still.png" width="920" height="640" decoding="async"
+               alt="Recording of the ADK dev UI running one summarization turn. The prompt sits
+                    in the composer, then the event stream fills in with save_summary_to_second_brain
+                    and log_conversation; the answer comes back as four bullets and a line naming
+                    the note it saved. A second panel shows the model's own event with the
+                    @@ADK_VAULT@@ and @@ADK_MODEL@@ sentinels next to the response the reader
+                    actually gets, with the real vault and model substituted. The note that landed
+                    on disk is shown with its frontmatter — date, fingerprint, generated_by_model,
+                    generated_in_vault — and the same question asked again replays it in two
+                    events with no model call.">
+        </div>
+        <figcaption>
+          <span class="num">What to watch:</span> the cache key is hashed from the user's own
+          message in code, which is why the last scene costs 0.04&nbsp;s instead of half a
+          minute — and why <code>save_summary_to_second_brain</code> never asks the model to
+          repeat the text back.
+          <a href="assets/e2e-main.gif">Open the GIF on its own</a>.
+        </figcaption>
+      </figure>
+      <ul class="walkthrough__foot">
+        <li>1 the prompt</li>
+        <li>2 the turn runs</li>
+        <li>3 the answer</li>
+        <li>4 Sources written in code</li>
+        <li>5 on disk, in the vault</li>
+        <li>6 ask it again</li>
+      </ul>
+    </article>
+
+    <article class="walkthrough" aria-labelledby="e2e-obsidian">
+      <div class="walkthrough__head">
+        <h4 id="e2e-obsidian">Obsidian graph &amp; look-up — retrieve before you answer</h4>
+        <span class="tag">6 scenes</span>
+      </div>
+      <figure class="figure">
+        <div class="walkthrough__stage" data-state="idle">
+          <img src="assets/e2e-obsidian-still.png" width="920" height="640" decoding="async"
+               alt="Recording and live-vault panels covering the second brain. The first panel
+                    lists the real vault as it is on disk — dated notes under Second Brain, topic
+                    stubs under Topics, the index and the chat log — with the rules for choosing
+                    one vault. A second recording shows the agent calling search_text before it
+                    answers. The notes it found are shown with their real titles, first bullets
+                    and wiki links, followed by the citations in the real response, then what a
+                    single save writes: one dated note, a stub per topic, one index line, one
+                    chat-log entry. The last panel draws the graph those links make, with every
+                    edge a real wikilink from a real note.">
+        </div>
+        <figcaption>
+          <span class="num">What to watch:</span> retrieval happens <em>before</em> the summary,
+          and the graph needs no maintenance — every save links the note to its topic stubs and
+          the hub on its way past. The same files are what Obsidian opens; there is no plugin and
+          no index to keep.
+          <a href="assets/e2e-obsidian.gif">Open the GIF on its own</a>.
+        </figcaption>
+      </figure>
+      <ul class="walkthrough__foot">
+        <li>1 one vault, real files</li>
+        <li>2 rule 7: retrieve first</li>
+        <li>3 the notes it found</li>
+        <li>4 the citations</li>
+        <li>5 one save, four writes</li>
+        <li>6 the graph it grows</li>
+      </ul>
+    </article>
+
+    <article class="walkthrough" aria-labelledby="e2e-gmail">
+      <div class="walkthrough__head">
+        <h4 id="e2e-gmail">Gmail summarization — read-only inbox, same second brain</h4>
+        <span class="tag">5 scenes</span>
+      </div>
+      <figure class="figure">
+        <div class="walkthrough__stage" data-state="idle">
+          <img src="assets/e2e-gmail-still.png" width="920" height="640" decoding="async"
+               alt="Recording and panels covering a Gmail turn. The first panel lists the three
+                    GOOGLE_ variables and the read-only gmail.readonly scope, and the four tools
+                    they add. A recording then shows the question being asked and the real
+                    searches the agent builds: gmail_get_latest_messages, then gmail_search with
+                    a subject: query and a from: query. The answer says plainly that no manager
+                    mail was found rather than inventing any, and the last panel shows the turn
+                    being saved through the same second-brain path as any other.">
+        </div>
+        <figcaption>
+          <span class="num">What to watch:</span> nothing is special-cased. An inbox turn reuses
+          the same summarizer, the same rules and the same vault; the only difference is which
+          tools ran first. This recording's inbox had no manager mail, and the honest answer is
+          the point — rule 11 forbids inventing email content.
+          <a href="assets/e2e-gmail.gif">Open the GIF on its own</a>.
+        </figcaption>
+      </figure>
+      <ul class="walkthrough__foot">
+        <li>1 read-only, or nothing</li>
+        <li>2 a question about the inbox</li>
+        <li>3 the phrasing picks the query</li>
+        <li>4 nothing found is reported</li>
+        <li>5 saved like any other turn</li>
+      </ul>
+    </article>
+
+    <div class="note" style="margin-top:1.5rem">
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-2h2zm0-4h-2V7h2z"/></svg>
-      <span>Every design decision and the traps behind it are recorded in
-      <a href="https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md" rel="noopener">AGENTS.md</a> —
-      read it before changing anything in the agent package.</span>
+      <span>
+        Recorded, not staged: <code>tools/capture_ui.py</code> drives the real dev UI in
+        Firefox and screenshots it mid-turn, and <code>tools/build_gifs.py</code> assembles the
+        frames — reading the notes, topics and links it shows straight out of the live vault.
+        Re-record with <code>sh tools/check_stack.sh</code> first; that script exists because a
+        half-restarted stack produces a <em>plausible</em> recording of a broken run.
+      </span>
     </div>
+
   </section>
 
   <!-- Quick start ---------------------------------------------------------->
@@ -877,6 +1169,48 @@ breeds, varying in size, color, and temperament.</code></pre>
   <a href="https://github.com/carloskafka/agent-testing/issues" rel="noopener">Issues</a>
 </footer>
 
+
+<!-- Transport controls, cloned into each recording by the player below. Kept in a
+     template so the three filmstrips share one definition. -->
+<template id="gifPlayerControls">
+  <div class="player">
+    <input class="player__seek" type="range" min="0" max="0" step="1" value="0"
+           aria-label="Seek within the recording">
+    <div class="player__row">
+      <button class="player__btn" type="button" data-act="play" aria-label="Play">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="player__btn" type="button" data-act="prev" aria-label="Previous frame">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+      </button>
+      <button class="player__btn" type="button" data-act="next" aria-label="Next frame">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18l8.5-6L6 6zm10-12v12h2V6z"/></svg>
+      </button>
+      <button class="player__btn" type="button" data-act="stop" aria-label="Stop and return to the first frame">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>
+      </button>
+      <span class="player__time">
+        <span data-role="pos">0.0s</span> / <span data-role="dur">0.0s</span>
+        &middot; frame <span data-role="frame">1</span>/<span data-role="count">1</span>
+      </span>
+      <label class="player__field">Speed
+        <select data-role="speed" aria-label="Playback speed">
+          <option value="0.25">0.25&times;</option>
+          <option value="0.5">0.5&times;</option>
+          <option value="1" selected>1&times;</option>
+          <option value="1.5">1.5&times;</option>
+          <option value="2">2&times;</option>
+          <option value="4">4&times;</option>
+        </select>
+      </label>
+      <label class="player__check">
+        <input type="checkbox" data-role="loop" checked> Loop
+      </label>
+      <span class="player__status" data-role="status" role="status"></span>
+    </div>
+  </div>
+</template>
+
 <script>
 (function () {
   "use strict";
@@ -1021,6 +1355,509 @@ breeds, varying in size, color, and temperament.</code></pre>
   render.navigated = false;
   render();
 })();
+</script>
+<script>
+/* === GIF PLAYER (generated by tools/inject_player.py) === */
+/* A GIF transport for the walkthroughs on this page.
+ *
+ * Why this exists: CSS cannot pause an animated image. There is no standard way
+ * to seek one, slow one down, or step it a frame at a time, so a plain <img>
+ * gives a reader exactly one control -- none. And the alternative, a media
+ * player library, would mean a CDN request, which this page deliberately does
+ * not make: everything else here is inlined so the page renders with no build
+ * step and no network, and a font or CDN outage should degrade to a system
+ * font rather than an unstyled page.
+ *
+ * So the GIF is decoded here. The LZW pass and the frame compositing were
+ * verified frame-for-frame against Pillow's own decoder on all three
+ * recordings (tools/verify_gif.js) -- the composed output is byte-identical, so
+ * what a reader sees under the controls is what a browser would show natively.
+ *
+ * Behaviour worth knowing:
+ *   - The bytes are fetched once and shared between figures, and only when a
+ *     figure is about to scroll into view. Without that, opening the page
+ *     would pull all three recordings at once.
+ *   - prefers-reduced-motion is honoured: the poster stays and nothing plays
+ *     until the reader presses play.
+ *   - If fetch fails -- notably when this file is opened straight off disk,
+ *     where file:// blocks it -- the figure falls back to a native <img> and
+ *     the controls are removed rather than left there doing nothing.
+ */
+(function () {
+  "use strict";
+
+  var MIN_FRAME_MS = 20;   // browsers clamp short GIF delays; do it explicitly
+  var SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4];
+
+  /* --- decoder ------------------------------------------------------------ */
+
+  function lzwDecode(minCodeSize, data, pixelCount) {
+    var clear = 1 << minCodeSize;
+    var eoi = clear + 1;
+    var prefix = new Int32Array(4096);
+    var suffix = new Uint8Array(4096);
+    var out = new Uint8Array(pixelCount);
+    var stack = new Uint8Array(4096);
+    var next = eoi + 1;
+    var size = minCodeSize + 1;
+    var bitBuf = 0, bits = 0, dp = 0, o = 0, prev = -1;
+
+    while (o < pixelCount) {
+      while (bits < size) {
+        if (dp >= data.length) return out;
+        bitBuf |= data[dp++] << bits;
+        bits += 8;
+      }
+      var code = bitBuf & ((1 << size) - 1);
+      bitBuf >>>= size;
+      bits -= size;
+
+      if (code === clear) { next = eoi + 1; size = minCodeSize + 1; prev = -1; continue; }
+      if (code === eoi) break;
+
+      var sp = 0, c = code, firstByte, extra = -1;
+      if (code < next) {
+        while (c > eoi) { stack[sp++] = suffix[c]; c = prefix[c]; }
+        firstByte = c;
+      } else if (code === next && prev >= 0) {
+        /* The one code that is allowed to be not in the table yet: it is the
+         * entry being added right now, so it expands to prev + prev's head. */
+        extra = sp;
+        stack[sp++] = 0;
+        c = prev;
+        while (c > eoi) { stack[sp++] = suffix[c]; c = prefix[c]; }
+        firstByte = c;
+        stack[extra] = firstByte;
+      } else {
+        break;                       // corrupt stream: stop rather than loop
+      }
+
+      stack[sp++] = firstByte;
+      while (sp > 0) out[o++] = stack[--sp];
+
+      if (prev >= 0 && next < 4096) {
+        prefix[next] = prev;
+        suffix[next] = firstByte;
+        next++;
+        /* Widen exactly when the next code would no longer fit. Grown a step
+         * early the stream desynchronises within a few codes; grown late, it
+         * reads the tail as noise. */
+        if (next === (1 << size) && size < 12) size++;
+      }
+      prev = code;
+    }
+    return out;
+  }
+
+  function decodeGif(bytes) {
+    var p = 0;
+    function u16() { var v = bytes[p] | (bytes[p + 1] << 8); p += 2; return v; }
+    function palette(n) { var b = bytes.subarray(p, p + n * 3); p += n * 3; return b; }
+    function skipSubBlocks() { for (;;) { var n = bytes[p++]; if (!n) return; p += n; } }
+
+    if (String.fromCharCode(bytes[0], bytes[1], bytes[2]) !== "GIF") {
+      throw new Error("not a GIF");
+    }
+    p = 6;
+    var width = u16(), height = u16();
+    var packed = bytes[p]; p += 3;
+    var shared = (packed & 0x80) ? palette(1 << ((packed & 7) + 1)) : null;
+
+    var frames = [], gce = null;
+    while (p < bytes.length) {
+      var block = bytes[p++];
+      if (block === 0x3B) break;                       // trailer
+      if (block === 0x21) {                           // extension
+        var label = bytes[p++];
+        if (label === 0xF9) {                         // graphic control
+          var size = bytes[p++];
+          var flags = bytes[p++];
+          var delay = u16();
+          var transparent = bytes[p++];
+          p += size - 4;
+          skipSubBlocks();
+          gce = {
+            delay: delay * 10,
+            disposal: (flags >> 2) & 7,
+            transparent: (flags & 1) ? transparent : -1
+          };
+        } else if (label === 0xFF) {                  // application: loop count
+          var asize = bytes[p++];
+          var name = String.fromCharCode.apply(null, bytes.subarray(p, p + asize));
+          p += asize;
+          skipSubBlocks();
+          if (name === "NETSCAPE2.0") gce = gce;     // parsed and discarded
+        } else {
+          skipSubBlocks();
+        }
+        continue;
+      }
+      if (block !== 0x2C) break;                      // image descriptor
+      var left = u16(), top = u16(), w = u16(), h = u16();
+      var ipacked = bytes[p++];
+      var local = (ipacked & 0x80) ? palette(1 << ((ipacked & 7) + 1)) : null;
+      var minCode = bytes[p++];
+
+      /* Sub-blocks are length-prefixed, so the payload has to be concatenated:
+       * handing the raw span to the LZW reader feeds it the lengths as if they
+       * were pixels and the stream desynchronises immediately. */
+      var parts = [], total = 0, n;
+      for (;;) { n = bytes[p++]; if (!n) break; parts.push(bytes.subarray(p, p + n)); total += n; p += n; }
+      var stream = new Uint8Array(total), off = 0, i;
+      for (i = 0; i < parts.length; i++) { stream.set(parts[i], off); off += parts[i].length; }
+
+      frames.push({
+        left: left, top: top, width: w, height: h,
+        palette: local || shared,
+        delay: gce ? gce.delay : 0,
+        disposal: gce ? gce.disposal : 0,
+        transparent: gce ? gce.transparent : -1,
+        indices: lzwDecode(minCode, stream, w * h)
+      });
+      gce = null;
+    }
+    return { width: width, height: height, frames: frames };
+  }
+
+  /* --- player ------------------------------------------------------------- */
+
+  function GifPlayer(figure) {
+    this.figure = figure;
+    this.stage = figure.querySelector(".walkthrough__stage");
+    this.poster = this.stage.querySelector("img");
+    this.src = figure.getAttribute("data-gif") ||
+               (this.poster.getAttribute("src") || "").replace("-still.png", ".gif");
+    this.gif = null;
+    this.index = 0;
+    this.acc = 0;
+    this.speed = 1;
+    this.loop = true;
+    this.playing = false;
+    this.drawn = -1;
+    this.raf = 0;
+    this.visible = false;
+    this.wasPlaying = false;
+    this.canvas = null;
+    this.ctx = null;
+    this.scratch = null;
+    this.sctx = null;
+    this.luts = new Map();
+    this.build();
+  }
+
+  GifPlayer.prototype.el = function (sel) { return this.figure.querySelector(sel); };
+
+  GifPlayer.prototype.build = function () {
+    var tpl = document.getElementById("gifPlayerControls");
+    if (!tpl) return;
+    var bar = tpl.content.cloneNode(true);
+    /* Directly under the image, not at the end of the figure: the controls
+     * belong to the recording, and the caption reads better after them. */
+    this.stage.parentNode.insertBefore(bar, this.stage.nextSibling);
+    this.seek = this.el("[data-role=seek], .player__seek");
+    this.posOut = this.el("[data-role=pos]");
+    this.durOut = this.el("[data-role=dur]");
+    this.frameOut = this.el("[data-role=frame]");
+    this.countOut = this.el("[data-role=count]");
+    this.status = this.el("[data-role=status]");
+    this.playBtn = this.el('[data-act="play"]');
+    this.buttons = Array.prototype.slice.call(this.figure.querySelectorAll(".player__btn"));
+
+    var self = this;
+    this.figure.addEventListener("click", function (ev) {
+      var btn = ev.target.closest ? ev.target.closest("[data-act]") : null;
+      if (!btn) return;
+      var act = btn.getAttribute("data-act");
+      if (act === "play") { self.playing ? self.pause() : self.play(); }
+      else if (act === "prev") { self.pause(); self.step(-1); }
+      else if (act === "next") { self.pause(); self.step(1); }
+      else if (act === "stop") { self.pause(); self.seekTo(0); self.render(); }
+    });
+    this.seek.addEventListener("input", function () {
+      self.pause();
+      self.seekTo(parseInt(self.seek.value, 10) || 0);
+      self.render();
+    });
+    this.el("[data-role=speed]").addEventListener("change", function (ev) {
+      self.speed = parseFloat(ev.target.value) || 1;
+    });
+    this.el("[data-role=loop]").addEventListener("change", function (ev) {
+      self.loop = ev.target.checked;
+    });
+
+    this.buttons.forEach(function (b) { b.disabled = true; });
+    this.seek.disabled = true;
+    this.setStatus("Loads when it scrolls into view");
+  };
+
+  GifPlayer.prototype.setStatus = function (text) {
+    if (this.status) this.status.textContent = text;
+  };
+
+  /* Fetch once per URL; three figures asking for the same file share the bytes. */
+  var inflight = {};
+
+  function fetchGif(url) {
+    if (!inflight[url]) {
+      inflight[url] = fetch(url).then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.arrayBuffer();
+      }).then(function (buf) {
+        return decodeGif(new Uint8Array(buf));
+      });
+      inflight[url].catch(function () { delete inflight[url]; });
+    }
+    return inflight[url];
+  }
+
+  GifPlayer.prototype.load = function () {
+    var self = this;
+    if (this.gif || this.loading) return;
+    this.loading = true;
+    this.stage.setAttribute("data-state", "loading");
+    this.setStatus("Loading…");
+    fetchGif(this.src).then(function (gif) {
+      self.attach(gif);
+    }, function () {
+      /* No fetch (file://, or an old browser): hand the file back to the
+       * browser and drop the controls rather than leaving them inert. */
+      self.fallback();
+    });
+  };
+
+  GifPlayer.prototype.fallback = function () {
+    this.stage.setAttribute("data-state", "native");
+    this.poster.setAttribute("src", this.src);
+    var bar = this.el(".player");
+    if (bar) bar.remove();
+    this.setStatus("Playing natively (controls unavailable)");
+  };
+
+  GifPlayer.prototype.lut = function (pal) {
+    /* One packed RGBA lookup per palette, reused by every frame that shares it. */
+    if (this.luts.has(pal)) return this.luts.get(pal);
+    var table = new Uint32Array(pal.length / 3);
+    for (var i = 0; i < table.length; i++) {
+      /* Little-endian ABGR; the one platform that differs is checked below. */
+      table[i] = 0xff000000 | (pal[i * 3 + 2] << 16) | (pal[i * 3 + 1] << 8) | pal[i * 3];
+    }
+    this.luts.set(pal, table);
+    return table;
+  };
+
+  GifPlayer.prototype.attach = function (gif) {
+    var self = this;
+    this.gif = gif;
+    var canvas = document.createElement("canvas");
+    canvas.width = gif.width;
+    canvas.height = gif.height;
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", this.poster.getAttribute("alt") || "");
+    /* Starts hidden so the poster is what a reduced-motion reader sees, and so
+     * there is no flash of frame 0 before the first play. The poster stays in
+     * the layout underneath: it is what gives the stage its height. */
+    canvas.hidden = true;
+    this.stage.appendChild(canvas);
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d", { alpha: false });
+
+    this.scratch = document.createElement("canvas");
+    this.scratch.width = gif.width;
+    this.scratch.height = gif.height;
+    this.sctx = this.scratch.getContext("2d");
+
+    this.total = gif.frames.reduce(function (sum, f) {
+      return sum + Math.max(MIN_FRAME_MS, f.delay);
+    }, 0);
+    this.durOut.textContent = (this.total / 1000).toFixed(1) + "s";
+    this.countOut.textContent = gif.frames.length;
+    this.seek.max = gif.frames.length - 1;
+
+    this.buttons.forEach(function (b) { b.disabled = false; });
+    this.seek.disabled = false;
+    this.stage.setAttribute("data-state", "ready");
+    this.setStatus("");
+
+    if (!window.matchMedia || !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      this.play();
+    } else {
+      this.setStatus("Reduced motion: press play");
+    }
+    this.update();
+    return self;
+  };
+
+  GifPlayer.prototype.delayOf = function (i) {
+    return Math.max(MIN_FRAME_MS, this.gif.frames[i].delay);
+  };
+
+  GifPlayer.prototype.clearFrame = function (f) {
+    if (f.disposal === 2) {
+      this.ctx.clearRect(f.left, f.top, f.width, f.height);
+    } else if (f.disposal === 3 && this.snapshot) {
+      this.ctx.putImageData(this.snapshot, 0, 0);
+    }
+  };
+
+  GifPlayer.prototype.paint = function (f) {
+    var lut = this.lut(f.palette);
+    if (this.work && (this.work.width !== f.width || this.work.height !== f.height)) {
+      this.work = null;
+    }
+    if (!this.work) this.work = this.sctx.createImageData(f.width, f.height);
+    var px = new Uint32Array(this.work.data.buffer);
+    for (var i = 0; i < f.indices.length; i++) {
+      var idx = f.indices[i];
+      /* A transparent index has to actually be transparent, which is why this
+       * goes through a scratch canvas and drawImage rather than putImageData. */
+      px[i] = idx === f.transparent ? 0 : lut[idx];
+    }
+    this.sctx.putImageData(this.work, 0, 0);
+    this.ctx.drawImage(this.scratch, 0, 0, f.width, f.height, f.left, f.top, f.width, f.height);
+    if (f.disposal === 3 && !this.snapshot) {
+      this.snapshot = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+    }
+  };
+
+  GifPlayer.prototype.render = function () {
+    if (!this.gif) return;
+    var frames = this.gif.frames;
+    var i = this.index;
+
+    if (i === this.drawn + 1) {
+      /* The common case: one step forward, so only the previous frame's
+       * disposal has to be honoured. */
+      this.clearFrame(frames[i - 1]);
+      this.paint(frames[i]);
+    } else {
+      /* A jump (seek, step backwards, loop): replay from the start. These
+       * recordings are a few dozen frames, so this is well under a frame. */
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      for (var k = 0; k <= i; k++) {
+        if (k > 0) this.clearFrame(frames[k - 1]);
+        this.paint(frames[k]);
+      }
+    }
+    this.drawn = i;
+    this.update();
+  };
+
+  GifPlayer.prototype.elapsed = function () {
+    var t = 0;
+    for (var i = 0; i < this.index; i++) t += this.delayOf(i);
+    return t + this.acc;
+  };
+
+  GifPlayer.prototype.update = function () {
+    if (!this.gif) return;
+    if (document.activeElement !== this.seek) this.seek.value = this.index;
+    this.posOut.textContent = (this.elapsed() / 1000).toFixed(1) + "s";
+    this.frameOut.textContent = this.index + 1;
+    this.seek.setAttribute("aria-valuetext",
+      "frame " + (this.index + 1) + " of " + this.gif.frames.length);
+  };
+
+  GifPlayer.prototype.tick = function (now) {
+    if (!this.playing) return;
+    /* A backgrounded tab stops rAF and comes back with one enormous delta;
+     * clamping keeps that from fast-forwarding through the whole recording. */
+    var dt = Math.min(now - this.last, 250);
+    this.last = now;
+    this.acc += dt * this.speed;
+    var guard = this.gif.frames.length * 2;
+    while (guard-- > 0 && this.acc >= this.delayOf(this.index)) {
+      this.acc -= this.delayOf(this.index);
+      if (this.index >= this.gif.frames.length - 1) {
+        if (!this.loop) {
+          this.acc = 0;
+          this.pause();
+          this.update();
+          return;
+        }
+        this.index = -1;                 // wrap: the next step draws frame 0
+      }
+      this.index++;
+      this.render();
+    }
+    this.raf = requestAnimationFrame(this.tick);
+  };
+
+  GifPlayer.prototype.play = function () {
+    if (!this.gif || this.playing) return;
+    this.canvas.hidden = false;   // laid over the poster, which stays put
+    this.playing = true;
+    this.last = window.performance ? performance.now() : Date.now();
+    this.acc = 0;
+    this.render();
+    this.setPlayIcon(true);
+    this.raf = requestAnimationFrame(this.tick);
+  };
+
+  GifPlayer.prototype.pause = function () {
+    if (!this.playing) return;
+    this.playing = false;
+    if (this.raf) cancelAnimationFrame(this.raf);
+    this.raf = 0;
+    this.setPlayIcon(false);
+  };
+
+  GifPlayer.prototype.setPlayIcon = function (playing) {
+    if (!this.playBtn) return;
+    this.playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
+    this.playBtn.innerHTML = playing
+      ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6zm8-14v14h4V5h-4z"/></svg>'
+      : '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+  };
+
+  GifPlayer.prototype.step = function (delta) {
+    if (!this.gif) return;
+    var n = this.gif.frames.length;
+    this.index = Math.max(0, Math.min(n - 1, this.index + delta));
+    this.acc = 0;
+    this.render();
+  };
+
+  GifPlayer.prototype.seekTo = function (i) {
+    this.index = Math.max(0, Math.min((this.gif ? this.gif.frames.length : 1) - 1, i));
+  };
+
+  /* --- wiring ------------------------------------------------------------- */
+
+  function boot() {
+    var figures = Array.prototype.slice.call(document.querySelectorAll(".walkthrough"));
+    if (!figures.length) return;
+    var players = figures.map(function (f) { return new GifPlayer(f); });
+
+    if (!("IntersectionObserver" in window) || !("fetch" in window)) {
+      players.forEach(function (p) { p.load(); });
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var player = players[figures.indexOf(entry.target)];
+        if (!player) return;
+        if (entry.isIntersecting) {
+          player.visible = true;
+          player.load();
+          if (player.wasPlaying) player.play();
+        } else {
+          /* Stop decoding frames nobody is looking at, and remember whether it
+           * was playing so scrolling back picks up where it left off. */
+          player.visible = false;
+          if (player.playing) { player.wasPlaying = true; player.pause(); }
+        }
+      });
+    }, { rootMargin: "300px 0px" });
+    figures.forEach(function (f) { io.observe(f); });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+})();
+/* === end GIF PLAYER === */
 </script>
 </body>
 </html>

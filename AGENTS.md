@@ -25,6 +25,18 @@ agent-testing/
 |-- .dockerignore / .gitignore
 |-- docs/                       # Split-out documentation (EVALUATION, TESTING, MODELS,
 |                               #   INTEGRATIONS, ARCHITECTURE, getting-started.md) — README links here
+|   `-- assets/                 # The end-to-end walkthroughs (e2e-*.gif + posters) that
+|                               #   docs/index.html plays; generated, see tools/ below
+|-- tools/                      # How the walkthroughs are recorded and played (not the agent)
+|   |-- check_stack.sh          # Asserts the stack is in a state where a recording would
+|   |                           #   be truthful (both services, MCP reachable, vault agreed)
+|   |-- capture_ui.py           # Drives the real dev UI in Firefox and screenshots a turn
+|   |-- firefox_marionette.py   # The Marionette client it drives Firefox through
+|   |-- build_gifs.py           # Assembles captured frames into docs/assets/e2e-*.gif
+|   |-- films.py                # Which capture goes in which scene (the story)
+|   |-- gif_player.js           # The player inlined into docs/index.html
+|   |-- inject_player.py        # Inlines it; keep docs/index.html generated, not hand-edited
+|   `-- verify_gif.py           # Proves the inlined decoder matches Pillow, frame for frame
 `-- text_summarizer/            # The ADK agent package (Python)
     |-- __init__.py             # Entrypoint: loads .env, inits observability, exposes root_agent
     |-- agent.py                # The LlmAgent definition: model DI + instructions + Langfuse scoring callback
@@ -362,6 +374,33 @@ python eval_exercise.py
 model_provider=gemini python text_summarizer/auto_optimize.py \
   --max-iterations 5 --patience 3
 ```
+
+### The end-to-end walkthroughs (docs/assets)
+
+Not part of the agent: these record it. Each capture is one real turn, so each
+one spends quota, and `check_stack.sh` has to pass first — a half-restarted stack
+records a *plausible* run of a broken one.
+
+```bash
+docker compose up -d                     # BOTH services, never just one (see below)
+sh tools/check_stack.sh                  # refuses to continue if a recording would lie
+
+firefox --headless --marionette about:blank &        # the driver attaches to :2828
+python3 tools/capture_ui.py --out /tmp/cap/live --name live \
+  --prompt "Summarize: <text that is not in the vault yet>"
+
+python3 tools/build_gifs.py --captures /tmp/cap \
+  --vault "$OBSIDIAN_VAULT_PARENT_HOST/ck"            # panels read the real notes back
+python3 tools/inject_player.py                         # after editing tools/gif_player.js
+python3 tools/verify_gif.py                            # decoder vs Pillow, byte for byte
+```
+
+**Recreate both services together.** `obsidian-mcp` runs with
+`network_mode: service:agent-testing`, so it shares the agent container's network
+namespace. `docker compose up -d --build agent-testing` alone leaves the sidecar
+"Up", still logging `listening`, attached to the *old* namespace — and every
+obsidian-mcp call is then refused. The agent answers "no notes found", which
+reads exactly like a retrieval bug and is not one. This cost a recording.
 
 ### Unit tests (no API cost, no vault writes)
 

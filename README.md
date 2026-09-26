@@ -1,5 +1,6 @@
 > **Live demo → <https://carloskafka.github.io/agent-testing/#/overview>**
-> A Material 3 walkthrough of the whole thing: quick start, integrations, the vault, troubleshooting.
+> A Material 3 walkthrough of the whole thing: end-to-end animations of the main
+> flow, the Obsidian graph and Gmail, then quick start, integrations, the vault, troubleshooting.
 
 # Text Summarizer Agent — ADK Evaluation Loop Demo
 
