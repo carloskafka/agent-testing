@@ -2,115 +2,906 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Text Summarizer Agent — ADK + Obsidian second brain</title>
 <meta name="description" content="An ADK text-summarization agent with an evaluation loop, an Obsidian second brain, and optional read-only Gmail access.">
+<meta name="theme-color" content="#0B57D0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#131314" media="(prefers-color-scheme: dark)">
 <style>
+/* ==========================================================================
+   Material Design 3 — baseline token set, hand-inlined.
+
+   Inlined rather than pulled from a CDN on purpose: the page has to render with
+   no build step and no network, and a font/CDN outage should degrade to a system
+   font rather than an unstyled page. Tokens are the real M3 baseline values, not
+   approximations, so anything ported to material-web later lines up.
+
+   Structure: tokens -> base -> app bar -> navigation drawer -> views -> components
+   ========================================================================== */
+
+:root {
+  color-scheme: light dark;
+
+  /* --- Colour roles: M3 baseline light --- */
+  --primary: #0b57d0;
+  --on-primary: #ffffff;
+  --primary-container: #d3e3fd;
+  --on-primary-container: #041e49;
+  --secondary: #00639b;
+  --on-secondary: #ffffff;
+  --secondary-container: #cfe5ff;
+  --on-secondary-container: #001d33;
+  --tertiary: #146c2e;
+  --on-tertiary: #ffffff;
+  --tertiary-container: #c4eecb;
+  --on-tertiary-container: #072711;
+  --error: #b3261e;
+  --on-error: #ffffff;
+  --error-container: #f9dedc;
+  --on-error-container: #410e0b;
+  --surface: #f8f9fa;
+  --on-surface: #1f1f1f;
+  --surface-variant: #e0e3e7;
+  --on-surface-variant: #444746;
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f2f4f7;
+  --surface-container: #eceef1;
+  --surface-container-high: #e6e8eb;
+  --surface-container-highest: #e0e2e5;
+  --outline: #747775;
+  --outline-variant: #c4c7c5;
+  --inverse-surface: #2f3032;
+  --inverse-on-surface: #f1f1f1;
+  --scrim: 0 0 0;
+
+  /* --- Shape scale --- */
+  --shape-xs: 4px;
+  --shape-sm: 8px;
+  --shape-md: 12px;
+  --shape-lg: 16px;
+  --shape-xl: 28px;
+  --shape-full: 999px;
+
+  /* --- Motion: M3 emphasized / standard easings --- */
+  --ease-emphasized: cubic-bezier(.2, 0, 0, 1);
+  --ease-standard: cubic-bezier(.2, 0, 0, 1);
+  --ease-emphasized-decel: cubic-bezier(.05, .7, .1, 1);
+  --ease-emphasized-accel: cubic-bezier(.3, 0, .8, .15);
+  --dur-short: 150ms;
+  --dur-medium: 250ms;
+  --dur-long: 400ms;
+
+  /* --- Elevation --- */
+  --elev-0: none;
+  --elev-1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
+  --elev-2: 0 1px 2px rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15);
+  --elev-3: 0 1px 3px rgba(0,0,0,.30), 0 4px 8px 3px rgba(0,0,0,.15);
+
+  /* Roboto first if the reader has it, then the platform UI face. */
+  --font: Roboto, "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --app-bar-h: 64px;
+  --drawer-w: 336px;
+  --gutter: 20px;
+}
+
+@media (prefers-color-scheme: dark) {
   :root {
-    color-scheme: light dark;
-    --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0;
-    --surface: #f6f8fa; --accent: #0969da;
+    --primary: #a8c7fa;
+    --on-primary: #062e6f;
+    --primary-container: #0842a0;
+    --on-primary-container: #d3e3fd;
+    --secondary: #8cd0ff;
+    --on-secondary: #003355;
+    --secondary-container: #004a77;
+    --on-secondary-container: #cfe5ff;
+    --tertiary: #6dd58c;
+    --on-tertiary: #0a381a;
+    --tertiary-container: #205028;
+    --on-tertiary-container: #c4eecb;
+    --error: #f2b8b5;
+    --on-error: #601410;
+    --error-container: #8c1d18;
+    --on-error-container: #f9dedc;
+    --surface: #131314;
+    --on-surface: #e3e3e3;
+    --surface-variant: #444746;
+    --on-surface-variant: #c4c7c5;
+    --surface-container-lowest: #0e0e0e;
+    --surface-container-low: #1b1b1c;
+    --surface-container: #1f1f20;
+    --surface-container-high: #2a2a2b;
+    --surface-container-highest: #353536;
+    --outline: #8e918f;
+    --outline-variant: #444746;
+    --inverse-surface: #e3e3e3;
+    --inverse-on-surface: #2f3032;
+    --elev-1: 0 1px 2px rgba(0,0,0,.45), 0 1px 3px 1px rgba(0,0,0,.30);
+    --elev-2: 0 1px 2px rgba(0,0,0,.45), 0 2px 6px 2px rgba(0,0,0,.30);
+    --elev-3: 0 1px 3px rgba(0,0,0,.50), 0 4px 8px 3px rgba(0,0,0,.35);
   }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --line:#3d444d;
-            --surface:#161b22; --accent:#4493f8; }
+}
+
+/* --- Base ---------------------------------------------------------------- */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 1rem;           /* body-large 16/24 */
+  line-height: 1.5;
+  color: var(--on-surface);
+  background: var(--surface);
+  /* Room for the fixed app bar, plus the notch on a landscape phone. */
+  padding: calc(var(--app-bar-h) + env(safe-area-inset-top)) 0
+           calc(env(safe-area-inset-bottom) + 24px);
+  overflow-wrap: break-word;
+}
+
+h1, h2, h3 { margin: 0; font-weight: 400; letter-spacing: -.01em; }
+h1 { font-size: 2.25rem; line-height: 2.75rem; }   /* headline-medium */
+h2 { font-size: 1.5rem;  line-height: 2rem;     }   /* headline-small */
+h3 { font-size: 1.375rem; line-height: 1.75rem; font-weight: 500; } /* title-large */
+p  { margin: 0 0 1rem; }
+a  { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, kbd { font-family: var(--mono); font-size: .875em; }
+
+pre {
+  margin: 0 0 1rem;
+  background: var(--surface-container);
+  border-radius: var(--shape-sm);
+  padding: .875rem 1rem;
+  overflow-x: auto;
+  font-size: .8125rem;
+  line-height: 1.45;
+}
+pre code { font-size: inherit; }
+
+:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: var(--shape-xs);
+}
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.skip-link {
+  position: fixed; top: 8px; left: 8px; z-index: 100;
+  transform: translateY(-200%);
+  background: var(--primary); color: var(--on-primary);
+  padding: 12px 20px; border-radius: var(--shape-full);
+  font-weight: 500; text-decoration: none;
+  transition: transform var(--dur-medium) var(--ease-emphasized);
+}
+.skip-link:focus { transform: translateY(0); }
+
+.icon { width: 24px; height: 24px; fill: currentColor; flex: none; }
+
+/* --- Top app bar --------------------------------------------------------- */
+
+.app-bar {
+  position: fixed; inset: 0 0 auto 0; z-index: 20;
+  padding-top: env(safe-area-inset-top);
+  background: var(--surface);
+  transition: background-color var(--dur-medium) var(--ease-standard),
+              box-shadow var(--dur-medium) var(--ease-standard);
+}
+.app-bar[data-scrolled="true"] {
+  background: var(--surface-container);
+  box-shadow: var(--elev-2);
+}
+.app-bar__row {
+  height: var(--app-bar-h);
+  display: flex; align-items: center;
+  gap: 4px;
+  padding: 0 4px 0 4px;
+}
+.app-bar__title {
+  font-size: 1.375rem; line-height: 1.75rem; font-weight: 400;
+  margin: 0 8px; flex: 1 1 auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.icon-button {
+  /* 48dp target even though the glyph is 24dp — the M3 minimum. */
+  width: 48px; height: 48px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--shape-full);
+  background: transparent; color: var(--on-surface);
+  cursor: pointer; position: relative;
+  transition: background-color var(--dur-short) var(--ease-standard);
+}
+.icon-button:hover { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
+.icon-button:active { background: color-mix(in srgb, var(--on-surface) 10%, transparent); }
+.icon-button[hidden] { display: none; }
+
+/* --- Navigation drawer (modal on mobile, permanent rail on wide) --------- */
+
+.scrim {
+  position: fixed; inset: 0; z-index: 30;
+  background: rgb(var(--scrim) / .32);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-medium) var(--ease-standard);
+}
+.scrim[data-open="true"] { opacity: 1; pointer-events: auto; }
+
+.drawer {
+  position: fixed; z-index: 40;
+  top: 0; bottom: 0; left: 0;
+  width: min(var(--drawer-w), 86vw);
+  background: var(--surface-container-low);
+  border-right: 1px solid var(--outline-variant);
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  display: flex; flex-direction: column;
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform var(--dur-long) var(--ease-emphasized-decel),
+              visibility 0s linear var(--dur-long);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.drawer[data-open="true"] {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform var(--dur-long) var(--ease-emphasized-decel),
+              visibility 0s;
+}
+
+.drawer__head {
+  display: flex; align-items: center;
+  padding: 12px 12px 8px 24px;
+  min-height: 72px;
+}
+.drawer__title { font-size: 1.125rem; font-weight: 500; margin-left: 8px; }
+
+.drawer__nav { padding: 0 12px 16px; }
+.drawer__label {
+  font-size: .875rem; font-weight: 500; color: var(--on-surface-variant);
+  padding: 20px 12px 8px;
+}
+
+.nav-item {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; min-height: 56px;      /* M3 nav drawer item */
+  padding: 0 24px; margin: 0 0 0;
+  border: 0; border-radius: var(--shape-full);
+  background: transparent; color: var(--on-surface-variant);
+  font: inherit; font-size: .875rem; letter-spacing: .01em;
+  text-align: left; text-decoration: none; cursor: pointer;
+  position: relative;
+  transition: background-color var(--dur-short) var(--ease-standard);
+}
+.nav-item:hover { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
+.nav-item:active { background: color-mix(in srgb, var(--on-surface) 10%, transparent); }
+.nav-item[aria-current="page"] {
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+  font-weight: 500;
+}
+.nav-item--external { color: var(--on-surface); }
+
+.drawer__foot {
+  margin-top: auto; padding: 16px 24px 20px;
+  font-size: .75rem; color: var(--on-surface-variant);
+  border-top: 1px solid var(--outline-variant);
+}
+
+/* --- Views --------------------------------------------------------------- */
+
+.view { display: none; }
+.view[data-active="true"] { display: block; animation: view-in var(--dur-long) var(--ease-emphasized-decel); }
+@keyframes view-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+main {
+  max-width: 60rem; margin: 0 auto;
+  padding: 8px var(--gutter) 0;
+}
+.section { margin-bottom: 2.5rem; }
+.muted { color: var(--on-surface-variant); }
+.lede { font-size: 1.125rem; line-height: 1.6; color: var(--on-surface-variant); }
+
+/* --- Components ---------------------------------------------------------- */
+
+.card {
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--shape-md);
+  padding: 16px;
+}
+.card + .card { margin-top: 12px; }
+.card__title { font-size: 1rem; font-weight: 500; margin: 0 0 4px; }
+.card__body { font-size: .875rem; color: var(--on-surface-variant); margin: 0; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 1.25rem; padding: 0; list-style: none; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 12px;
+  border-radius: var(--shape-sm);
+  border: 1px solid var(--outline-variant);
+  background: var(--surface-container-low);
+  font-size: .75rem; font-weight: 500; color: var(--on-surface-variant);
+}
+.chip--accent { background: var(--tertiary-container); border-color: transparent; color: var(--on-tertiary-container); }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 40px; padding: 0 24px;
+  border-radius: var(--shape-full);
+  border: 1px solid transparent;
+  font: inherit; font-size: .875rem; font-weight: 500; letter-spacing: .01em;
+  text-decoration: none; cursor: pointer;
+  transition: background-color var(--dur-short) var(--ease-standard),
+              box-shadow var(--dur-short) var(--ease-standard);
+}
+.btn--filled { background: var(--primary); color: var(--on-primary); }
+.btn--filled:hover { background: color-mix(in srgb, var(--primary) 88%, #000); text-decoration: none; box-shadow: var(--elev-1); }
+.btn--tonal { background: var(--secondary-container); color: var(--on-secondary-container); }
+.btn--tonal:hover { box-shadow: var(--elev-1); text-decoration: none; }
+.btn--outlined { border-color: var(--outline); color: var(--primary); }
+.btn--outlined:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); text-decoration: none; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 1.5rem; }
+
+.steps { list-style: none; counter-reset: step; margin: 0; padding: 0; }
+.steps > li {
+  counter-increment: step;
+  position: relative;
+  padding: 0 0 24px 48px;
+}
+.steps > li::before {
+  content: counter(step);
+  position: absolute; left: 0; top: -2px;
+  width: 32px; height: 32px;
+  display: grid; place-items: center;
+  border-radius: var(--shape-full);
+  background: var(--secondary-container); color: var(--on-secondary-container);
+  font-size: .875rem; font-weight: 500;
+}
+/* Connector between step markers, hidden on the last one. */
+.steps > li::after {
+  content: ""; position: absolute; left: 15px; top: 34px; bottom: 4px;
+  width: 2px; background: var(--outline-variant);
+}
+.steps > li:last-child { padding-bottom: 0; }
+.steps > li:last-child::after { display: none; }
+.steps h3 { font-size: 1rem; font-weight: 500; margin-bottom: 4px; }
+.steps p { font-size: .9375rem; color: var(--on-surface-variant); }
+
+table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+caption { text-align: left; font-size: .75rem; color: var(--on-surface-variant); padding-bottom: 8px; }
+th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--outline-variant); vertical-align: top; }
+th { font-size: .75rem; font-weight: 500; color: var(--on-surface-variant); text-transform: uppercase; letter-spacing: .04em; }
+td code { white-space: nowrap; }
+.table-wrap { overflow-x: auto; }
+
+.note {
+  display: flex; gap: 12px;
+  border-radius: var(--shape-md);
+  background: var(--surface-container);
+  padding: 14px 16px;
+  font-size: .875rem; color: var(--on-surface-variant);
+}
+.note .icon { color: var(--primary); }
+
+.footer {
+  max-width: 60rem; margin: 0 auto;
+  padding: 24px var(--gutter) 8px;
+  font-size: .75rem; color: var(--on-surface-variant);
+  border-top: 1px solid var(--outline-variant);
+}
+.footer a { margin-right: 12px; }
+
+/* --- Wide screens: drawer becomes a permanent rail, so there is no modal
+       state to trap focus in and the app bar loses its menu button. --------- */
+
+@media (min-width: 1100px) {
+  .drawer {
+    transform: none; visibility: visible; box-shadow: none;
+    border-right: 1px solid var(--outline-variant);
+    transition: none;
   }
-  * { box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    line-height: 1.6; color: var(--fg); background: var(--bg);
-    margin: 0 auto; max-width: 46rem; padding: 3rem 1.5rem 5rem;
+  .scrim { display: none; }
+  body { padding-left: var(--drawer-w); }
+  .app-bar { left: var(--drawer-w); padding-left: 8px; }
+  .app-bar__menu { display: none; }
+  main, .footer { margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
   }
-  h1 { font-size: 1.9rem; margin: 0 0 .3rem; letter-spacing: -.02em; }
-  .tagline { color: var(--muted); margin: 0 0 2.5rem; font-size: 1.05rem; }
-  h2 { font-size: 1.15rem; margin: 2.5rem 0 .75rem; padding-bottom: .3rem;
-       border-bottom: 1px solid var(--line); letter-spacing: -.01em; }
-  p, li { color: var(--fg); }
-  .lede { margin: 0 0 .5rem; }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  code { background: var(--surface); padding: .15em .4em; border-radius: 5px;
-         font-size: .88em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  pre { background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
-        padding: .9rem 1rem; overflow-x: auto; font-size: .85rem; line-height: 1.5; }
-  pre code { background: none; padding: 0; font-size: 1em; }
-  ol, ul { padding-left: 1.3rem; }
-  li { margin: .3rem 0; }
-  table { border-collapse: collapse; width: 100%; margin: .75rem 0; font-size: .93rem; }
-  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line);
-           vertical-align: top; }
-  th { font-weight: 600; color: var(--muted); font-size: .82rem;
-       text-transform: uppercase; letter-spacing: .04em; }
-  td code { white-space: nowrap; }
-  .cards { list-style: none; padding: 0; margin: .5rem 0; }
-  .cards li { border: 1px solid var(--line); border-radius: 8px;
-              padding: .7rem .9rem; margin: .5rem 0; background: var(--surface); }
-  .cards b { display: block; }
-  .cards span { color: var(--muted); font-size: .93rem; }
-  footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
-           color: var(--muted); font-size: .88rem; }
-  .note { color: var(--muted); font-size: .9rem; }
+  .drawer { transition: none; }
+}
 </style>
 </head>
 <body>
 
-<h1>Text Summarizer Agent</h1>
-<p class="tagline">A text-summarization agent built on Google's <b>Agent Development Kit</b>,
-with an evaluation loop, an Obsidian <em>second brain</em>, and optional read-only Gmail access.</p>
+<a class="skip-link" href="#main">Skip to content</a>
 
-<p class="lede">Every turn is summarised into your vault as a linked note, so the notes
-form a graph you can browse in Obsidian. Ask the same thing again and it is answered
-<b>from the vault with no model call at all</b>.</p>
+<header class="app-bar" id="appBar">
+  <div class="app-bar__row">
+    <button class="icon-button app-bar__menu" id="menuButton" type="button"
+            aria-label="Open navigation menu" aria-controls="drawer" aria-expanded="false">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </button>
+    <button class="icon-button" id="backButton" type="button" aria-label="Back" hidden>
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20z"/></svg>
+    </button>
+    <h1 class="app-bar__title" id="appBarTitle">Text Summarizer Agent</h1>
+    <a class="icon-button" href="https://github.com/carloskafka/agent-testing"
+       aria-label="View the source on GitHub" rel="noopener">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
+    </a>
+  </div>
+</header>
 
-<p class="lede">The part most people find interesting is the <b>evaluation loop</b>:
-edit the agent's instructions, run ADK evals, and watch the score change.</p>
+<div class="scrim" id="scrim" data-open="false"></div>
 
-<h2>Quick start</h2>
-<ol>
-  <li>Get a free key at <a href="https://aistudio.google.com/app/apikey">Google AI Studio</a>
-      and put it in <code>GEMINI_API_KEY</code> in <code>.env</code>
-      (<code>./run.sh</code> creates that file from <code>.env.example</code> on first run).</li>
-  <li>Run it — this picks your vault, builds both containers and starts them:
-      <pre><code>./run.sh</code></pre></li>
-  <li>Open the agent web UI on your machine at <code>http://localhost:8001</code>
-      and try a prompt.</li>
-</ol>
+<nav class="drawer" id="drawer" data-open="false" aria-label="Main navigation">
+  <div class="drawer__head">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" style="color:var(--primary)"><path d="M12 2 3 7v2h18V7zm-7 9v8H3v2h18v-2h-2v-8h-2v8h-2v-8zm-2-6h14v2H3z"/></svg>
+    <span class="drawer__title">Summarizer</span>
+  </div>
 
-<h2>Optional integrations</h2>
-<p class="note">Everything except the model key is optional and loads automatically
-when configured.</p>
-<table>
-  <tr><th>Integration</th><th>Adds</th><th>Configure</th></tr>
-  <tr><td>OpenRouter</td><td>free models as a fallback when Gemini rate-limits you</td><td><code>MODEL_PROVIDER=openrouter</code></td></tr>
-  <tr><td>Langfuse</td><td>traces every turn: latency, cache hit/miss, quality scores</td><td><code>LANGFUSE_*</code></td></tr>
-  <tr><td>Gmail</td><td>read-only inbox tools</td><td><code>GOOGLE_CLIENT_ID</code>, <code>GOOGLE_CLIENT_SECRET</code>, <code>GOOGLE_REFRESH_TOKEN</code></td></tr>
-  <tr><td>Obsidian</td><td>retrieval tools over your vault</td><td>set by <code>./run.sh</code></td></tr>
-</table>
+  <div class="drawer__nav">
+    <div class="drawer__label">Explore</div>
+    <a class="nav-item" href="#/overview" data-route="overview">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+      Overview
+    </a>
+    <a class="nav-item" href="#/quickstart" data-route="quickstart">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
+      Quick start
+    </a>
+    <a class="nav-item" href="#/integrations" data-route="integrations">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-2 2v3.8h1.5a2.7 2.7 0 0 1 0 5.4H2V20a2 2 0 0 0 2 2h3.8v-1.5a2.7 2.7 0 0 1 5.4 0V22H17a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z"/></svg>
+      Integrations
+    </a>
+    <a class="nav-item" href="#/vault" data-route="vault">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 2H4c-1 0-2 .9-2 2v3.01c0 .72.43 1.34 1 1.69V20c0 1.1 1.1 2 2 2h14c.9 0 2-.9 2-2V8.7c.57-.35 1-.97 1-1.69V4c0-1.1-1-2-2-2zm-5 12H9v-2h6v2zm5-7H4V4h16v3z"/></svg>
+      The vault
+    </a>
+    <a class="nav-item" href="#/docs" data-route="docs">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 5c-1.11-.35-2.33-.5-3.5-.5-1.95 0-4.05.4-5.5 1.5-1.45-1.1-3.55-1.5-5.5-1.5S2.45 4.9 1 6v14.65c0 .25.25.5.5.5.1 0 .15 0 .25-.05C3.1 20.45 5.05 20 6.5 20c1.95 0 4.05.4 5.5 1.5 1.35-.85 3.8-1.5 5.5-1.5 1.65 0 3.35.3 4.75 1.05.1.05.15.05.25.05.25 0 .5-.25.5-.5V6c-.6-.45-1.25-.75-2-1zm0 13.5c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5V8c1.35-.85 3.8-1.5 5.5-1.5 1.2 0 2.4.15 3.5.5v11.5z"/></svg>
+      Documentation
+    </a>
+    <a class="nav-item" href="#/troubleshooting" data-route="troubleshooting">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
+      Troubleshooting
+    </a>
 
-<h2>Documentation</h2>
-<p class="note">These render on GitHub, not on this site — each link opens the
-Markdown source in the repository.</p>
-<ul class="cards">
-  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/getting-started.md">Getting started</a></b>
-      <span>Keys, running it, first prompts, troubleshooting</span></li>
-  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/EVALUATION.md">Evaluation loop</a></b>
-      <span>Criteria, running evals, hands-on experiments, auto-optimization</span></li>
-  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/INTEGRATIONS.md">Integrations</a></b>
-      <span>Read-only Gmail, and using an Obsidian vault you already have</span></li>
-  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/ARCHITECTURE.md">Architecture</a></b>
-      <span>How a turn flows, source provenance, vault selection, the cache, Docker topology</span></li>
-  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/MODELS.md">Models</a></b>
-      <span>Switching between Gemini and free OpenRouter models</span></li>
-  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/TESTING.md">Testing</a></b>
-      <span>Prompt examples for the web UI: good, bad, and edge cases</span></li>
-  <li><b><a href="https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md">AGENTS.md</a></b>
-      <span>Why each design decision was made, and which traps are easy to fall into again</span></li>
-</ul>
+    <div class="drawer__label">Repository</div>
+    <a class="nav-item nav-item--external" href="https://github.com/carloskafka/agent-testing" rel="noopener">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
+      Source on GitHub
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" style="margin-left:auto;width:18px;height:18px"><path d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.6l-9.8 9.8 1.4 1.4L19 6.4V10h2V3h-7z"/></svg>
+    </a>
+    <a class="nav-item nav-item--external" href="https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md" rel="noopener">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.4 16.6 4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0 4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
+      AGENTS.md
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" style="margin-left:auto;width:18px;height:18px"><path d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.6l-9.8 9.8 1.4 1.4L19 6.4V10h2V3h-7z"/></svg>
+    </a>
+  </div>
 
-<footer>
-  <a href="https://github.com/carloskafka/agent-testing">github.com/carloskafka/agent-testing</a>
-  &middot; <code>./run.sh</code> to run, <code>adk eval</code> to measure.
+  <div class="drawer__foot">
+    Built with Google ADK · Material&nbsp;3<br>
+    <code>./run.sh</code> to run, <code>adk eval</code> to measure.
+  </div>
+</nav>
+
+<main id="main" tabindex="-1">
+
+  <!-- Overview ------------------------------------------------------------->
+  <section class="view section" id="view-overview" data-active="true" aria-labelledby="h-overview">
+    <h2 id="h-overview" class="visually-hidden">Overview</h2>
+    <p class="lede">
+      A text-summarization agent built on Google's <b>Agent Development Kit</b>,
+      with an evaluation loop, an Obsidian <em>second brain</em>, and optional
+      read-only Gmail access.
+    </p>
+
+    <ul class="chips">
+      <li class="chip">Python 3.11+</li>
+      <li class="chip">Google ADK</li>
+      <li class="chip chip--accent">ROUEGE-1 self-scoring</li>
+      <li class="chip chip--accent">Obsidian</li>
+    </ul>
+
+    <div class="btn-row">
+      <a class="btn btn--filled" href="#/quickstart">Get started</a>
+      <a class="btn btn--tonal" href="https://github.com/carloskafka/agent-testing" rel="noopener">Browse the source</a>
+    </div>
+
+    <h3>What it does</h3>
+    <p>
+      Every turn is summarised into your vault as a linked note, and the note graph
+      is browsable in Obsidian. Ask the same thing twice and the second time is
+      answered <b>from the vault with no model call at all</b> — measured at
+      23.5&nbsp;s for the first ask and 0.04&nbsp;s for the repeat.
+    </p>
+
+    <h3>Why it is built this way</h3>
+    <p>
+      The part most people find interesting is the <b>evaluation loop</b>: edit the
+      agent's instructions in <code>agent.py</code>, run ADK evals, and watch
+      <code>response_match_score</code> move. That is the actual point of the repo —
+      everything else exists to make the loop measurable.
+    </p>
+
+    <div class="note">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-2h2zm0-4h-2V7h2z"/></svg>
+      <span>Every design decision and the traps behind it are recorded in
+      <a href="https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md" rel="noopener">AGENTS.md</a> —
+      read it before changing anything in the agent package.</span>
+    </div>
+  </section>
+
+  <!-- Quick start ---------------------------------------------------------->
+  <section class="view section" id="view-quickstart" aria-labelledby="h-quickstart" hidden>
+    <h2 id="h-quickstart">Quick start</h2>
+    <p class="muted">Docker and the Git CLI are the only prerequisites.</p>
+
+    <ol class="steps">
+      <li>
+        <h3>Get a model key</h3>
+        <p>
+          Grab a free key at
+          <a href="https://aistudio.google.com/app/apikey" rel="noopener">Google AI Studio</a>
+          and put it in <code>GEMINI_API_KEY</code> in <code>.env</code>.
+          <code>./run.sh</code> creates that file from <code>.env.example</code> on first run.
+        </p>
+      </li>
+      <li>
+        <h3>Run it</h3>
+        <p>This picks your vault, builds both containers, and starts them.</p>
+        <pre><code>./run.sh</code></pre>
+      </li>
+      <li>
+        <h3>Open the agent and try a prompt</h3>
+        <p>The web UI runs on your machine at <code>http://localhost:8001</code>.</p>
+        <pre><code>Summarize: Dogs are domesticated animals known for loyalty and
+companionship. They are often called man's best friend. Dogs come in
+many breeds, varying in size, color, and temperament.</code></pre>
+        <p>With Gmail configured, the agent reads your inbox too:</p>
+        <pre><code>What are my latest 5 emails? Summarize them.</code></pre>
+      </li>
+    </ol>
+
+    <div class="note">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-2h2zm0-4h-2V7h2z"/></svg>
+      <span>Already use Obsidian? <code>./run.sh</code> finds the vaults you already
+      have — including the ones in your Obsidian config — and asks which one to use.
+      One vault needs no configuration; several are never guessed between.</span>
+    </div>
+  </section>
+
+  <!-- Integrations --------------------------------------------------------->
+  <section class="view section" id="view-integrations" aria-labelledby="h-integrations" hidden>
+    <h2 id="h-integrations">Integrations</h2>
+    <p class="muted">
+      Everything except the model key is optional, and each one loads automatically
+      once configured.
+    </p>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Optional integrations and what they switch on</caption>
+        <thead>
+          <tr><th scope="col">Integration</th><th scope="col">Adds</th><th scope="col">Configure</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>OpenRouter</b></td>
+            <td>Free models as a fallback when Gemini rate-limits you</td>
+            <td><code>MODEL_PROVIDER=openrouter</code></td>
+          </tr>
+          <tr>
+            <td><b>Langfuse</b></td>
+            <td>A trace per turn: latency, cache hit/miss, quality scores</td>
+            <td><code>LANGFUSE_*</code></td>
+          </tr>
+          <tr>
+            <td><b>Gmail</b></td>
+            <td>Read-only inbox tools</td>
+            <td><code>GOOGLE_CLIENT_ID</code>,<br><code>GOOGLE_CLIENT_SECRET</code>,<br><code>GOOGLE_REFRESH_TOKEN</code></td>
+          </tr>
+          <tr>
+            <td><b>Obsidian</b></td>
+            <td>Retrieval tools over your vault</td>
+            <td>set by <code>./run.sh</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin-top:1.5rem">
+      Setup steps, including the one-time Google OAuth dance, are in
+      <a href="https://github.com/carloskafka/agent-testing/blob/main/docs/INTEGRATIONS.md" rel="noopener">Integrations</a>.
+    </p>
+  </section>
+
+  <!-- The vault ------------------------------------------------------------>
+  <section class="view section" id="view-vault" aria-labelledby="h-vault" hidden>
+    <h2 id="h-vault">The vault</h2>
+    <p class="lede">
+      Summaries, chat logs, topic stubs, and an index graph land in a real Obsidian
+      vault, so the notes form a graph you can browse.
+    </p>
+
+    <div class="card">
+      <p class="card__title">Choosing a vault</p>
+      <p class="card__body">
+        <code>obsidian-mcp</code> serves exactly one vault, so with several on disk
+        the choice is explicit and is never guessed — the agent and the MCP server
+        refuse and list the candidate names. <code>./run.sh</code> turns that into a
+        numbered menu and remembers your answer.
+      </p>
+    </div>
+
+    <div class="card">
+      <p class="card__title">The cache</p>
+      <p class="card__body">
+        Every note records a fingerprint of the request, and a repeat of that request
+        is answered from the vault with <b>no model call</b>. Both sides compute the
+        key in code from the same field, because a model-supplied key is paraphrased
+        per run and would never match.
+      </p>
+    </div>
+
+    <div class="card">
+      <p class="card__title">Provenance</p>
+      <p class="card__body">
+        Each note records the model that served the turn and the vault it landed in,
+        read from the live invocation rather than passed in by the model. Unresolvable
+        provenance is omitted rather than guessed.
+      </p>
+    </div>
+
+    <p style="margin-top:1.5rem">
+      <a href="https://github.com/carloskafka/agent-testing/blob/main/docs/ARCHITECTURE.md" rel="noopener">Architecture</a>
+      covers vault selection, the cache, and the Docker topology in detail.
+    </p>
+  </section>
+
+  <!-- Documentation -------------------------------------------------------->
+  <section class="view section" id="view-docs" aria-labelledby="h-docs" hidden>
+    <h2 id="h-docs">Documentation</h2>
+    <p class="muted">
+      These are Markdown and render on GitHub, so each link opens the source there.
+    </p>
+
+    <div class="card">
+      <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/getting-started.md" rel="noopener">Getting started</a></p>
+      <p class="card__body">Keys, running it, first prompts, troubleshooting.</p>
+    </div>
+    <div class="card">
+      <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/EVALUATION.md" rel="noopener">Evaluation loop</a></p>
+      <p class="card__body">Criteria, running evals, hands-on experiments, auto-optimization.</p>
+    </div>
+    <div class="card">
+      <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/INTEGRATIONS.md" rel="noopener">Integrations</a></p>
+      <p class="card__body">Read-only Gmail, and using an Obsidian vault you already have.</p>
+    </div>
+    <div class="card">
+      <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/ARCHITECTURE.md" rel="noopener">Architecture</a></p>
+      <p class="card__body">How a turn flows, source provenance, vault selection, the cache, Docker topology.</p>
+    </div>
+    <div class="card">
+      <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/MODELS.md" rel="noopener">Models</a></p>
+      <p class="card__body">Switching between Gemini and free OpenRouter models.</p>
+    </div>
+    <div class="card">
+      <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/TESTING.md" rel="noopener">Testing</a></p>
+      <p class="card__body">Prompt examples for the web UI: good, bad, and edge cases.</p>
+    </div>
+  </section>
+
+  <!-- Troubleshooting ------------------------------------------------------>
+  <section class="view section" id="view-troubleshooting" aria-labelledby="h-trouble" hidden>
+    <h2 id="h-trouble">Troubleshooting</h2>
+    <p class="muted">The failures you are most likely to hit, and what they mean.</p>
+
+    <div class="card">
+      <p class="card__title"><code>Gemini API key not valid</code></p>
+      <p class="card__body"><code>GEMINI_API_KEY</code> is unset or wrong in <code>.env</code>.</p>
+    </div>
+    <div class="card">
+      <p class="card__title"><code>'/vaults' holds N vaults; refusing to guess</code></p>
+      <p class="card__body">
+        Several vaults in the mount with no <code>OBSIDIAN_VAULT_NAME</code> set.
+        Re-run <code>./run.sh</code> and pick one — it writes the answer to <code>.env</code>.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title"><code>'x' is not a directory under '/vaults'</code></p>
+      <p class="card__body">
+        A typo in <code>OBSIDIAN_VAULT_NAME</code>. The error lists the valid names.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title"><code>obsidian-mcp</code> keeps restarting</p>
+      <p class="card__body">
+        The MCP server exits rather than serve a vault nobody chose. Read its error —
+        it names the candidates.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">No Gmail tools in the UI</p>
+      <p class="card__body">All three <code>GOOGLE_*</code> vars must be set, and the token valid.</p>
+    </div>
+    <div class="card">
+      <p class="card__title">Eval scores look great but nothing is being tested</p>
+      <p class="card__body">
+        Run evals with <code>CACHE_ENABLED=false</code>. Otherwise the agent replays
+        a cached note and the loop measures nothing.
+      </p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <a href="https://github.com/carloskafka/agent-testing" rel="noopener">Repository</a>
+  <a href="https://github.com/carloskafka/agent-testing/blob/main/README.md" rel="noopener">README</a>
+  <a href="https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md" rel="noopener">AGENTS.md</a>
+  <a href="https://github.com/carloskafka/agent-testing/issues" rel="noopener">Issues</a>
 </footer>
 
+<script>
+(function () {
+  "use strict";
+
+  var drawer      = document.getElementById("drawer");
+  var scrim       = document.getElementById("scrim");
+  var menuButton  = document.getElementById("menuButton");
+  var backButton  = document.getElementById("backButton");
+  var appBarTitle = document.getElementById("appBarTitle");
+  var appBar      = document.getElementById("appBar");
+  var main        = document.getElementById("main");
+  var navItems    = Array.prototype.slice.call(document.querySelectorAll("[data-route]"));
+
+  var ROUTES = {
+    overview:        { title: "Text Summarizer Agent" },
+    quickstart:      { title: "Quick start" },
+    integrations:    { title: "Integrations" },
+    vault:           { title: "The vault" },
+    docs:            { title: "Documentation" },
+    troubleshooting: { title: "Troubleshooting" }
+  };
+  var DEFAULT_ROUTE = "overview";
+  var HOME = "overview";
+
+  /* Wide screens show the drawer permanently, so there is no open/close state
+     and no focus to trap. Modal behaviour only exists below the breakpoint. */
+  function isPermanent() {
+    return window.matchMedia("(min-width: 1100px)").matches;
+  }
+  function isOpen() {
+    return drawer.getAttribute("data-open") === "true";
+  }
+
+  var lastFocused = null;
+
+  function openDrawer() {
+    if (isPermanent() || isOpen()) return;
+    lastFocused = document.activeElement;
+    drawer.setAttribute("data-open", "true");
+    scrim.setAttribute("data-open", "true");
+    menuButton.setAttribute("aria-expanded", "true");
+    document.body.style.overflow = "hidden";
+    var first = drawer.querySelector(".nav-item");
+    if (first) first.focus();
+  }
+
+  function closeDrawer(fromScrim) {
+    if (!isOpen()) return;
+    drawer.setAttribute("data-open", "false");
+    scrim.setAttribute("data-open", "false");
+    menuButton.setAttribute("aria-expanded", "false");
+    document.body.style.overflow = "";
+    // Returning focus to the trigger is what makes this usable by keyboard; on a
+    // scrim tap there is no meaningful trigger, so let the browser settle.
+    if (!fromScrim && lastFocused && lastFocused.focus) lastFocused.focus();
+    lastFocused = null;
+  }
+
+  /* Keep Tab inside the modal drawer while it is open. */
+  function trapFocus(event) {
+    if (event.key !== "Tab" || !isOpen() || isPermanent()) return;
+    var focusable = drawer.querySelectorAll(
+      'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    );
+    if (!focusable.length) return;
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function routeFromHash() {
+    var name = (location.hash || "").replace(/^#\/?/, "");
+    return ROUTES[name] ? name : DEFAULT_ROUTE;
+  }
+
+  function render() {
+    var route = routeFromHash();
+
+    Array.prototype.forEach.call(document.querySelectorAll(".view"), function (view) {
+      var active = view.id === "view-" + route;
+      view.setAttribute("data-active", active ? "true" : "false");
+      // The hidden attribute is what keeps these out of the tab order and out of
+      // the a11y tree; display:none alone would leave them focusable in some UAs.
+      view.hidden = !active;
+    });
+
+    navItems.forEach(function (item) {
+      if (item.dataset.route === route) {
+        item.setAttribute("aria-current", "page");
+      } else {
+        item.removeAttribute("aria-current");
+      }
+    });
+
+    appBarTitle.textContent = ROUTES[route].title;
+    backButton.hidden = (route === HOME);
+
+    // Move focus to the view on a real navigation, but not on first paint --
+    // stealing focus on load would fight the browser's own handling.
+    if (render.navigated) {
+      main.focus({ preventScroll: true });
+      window.scrollTo(0, 0);
+    }
+    render.navigated = true;
+    closeDrawer();
+  }
+
+  menuButton.addEventListener("click", function () {
+    isOpen() ? closeDrawer() : openDrawer();
+  });
+  backButton.addEventListener("click", function () {
+    if (isOpen()) closeDrawer();
+    location.hash = "#/" + HOME;
+  });
+  scrim.addEventListener("click", function () { closeDrawer(true); });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { closeDrawer(); return; }
+    trapFocus(event);
+  });
+
+  // A drawer left open across a rotation into wide layout would strand the scrim.
+  window.addEventListener("resize", function () {
+    if (isPermanent()) closeDrawer(true);
+  });
+
+  window.addEventListener("hashchange", render);
+
+  // Top app bar gains its surface + elevation once the page scrolls (M3 on-scroll
+  // behaviour). The app is a fixed set of views, so this is really about the
+  // overscroll/rubber-band case.
+  window.addEventListener("scroll", function () {
+    appBar.setAttribute("data-scrolled", window.scrollY > 4 ? "true" : "false");
+  }, { passive: true });
+
+  render.navigated = false;
+  render();
+})();
+</script>
 </body>
 </html>
