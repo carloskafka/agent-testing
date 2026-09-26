@@ -375,6 +375,42 @@ main {
 .steps h3 { font-size: 1rem; font-weight: 500; margin-bottom: 4px; }
 .steps p { font-size: .9375rem; color: var(--on-surface-variant); }
 
+/* Per-step environment variables. Stacked rather than tabular so a long
+   GOOGLE_* triple stays readable on a phone, and each value links to where
+   you actually obtain it. */
+.vars { display: grid; gap: 8px; margin: 12px 0 0; }
+.var {
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  border-left: 3px solid var(--outline-variant);
+  border-radius: var(--shape-sm);
+  padding: 10px 12px;
+}
+.var dt {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  font-size: .8125rem;
+}
+.var dt code { font-size: .8125rem; }
+.var dd {
+  margin: 4px 0 0;
+  font-size: .8125rem; line-height: 1.45;
+  color: var(--on-surface-variant);
+}
+/* The one var that is actually required gets the accent edge. */
+.var--req { border-left-color: var(--primary); }
+
+.tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--shape-xs);
+  background: var(--surface-container-highest);
+  color: var(--on-surface-variant);
+  font-size: .6875rem; font-weight: 500;
+  letter-spacing: .03em; text-transform: uppercase;
+  white-space: nowrap;
+}
+.tag--req { background: var(--primary-container); color: var(--on-primary-container); }
+
 table { width: 100%; border-collapse: collapse; font-size: .875rem; }
 caption { text-align: left; font-size: .75rem; color: var(--on-surface-variant); padding-bottom: 8px; }
 th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--outline-variant); vertical-align: top; }
@@ -556,25 +592,87 @@ td code { white-space: nowrap; }
       <li>
         <h3>Get a model key</h3>
         <p>
-          Grab a free key at
-          <a href="https://aistudio.google.com/app/apikey" rel="noopener">Google AI Studio</a>
-          and put it in <code>GEMINI_API_KEY</code> in <code>.env</code>.
-          <code>./run.sh</code> creates that file from <code>.env.example</code> on first run.
+          <code>./run.sh</code> creates <code>.env</code> from <code>.env.example</code>
+          on first run. Put your key in it — this is the only thing you actually need.
         </p>
+        <dl class="vars">
+          <div class="var">
+            <dt><code>GEMINI_API_KEY</code> <span class="tag tag--req">required</span></dt>
+            <dd>The model backend. <a href="https://aistudio.google.com/app/apikey" rel="noopener">Get a free key from Google AI Studio</a>.</dd>
+          </div>
+          <div class="var">
+            <dt><code>OPENROUTER_API_KEY</code> <span class="tag">optional</span></dt>
+            <dd>Free models as a fallback when Gemini rate-limits you. <a href="https://openrouter.ai/keys" rel="noopener">Create a key on OpenRouter</a>.</dd>
+          </div>
+          <div class="var">
+            <dt><code>MODEL_PROVIDER</code> <span class="tag">optional</span></dt>
+            <dd>Set to <code>openrouter</code> to use the key above; defaults to <code>gemini</code>. See <a href="https://github.com/carloskafka/agent-testing/blob/main/docs/MODELS.md" rel="noopener">Models</a>.</dd>
+          </div>
+        </dl>
       </li>
+
       <li>
         <h3>Run it</h3>
         <p>This picks your vault, builds both containers, and starts them.</p>
         <pre><code>./run.sh</code></pre>
+        <p>
+          If you already have Obsidian vaults, it finds them — including the ones in
+          your Obsidian config — and asks which to use. With nothing configured it
+          auto-creates <code>agent-vault</code> in a local <code>vaults/</code> folder.
+        </p>
+        <dl class="vars">
+          <div class="var">
+            <dt><code>OBSIDIAN_VAULT_PARENT_HOST</code> <span class="tag">optional</span></dt>
+            <dd>Host directory whose children are your vaults. Defaults to <code>./vaults</code>. Usually written for you.</dd>
+          </div>
+          <div class="var">
+            <dt><code>OBSIDIAN_VAULT_NAME</code> <span class="tag">optional</span></dt>
+            <dd>Required only when that directory holds more than one vault — it is never guessed. <code>./run.sh</code> prompts and saves it.</dd>
+          </div>
+        </dl>
       </li>
+
       <li>
         <h3>Open the agent and try a prompt</h3>
         <p>The web UI runs on your machine at <code>http://localhost:8001</code>.</p>
         <pre><code>Summarize: Dogs are domesticated animals known for loyalty and
 companionship. They are often called man's best friend. Dogs come in
 many breeds, varying in size, color, and temperament.</code></pre>
-        <p>With Gmail configured, the agent reads your inbox too:</p>
-        <pre><code>What are my latest 5 emails? Summarize them.</code></pre>
+        <p>
+          Every answer is written into your vault as a linked note. Ask the same
+          question again and it comes straight from the vault, with no model call.
+        </p>
+      </li>
+
+      <li>
+        <h3>Optional: switch on the extras</h3>
+        <p>Each of these loads on its own; none of them affect the steps above.</p>
+        <dl class="vars">
+          <div class="var">
+            <dt><code>GOOGLE_CLIENT_ID</code><br><code>GOOGLE_CLIENT_SECRET</code><br><code>GOOGLE_REFRESH_TOKEN</code></dt>
+            <dd>
+              Read-only Gmail access. Create an OAuth client and enable the Gmail API
+              in the <a href="https://console.cloud.google.com/apis/credentials" rel="noopener">Google Cloud console</a>
+              (also the <a href="https://console.cloud.google.com/apis/library/gmail-api" rel="noopener">Gmail API</a>), then run
+              <code>text_summarizer/gmail_oauth.py</code> once to mint the refresh token.
+              Full walkthrough in <a href="https://github.com/carloskafka/agent-testing/blob/main/docs/INTEGRATIONS.md" rel="noopener">Integrations</a>.
+            </dd>
+          </div>
+          <div class="var">
+            <dt><code>LANGFUSE_PUBLIC_KEY</code><br><code>LANGFUSE_SECRET_KEY</code><br><code>LANGFUSE_BASE_URL</code></dt>
+            <dd>
+              A trace per turn: latency, cache hit/miss, quality scores.
+              <a href="https://cloud.langfuse.com" rel="noopener">Create a project on Langfuse Cloud</a>, or self-host.
+            </dd>
+          </div>
+          <div class="var">
+            <dt><code>CACHE_ENABLED</code> <span class="tag">optional</span></dt>
+            <dd>
+              Leave <code>true</code> for normal use. Set it to <code>false</code> when running
+              <code>adk eval</code>, or the agent replays cached notes and the loop measures nothing.
+            </dd>
+          </div>
+        </dl>
       </li>
     </ol>
 
