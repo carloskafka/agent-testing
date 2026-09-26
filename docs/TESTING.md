@@ -38,6 +38,34 @@ Summarize the following text:
 Scientists at CERN have announced the discovery of a new subatomic particle that could reshape our understanding of fundamental physics. The particle, tentatively named the Xi-cc-double-plus, is a type of baryon containing two charm quarks and one up quark. Unlike most known baryons, which contain at most one heavy quark, this particle's unique composition makes it an ideal laboratory for testing quantum chromodynamics, the theory describing the strong nuclear force. The discovery was made using the Large Hadron Collider's beauty experiment, which analyzed data from proton-proton collisions at energies of up to 13 teraelectronvolts. Researchers expect this finding to open new avenues for understanding how quarks bind together to form matter.
 ```
 
+**Example 4: Gmail (needs the `GOOGLE_*` vars)**
+
+```
+What are my latest 5 emails? Summarize them.
+```
+
+```
+Summarize all my e-mails related to Newsletters/Dzone label to this week.
+```
+
+```
+What did my manager ask me to do this week? Summarize the thread.
+```
+
+The agent picks a `gmail_search` tool based on the phrasing — a time window,
+a label, a sender. Expect it to summarise the retrieved messages, not answer
+from its own knowledge. The same prompt asked twice is answered from the vault
+cache with no model call, so use a different phrasing to exercise the tools.
+
+**Example 5: Asking the vault instead of summarising new text**
+
+```
+What do I already know about deployment pipelines? Cite the notes.
+```
+
+Retrieval rather than summarisation. The `**Sources**` block should name real
+notes; if it renders `unknown` for the vault, retrieval is not wired up.
+
 ## Bad Examples (What NOT to Input)
 
 These inputs will produce poor results or violate the agent's rules.

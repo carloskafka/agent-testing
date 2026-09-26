@@ -634,13 +634,34 @@ td code { white-space: nowrap; }
 
       <li>
         <h3>Open the agent and try a prompt</h3>
-        <p>The web UI runs on your machine at <code>http://localhost:8001</code>.</p>
-        <pre><code>Summarize: Dogs are domesticated animals known for loyalty and
-companionship. They are often called man's best friend. Dogs come in
-many breeds, varying in size, color, and temperament.</code></pre>
         <p>
-          Every answer is written into your vault as a linked note. Ask the same
-          question again and it comes straight from the vault, with no model call.
+          The web UI runs on your own machine at
+          <a href="http://localhost:8001"><code>http://localhost:8001</code></a> —
+          open that after <code>./run.sh</code> is up.
+        </p>
+
+        <p>Paste any text and ask for a summary:</p>
+        <pre><code>Summarize: Dogs are domesticated mammals known for their loyalty and
+companionship. They are often called man's best friend. Dogs come in many
+breeds, varying in size, color, and temperament.</code></pre>
+
+        <p>
+          Every answer is written into your vault as a linked note, with topic notes
+          and an index graph around it. Ask the same question again and the answer
+          comes straight from the vault, with no model call.
+        </p>
+
+        <p>If you configured Gmail in step 4, the agent can read your inbox too:</p>
+        <pre><code>What are my latest 5 emails? Summarize them.</code></pre>
+        <pre><code>Summarize all my e-mails related to Newsletters/Dzone label to this week.</code></pre>
+        <pre><code>What did my manager ask me to do this week? Summarize the thread.</code></pre>
+
+        <p>You can also ask what you already know, which reads the vault rather than new text:</p>
+        <pre><code>What do I already know about deployment pipelines? Cite the notes.</code></pre>
+
+        <p>
+          More examples, including the ones that do <em>not</em> work and why, are in
+          <a href="https://github.com/carloskafka/agent-testing/blob/main/docs/TESTING.md" rel="noopener">Testing in the web UI</a>.
         </p>
       </li>
 
