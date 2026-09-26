@@ -19,13 +19,20 @@
           "final_response": {
             "parts": [
               {
-                "text": "- The Amazon rainforest is a moist broadleaf forest covering most of the Amazon basin in South America.\n- The basin spans 7,000,000 km2, with 5,500,000 km2 covered by rainforest.\n- The forest spans nine nations and 3,344 acknowledged indigenous territories.\n- Brazil contains 60% of the rainforest, followed by Peru (13%) and Colombia (10%)."
+                "text": "- The Amazon rainforest is a moist broadleaf forest covering most of the Amazon basin in South America.\n- The basin spans 7,000,000 km2, with 5,500,000 km2 covered by rainforest.\n- The forest spans nine nations and 3,344 acknowledged indigenous territories.\n- Brazil contains 60% of the rainforest, followed by Peru (13%) and Colombia (10%).\n\nSaved to the second brain as \"Amazon Rainforest Summary\"."
               }
             ],
             "role": "model"
           },
           "intermediate_data": {
-            "tool_uses": [],
+            "tool_uses": [
+              {
+                "name": "save_summary_to_second_brain"
+              },
+              {
+                "name": "log_conversation"
+              }
+            ],
             "intermediate_responses": []
           }
         }
@@ -52,13 +59,20 @@
           "final_response": {
             "parts": [
               {
-                "text": "- Machine learning is a subset of AI that enables systems to learn and improve from experience without explicit programming.\n- It focuses on developing programs that can access data and learn from it autonomously.\n- Learning starts from observations or data to find patterns for better future decisions.\n- The primary goal is to allow computers to learn and adjust actions automatically without human intervention."
+                "text": "- Machine learning is a subset of AI that enables systems to learn and improve from experience without explicit programming.\n- It focuses on developing programs that can access data and learn from it autonomously.\n- Learning starts from observations or data to find patterns for better future decisions.\n- The primary goal is to allow computers to learn and adjust actions automatically without human intervention.\n\nSaved to the second brain as \"Machine Learning Summary\"."
               }
             ],
             "role": "model"
           },
           "intermediate_data": {
-            "tool_uses": [],
+            "tool_uses": [
+              {
+                "name": "save_summary_to_second_brain"
+              },
+              {
+                "name": "log_conversation"
+              }
+            ],
             "intermediate_responses": []
           }
         }
@@ -85,13 +99,60 @@
           "final_response": {
             "parts": [
               {
-                "text": "- CERN scientists discovered a new subatomic particle called Xi-cc-double-plus.\n- It is a baryon containing two charm quarks and one up quark, an unusual composition.\n- The particle serves as a laboratory for testing quantum chromodynamics and the strong nuclear force.\n- The discovery was made using the Large Hadron Collider's beauty experiment at 13 TeV energies.\n- This finding may open new avenues for understanding quark binding in matter."
+                "text": "- CERN scientists discovered a new subatomic particle called Xi-cc-double-plus.\n- It is a baryon containing two charm quarks and one up quark, an unusual composition.\n- The particle serves as a laboratory for testing quantum chromodynamics and the strong nuclear force.\n- The discovery was made using the Large Hadron Collider's beauty experiment at 13 TeV energies.\n- This finding may open new avenues for understanding quark binding in matter.\n\nSaved to the second brain as \"New Particle Discovery Summary\"."
               }
             ],
             "role": "model"
           },
           "intermediate_data": {
-            "tool_uses": [],
+            "tool_uses": [
+              {
+                "name": "save_summary_to_second_brain"
+              },
+              {
+                "name": "log_conversation"
+              }
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "text_summarizer",
+        "user_id": "test_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "vault_sources_block",
+      "conversation": [
+        {
+          "invocation_id": "inv-004",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Summarize the following text:\n\nWorking dogs are bred for specific tasks rather than companionship alone. Herding dogs control and move livestock across large areas, and they rely on intense eye contact and body posture rather than barking. Guarding dogs protect property, livestock, and people, and many breeds still descend from ancestors selected for vigilance and territorial behaviour. Sled and rescue dogs are selected for endurance in cold environments and for the ability to work as a team with a handler. Selection for these roles has produced breeds with unusually high trainability, focus, and resilience, though the traits that make a dog excellent at one task can be undesirable in a domestic setting."
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "- Working dogs are bred for specific tasks such as herding, guarding, sled work, and rescue rather than companionship alone.\n- Herding dogs move livestock using eye contact and body posture instead of barking.\n- Guarding dogs descend from ancestors selected for vigilance and territorial behaviour.\n- Sled and rescue dogs are selected for cold-weather endurance and for teamwork with a handler.\n- These roles produce unusually trainable, focused, and resilient breeds.\n\n**Sources**\n[obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - characteristics-and-purpose-of-dogs]]: prior notes on the purposes dogs were bred for\n[obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - summary-of-dogs-characteristics-and-roles]]: related breed traits and social behaviour\n\nSaved to the second brain as \"Working Dogs Roles Summary\"."
+              }
+            ],
+            "role": "model"
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "save_summary_to_second_brain"
+              },
+              {
+                "name": "log_conversation"
+              }
+            ],
             "intermediate_responses": []
           }
         }

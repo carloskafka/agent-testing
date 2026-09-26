@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- ADK / eval local state (regenerate with `adk eval`) ---
+.adk/
+optimization_history.json
+# --- Local vault data (auto-created "agent-vault" parent, bind-mounted at /vaults) ---
+vaults/
+# --- Google OAuth ---
+*client_secret*.json
+*token.json

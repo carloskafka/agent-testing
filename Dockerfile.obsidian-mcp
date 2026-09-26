@@ -18,4 +18,12 @@ VOLUME ["/root/.local"]
 
 EXPOSE 37842
 
-CMD ["obsidian-mcp", "--http", "--host", "0.0.0.0", "--port", "37842", "/vault"]
+# The vault's parent is mounted at /vaults so the real vault directory name is
+# preserved in the path. resolve-vault.sh discovers the single child vault at
+# startup rather than hardcoding a name, and mirrors
+# second_brain.resolve_vault_root() so both services always agree on the vault.
+ENV VAULT_PARENT=/vaults
+COPY resolve-vault.sh /usr/local/bin/resolve-vault.sh
+RUN chmod +x /usr/local/bin/resolve-vault.sh
+
+CMD ["/usr/local/bin/resolve-vault.sh"]

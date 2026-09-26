@@ -19,13 +19,20 @@
           "final_response": {
             "parts": [
               {
-                "text": "- Dogs are domesticated mammals valued for loyalty and companionship.\n- They come in many breeds with varying size, color, and temperament.\n- Dogs have been bred for hunting, herding, guarding, and companionship.\n- They are social animals that thrive on human and canine interaction."
+                "text": "- Dogs are domesticated mammals valued for loyalty and companionship.\n- They come in many breeds with varying size, color, and temperament.\n- Dogs have been bred for hunting, herding, guarding, and companionship.\n- They are social animals that thrive on human and canine interaction.\n\nSaved to the second brain as \"Dogs Characteristics Summary\"."
               }
             ],
             "role": "model"
           },
           "intermediate_data": {
-            "tool_uses": [],
+            "tool_uses": [
+              {
+                "name": "save_summary_to_second_brain"
+              },
+              {
+                "name": "log_conversation"
+              }
+            ],
             "intermediate_responses": []
           }
         }

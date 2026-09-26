@@ -8,8 +8,15 @@ services:
     network_mode: service:agent-testing
     depends_on:
       - agent-testing
+    environment:
+      # Which child of the mount to serve. Optional when the parent holds one
+      # vault; required when it holds several. Kept in sync with the agent's
+      # SECOND_BRAIN_VAULT by construction -- both read the same variable.
+      VAULT_NAME: ${OBSIDIAN_VAULT_NAME:-}
     volumes:
-      - /home/vboxuser/Downloads/apps/obsidian/config/ck-vault/ck:/vault
+      # Host directory whose children are Obsidian vaults (auto-created as
+      # "agent-vault" if empty). Override with OBSIDIAN_VAULT_PARENT_HOST in .env.
+      - ${OBSIDIAN_VAULT_PARENT_HOST:-./vaults}:/vaults
 
   agent-testing:
     build:
@@ -24,7 +31,15 @@ services:
     environment:
       LANGFUSE_BASE_URL: http://host.docker.internal:3099
       OBSIDIAN_MCP_URL: http://127.0.0.1:37842/mcp
+      # The vault's PARENT is mounted, not the vault itself, so the real vault
+      # directory name survives in the path. resolve_vault_root() picks the active
+      # vault out of it, which makes the name that renders in every **Sources** line
+      # fully dynamic -- rename the vault folder on the host and it follows, with no
+      # name configured anywhere. With several vaults in the parent, set
+      # OBSIDIAN_VAULT_NAME in .env to choose; run.sh can prompt for it.
+      SECOND_BRAIN_VAULT: /vaults
+      OBSIDIAN_VAULT_NAME: ${OBSIDIAN_VAULT_NAME:-}
     volumes:
-      - /home/vboxuser/Downloads/apps/obsidian/config/ck-vault/ck:/vault
+      - ${OBSIDIAN_VAULT_PARENT_HOST:-./vaults}:/vaults
     extra_hosts:
       - "host.docker.internal:host-gateway"
