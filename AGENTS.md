@@ -421,7 +421,26 @@ PYTHONPATH=/tmp/agent-testing-testlibs \
 - `tests/conftest.py` blanks `LANGFUSE_PUBLIC_KEY` before any import, because importing the package runs `setup_observability()`, which otherwise does a network auth check against an unreachable host.
 - `test_adk_wiring.py` runs a real `LlmAgent` through a real `InMemoryRunner` with a stub `BaseLlm`. That is how the three ADK facts the provenance feature depends on are verified without spending quota. **If you change how the model or tool context is read, keep these tests green — they are the only automated guard on that wiring.**
 
-There is no linter or type-checker configured in this repo (no `ruff`/`mypy`/`pyright` config, no `Makefile`, no CI). The only automated gate is the pytest run above.
+There is no linter or type-checker configured in this repo (no `ruff`/`mypy`/`pyright` config, no `Makefile`). The only automated gate is the pytest run above.
+
+### Publishing the documentation (`docs/`)
+
+`.github/workflows/pages.yml` publishes `docs/` to
+<https://carloskafka.github.io/agent-testing/>. It collects the folder as an
+artifact and deploys it; there is no build step, because there is nothing to
+build. Commits that touch only the agent do not republish it (`paths:` is
+`docs/**` plus the workflow file itself), so a run is triggered by editing the
+page, and the Actions tab can also republish on demand.
+
+The site used to be published by *Settings → Pages → Deploy from a branch*
+(`main` / `/docs`). That arrangement was invisible in the repository — not
+readable from a clone, not changeable without an API call — and it republished
+on every push. Moving it into a file is why the source is now
+`build_type: workflow` in the Pages API.
+
+**After a push to `docs/`, check the run before assuming the site is updated.**
+The commit and the site are not in step until the workflow finishes, and a red
+run leaves the previously published site up, which looks like success.
 
 `Dockerfile` copies only `text_summarizer/`, then runs `uv sync --frozen` and serves the web UI.
 
