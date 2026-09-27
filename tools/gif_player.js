@@ -206,6 +206,7 @@
     this.wasPlaying = false;
     this.canvas = null;
     this.ctx = null;
+    this.scale = 1;
     this.scratch = null;
     this.sctx = null;
     this.luts = new Map();
@@ -258,6 +259,14 @@
     }
     this.hit.disabled = true;
     if (this.fullBtn) this.fullBtn.disabled = true;
+
+    if ("ResizeObserver" in window) {
+      var self = this;
+      this.resizeObserver = new ResizeObserver(function () { self.resize(); });
+      this.resizeObserver.observe(this.stage);
+    } else {
+      window.addEventListener("resize", this.resize.bind(this));
+    }
   };
 
   /* There is no status line any more. The reason a player gave up is kept on
@@ -321,6 +330,37 @@
     this.native("This browser would not let the page read the file");
   };
 
+  /* Size the backing store to the pixels the browser actually has to fill.
+   *
+   * A canvas of 920x640 shown at 810 CSS px is already being scaled, and on a
+   * HiDPI screen the browser magnifies it further to light up every device
+   * pixel. Repeated play/pause forces a fresh rasterisation each time, so the
+   * result is the pixelation and the sense of one image sitting inside
+   * another. Draw at device resolution instead and the browser has nothing to
+   * invent: the frame is scaled once, on the way in, by the same maths. */
+  GifPlayer.prototype.resize = function () {
+    if (!this.gif || !this.canvas) return;
+    var dpr = window.devicePixelRatio || 1;
+    /* Measure the stage, not the canvas. The canvas starts hidden, and a hidden
+     * element reports a client width of zero -- which falls back to the
+     * recording's own size, matches the canvas, and quietly skips the whole
+     * thing. The stage is always laid out: the poster underneath is what gives
+     * it its height. */
+    var box = this.stage.getBoundingClientRect();
+    var w = box.width || this.gif.width;
+    var h = box.height || this.gif.height;
+    if (w < 2 || h < 2) return;               // not laid out yet; try again later
+    var pw = Math.max(1, Math.round(w * dpr));
+    var ph = Math.max(1, Math.round(h * dpr));
+    if (this.canvas.width === pw && this.canvas.height === ph) return;
+    this.canvas.width = pw;
+    this.canvas.height = ph;
+    this.scale = pw / this.gif.width;
+    this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+    this.drawn = -1;                 // the old contents went with the resize
+    if (this.gif) this.render();
+  };
+
   GifPlayer.prototype.lut = function (pal) {
     /* One packed RGBA lookup per palette, reused by every frame that shares it. */
     if (this.luts.has(pal)) return this.luts.get(pal);
@@ -356,6 +396,7 @@
 
     this.hit.disabled = false;
     if (this.fullBtn) this.fullBtn.disabled = false;
+    this.scale = 1;                            // sane until the first measurement
     this.stage.setAttribute("data-state", "ready");
     this.setStatus("");
 
@@ -418,7 +459,9 @@
     } else {
       /* A jump (seek, step backwards, loop): replay from the start. These
        * recordings are a few dozen frames, so this is well under a frame. */
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
       for (var k = 0; k <= i; k++) {
         if (k > 0) this.clearFrame(frames[k - 1]);
         this.paint(frames[k]);
@@ -470,6 +513,7 @@
     this.pause();
     this.clearWatchdog();
     if (this.canvas) { this.canvas.remove(); this.canvas = null; }
+    if (this.resizeObserver) { this.resizeObserver.disconnect(); this.resizeObserver = null; }
     if (this.hit) { this.hit.remove(); this.hit = null; }
     if (this.fullBtn) { this.fullBtn.remove(); this.fullBtn = null; }
     this.poster.hidden = false;
@@ -583,6 +627,7 @@
       return;
     }
     this.canvas.hidden = false;   // laid over the poster, which stays put
+    this.resize();               // now that it is laid out and can be measured
     this.playing = true;
     this.last = Date.now();
     this.acc = 0;

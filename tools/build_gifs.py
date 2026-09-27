@@ -313,7 +313,11 @@ def write_gif(frames: list[tuple[Image.Image, int]], path: str, still: int | Non
     quants[0].save(path, save_all=True, append_images=quants[1:],
                    duration=[ms for _, ms in merged], loop=0, optimize=True, disposal=1)
     if still is not None:
-        quants[still].convert("RGB").resize((OUT_W // 2, OUT_H // 2), Image.LANCZOS).save(
+        # Full size, not half. The poster is displayed at the width of the stage,
+        # which on a HiDPI screen is more device pixels than a half-size still
+        # has, so a small one is visibly soft for the second or two before the
+        # canvas appears -- and for good, for a reduced-motion reader.
+        quants[still].convert("RGB").save(
             path.replace(".gif", "-still.png"), optimize=True)
     return {"frames": len(merged), "ms": sum(ms for _, ms in merged),
             "bytes": os.path.getsize(path)}

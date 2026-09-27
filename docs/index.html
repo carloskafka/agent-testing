@@ -588,35 +588,40 @@ td code { white-space: nowrap; }
 .walkthrough__stage[data-playing="true"]:hover .player__hit .icon,
 .walkthrough__stage[data-playing="true"] .player__hit:focus-visible .icon { opacity: .9; }
 
-/* Full screen, which used to sit in the transport row. Bottom right, not top
-   right: the app bar is fixed across the top of the viewport, so a control in
-   the stage's top corner is unclickable whenever the figure is scrolled up
-   against it, and the bar swallows the click. Nothing is fixed at the bottom.
-   Faint rather than hidden, because there is no hover on a touch screen and
-   anything that only appears on hover is invisible to half the readers. */
+/* Full screen, on the recording, bottom right.
+   Bottom rather than top because the app bar is fixed across the viewport: a
+   control in the stage's top corner is unclickable whenever the figure is
+   scrolled up against it, and the bar swallows the click.
+   Deliberately not faint and not hover-only. It is faint, at 45% over a
+   recording that is itself mostly near-black, it was simply not findable in
+   the thumbnail -- and there is no hover on a touch screen, so a
+   hover-revealed control is invisible to half the readers who need it. */
 .player__corner {
   position: absolute;
-  bottom: 10px;
-  right: 10px;
+  bottom: 12px;
+  right: 12px;
   z-index: 3;              /* above the hit area, so a click here is not a toggle */
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border: 0;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(231, 236, 242, .38);
   border-radius: var(--shape-full);
-  background: rgba(13, 16, 20, .5);
-  color: #cfd6df;
+  background: rgba(13, 16, 20, .78);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, .5);
+  color: #e7ecf2;
   cursor: pointer;
-  opacity: .45;
-  transition: opacity var(--dur-short) var(--ease-standard);
+  transition: background-color var(--dur-short) var(--ease-standard),
+              border-color var(--dur-short) var(--ease-standard);
 }
-.player__corner .icon { width: 20px; height: 20px; }
-.player__corner:hover,
-.player__corner:focus-visible { opacity: 1; }
-.player__corner:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-.player__corner:disabled { cursor: default; opacity: .2; }
+.player__corner .icon { width: 22px; height: 22px; }
+.player__corner:hover {
+  background: rgba(13, 16, 20, .92);
+  border-color: var(--primary);
+}
+.player__corner:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.player__corner:disabled { cursor: default; opacity: .25; }
 
 /* Text selection across a surface that is one big click target is never wanted,
    and a double click to go full screen should not select a word on the way. */
@@ -819,7 +824,7 @@ td code { white-space: nowrap; }
       </div>
       <figure class="figure">
         <div class="walkthrough__stage" data-state="idle">
-          <img src="assets/e2e-main-still.png" width="920" height="640" decoding="async"
+          <img src="assets/e2e-main-still.png" width="920" height="640" loading="lazy" decoding="async"
                alt="Recording of the ADK dev UI running one summarization turn. The prompt sits
                     in the composer, then the event stream fills in with save_summary_to_second_brain
                     and log_conversation; the answer comes back as four bullets and a line naming
@@ -855,7 +860,7 @@ td code { white-space: nowrap; }
       </div>
       <figure class="figure">
         <div class="walkthrough__stage" data-state="idle">
-          <img src="assets/e2e-obsidian-still.png" width="920" height="640" decoding="async"
+          <img src="assets/e2e-obsidian-still.png" width="920" height="640" loading="lazy" decoding="async"
                alt="Recording and live-vault panels covering the second brain. The first panel
                     lists the real vault as it is on disk — dated notes under Second Brain, topic
                     stubs under Topics, the index and the chat log — with the rules for choosing
@@ -891,7 +896,7 @@ td code { white-space: nowrap; }
       </div>
       <figure class="figure">
         <div class="walkthrough__stage" data-state="idle">
-          <img src="assets/e2e-gmail-still.png" width="920" height="640" decoding="async"
+          <img src="assets/e2e-gmail-still.png" width="920" height="640" loading="lazy" decoding="async"
                alt="Recording and panels covering a Gmail turn. The first panel lists the three
                     GOOGLE_ variables and the read-only gmail.readonly scope, and the four tools
                     they add. A recording then shows the question being asked and the real
@@ -1580,6 +1585,7 @@ breeds, varying in size, color, and temperament.</code></pre>
     this.wasPlaying = false;
     this.canvas = null;
     this.ctx = null;
+    this.scale = 1;
     this.scratch = null;
     this.sctx = null;
     this.luts = new Map();
@@ -1632,6 +1638,14 @@ breeds, varying in size, color, and temperament.</code></pre>
     }
     this.hit.disabled = true;
     if (this.fullBtn) this.fullBtn.disabled = true;
+
+    if ("ResizeObserver" in window) {
+      var self = this;
+      this.resizeObserver = new ResizeObserver(function () { self.resize(); });
+      this.resizeObserver.observe(this.stage);
+    } else {
+      window.addEventListener("resize", this.resize.bind(this));
+    }
   };
 
   /* There is no status line any more. The reason a player gave up is kept on
@@ -1695,6 +1709,37 @@ breeds, varying in size, color, and temperament.</code></pre>
     this.native("This browser would not let the page read the file");
   };
 
+  /* Size the backing store to the pixels the browser actually has to fill.
+   *
+   * A canvas of 920x640 shown at 810 CSS px is already being scaled, and on a
+   * HiDPI screen the browser magnifies it further to light up every device
+   * pixel. Repeated play/pause forces a fresh rasterisation each time, so the
+   * result is the pixelation and the sense of one image sitting inside
+   * another. Draw at device resolution instead and the browser has nothing to
+   * invent: the frame is scaled once, on the way in, by the same maths. */
+  GifPlayer.prototype.resize = function () {
+    if (!this.gif || !this.canvas) return;
+    var dpr = window.devicePixelRatio || 1;
+    /* Measure the stage, not the canvas. The canvas starts hidden, and a hidden
+     * element reports a client width of zero -- which falls back to the
+     * recording's own size, matches the canvas, and quietly skips the whole
+     * thing. The stage is always laid out: the poster underneath is what gives
+     * it its height. */
+    var box = this.stage.getBoundingClientRect();
+    var w = box.width || this.gif.width;
+    var h = box.height || this.gif.height;
+    if (w < 2 || h < 2) return;               // not laid out yet; try again later
+    var pw = Math.max(1, Math.round(w * dpr));
+    var ph = Math.max(1, Math.round(h * dpr));
+    if (this.canvas.width === pw && this.canvas.height === ph) return;
+    this.canvas.width = pw;
+    this.canvas.height = ph;
+    this.scale = pw / this.gif.width;
+    this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+    this.drawn = -1;                 // the old contents went with the resize
+    if (this.gif) this.render();
+  };
+
   GifPlayer.prototype.lut = function (pal) {
     /* One packed RGBA lookup per palette, reused by every frame that shares it. */
     if (this.luts.has(pal)) return this.luts.get(pal);
@@ -1730,6 +1775,7 @@ breeds, varying in size, color, and temperament.</code></pre>
 
     this.hit.disabled = false;
     if (this.fullBtn) this.fullBtn.disabled = false;
+    this.scale = 1;                            // sane until the first measurement
     this.stage.setAttribute("data-state", "ready");
     this.setStatus("");
 
@@ -1792,7 +1838,9 @@ breeds, varying in size, color, and temperament.</code></pre>
     } else {
       /* A jump (seek, step backwards, loop): replay from the start. These
        * recordings are a few dozen frames, so this is well under a frame. */
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
       for (var k = 0; k <= i; k++) {
         if (k > 0) this.clearFrame(frames[k - 1]);
         this.paint(frames[k]);
@@ -1844,6 +1892,7 @@ breeds, varying in size, color, and temperament.</code></pre>
     this.pause();
     this.clearWatchdog();
     if (this.canvas) { this.canvas.remove(); this.canvas = null; }
+    if (this.resizeObserver) { this.resizeObserver.disconnect(); this.resizeObserver = null; }
     if (this.hit) { this.hit.remove(); this.hit = null; }
     if (this.fullBtn) { this.fullBtn.remove(); this.fullBtn = null; }
     this.poster.hidden = false;
@@ -1957,6 +2006,7 @@ breeds, varying in size, color, and temperament.</code></pre>
       return;
     }
     this.canvas.hidden = false;   // laid over the poster, which stays put
+    this.resize();               // now that it is laid out and can be measured
     this.playing = true;
     this.last = Date.now();
     this.acc = 0;
