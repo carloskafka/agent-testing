@@ -322,6 +322,38 @@ main {
 .card__title { font-size: 1rem; font-weight: 500; margin: 0 0 4px; }
 .card__body { font-size: .875rem; color: var(--on-surface-variant); margin: 0; }
 
+/* "Next topic" at the foot of a section. The drawer lists every section, which
+   answers "where else is there?" but not "what do I read next" -- on a long
+   page the answer to that is somewhere off the bottom of the screen. A card
+   rather than a bare link, because it is a destination and not a footnote, and
+   the arrow sits opposite the label so the eye crosses the title. */
+.next-topic {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 2rem;
+  padding: 14px 16px;
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--shape-md);
+  background: var(--surface-container-low);
+  color: inherit;
+  text-decoration: none;
+  transition: background-color var(--dur-short) var(--ease-standard),
+              border-color var(--dur-short) var(--ease-standard);
+}
+.next-topic:hover { background: var(--surface-container); border-color: var(--outline); }
+.next-topic:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.next-topic__label {
+  display: block;
+  font-size: .75rem;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--on-surface-variant);
+}
+.next-topic__title { display: block; font-size: 1rem; font-weight: 500; }
+.next-topic .icon { margin-left: auto; color: var(--on-surface-variant); }
+.next-topic:hover .icon { color: var(--primary); }
+
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 1.25rem; padding: 0; list-style: none; }
 .chip {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1267,6 +1299,45 @@ breeds, varying in size, color, and temperament.</code></pre>
   };
   var DEFAULT_ROUTE = "overview";
   var HOME = "overview";
+
+  /* A "Next topic" at the foot of every section but the last, which has nothing
+     after it to offer.
+
+     Built from the order the sections appear in the document rather than from
+     ROUTES, because that is the order they are read in and the order the
+     drawer lists them, so the three cannot disagree. Hand-writing five copies
+     would drift the first time a section moved. */
+  (function nextTopicLinks() {
+    var ARROW = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">' +
+                '<path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>';
+    var views = Array.prototype.slice.call(document.querySelectorAll(".view"));
+
+    views.forEach(function (view, i) {
+      var next = views[i + 1];
+      if (!next) return;
+      var route = next.id.replace(/^view-/, "");
+      var title = (ROUTES[route] || {}).title;
+      if (!title) return;                     // an id that is not a route: skip
+
+      var link = document.createElement("a");
+      link.className = "next-topic";
+      link.href = "#/" + route;
+
+      var text = document.createElement("span");
+      var label = document.createElement("span");
+      label.className = "next-topic__label";
+      label.textContent = "Next topic";
+      var name = document.createElement("span");
+      name.className = "next-topic__title";
+      name.textContent = title;               // textContent, not innerHTML
+      text.appendChild(label);
+      text.appendChild(name);
+
+      link.appendChild(text);
+      link.insertAdjacentHTML("beforeend", ARROW);   // a fixed literal, not input
+      view.appendChild(link);
+    });
+  })();
 
   /* Wide screens show the drawer permanently, so there is no open/close state
      and no focus to trap. Modal behaviour only exists below the breakpoint. */
