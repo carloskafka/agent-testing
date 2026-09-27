@@ -199,6 +199,8 @@
     this.drawn = -1;
     this.raf = 0;
     this.watchdog = 0;
+    this.ticked = false;
+    this.handedOff = false;
     this.visible = false;
     this.wasPlaying = false;
     this.canvas = null;
@@ -408,22 +410,34 @@
     this.clearWatchdog();
   };
 
-  /* If the animation loop is not actually running -- rAF never fires, or every
-   * pass throws in a way the status line did not catch -- the reader is left
-   * staring at a frozen box with controls that do nothing. That is the worst
-   * outcome available, and it is strictly better to hand the file back to the
-   * browser, which animates a GIF natively everywhere, and drop the controls
-   * rather than leave them lying. Give the loop a moment to prove itself
-   * first, because a slow first frame is not a failure. */
-  GifPlayer.prototype.armWatchdog = function () {
+  /* If the animation loop is not running -- rAF never fires, or every pass
+   * throws -- the reader is left staring at a frozen image with a dead control
+   * on it, which is the worst outcome available. Better to hand the file back
+   * to the browser, which animates a GIF natively everywhere.
+   *
+   * The question this asks is "is the loop being called", NOT "has a frame
+   * boundary been crossed". Asking the second one is wrong in a way that looks
+   * like intermittent flakiness: the opening scene of every film is held for
+   * over two seconds so there is something to read, so a watchdog that waited
+   * two seconds for the first advance timed out on healthy browsers and handed
+   * the recording away, and whether it did depended on where a tick happened
+   * to land. rAF should deliver within a frame or two; 600ms is generous and
+   * still catches a dead loop quickly. */
+  GifPlayer.prototype.armWatchdog = function (attempt) {
     var self = this;
     this.clearWatchdog();
-    if (this.gif.frames.length < 2) return;      // a single frame cannot advance
     this.watchdog = window.setTimeout(function () {
       self.watchdog = 0;
-      if (self.moved) return;
+      if (self.ticked) return;                 // the loop is alive; that is all
+      /* Two chances, because the two failures are not equal. Handing off is
+       * permanent -- the controls are gone and the recording becomes a plain
+       * image -- so a false positive is much worse than a genuinely broken
+       * loop taking another 600ms to admit it. A tab that has just been
+       * foregrounded, or a machine mid-GC, can plausibly miss one deadline
+       * and not the next. */
+      if ((attempt || 1) < 2) { self.armWatchdog(2); return; }
       self.native("Animation did not start");
-    }, 2000);
+    }, 600);
   };
 
   GifPlayer.prototype.clearWatchdog = function () {
@@ -433,6 +447,7 @@
   /* Back to a plain animated <img>, which is what a browser does with a GIF
    * when nobody interferes with it. */
   GifPlayer.prototype.native = function (why) {
+    this.handedOff = true;
     this.pause();
     this.clearWatchdog();
     if (this.canvas) { this.canvas.remove(); this.canvas = null; }
@@ -469,6 +484,10 @@
 
   GifPlayer.prototype.tick = function (now) {
     if (!this.playing) return;
+    /* Proof of life. The first callback cancels the watchdog, so a browser
+     * where rAF works never comes near the hand-off. */
+    this.ticked = true;
+    this.clearWatchdog();
     var self = this;
     this.guarded("tick", function () { self.advance(now); });
     if (!this.playing) return;
@@ -495,13 +514,17 @@
         this.index = -1;                 // wrap: the next step draws frame 0
       }
       this.index++;
-      this.moved = true;
       this.render();
     }
   };
 
   GifPlayer.prototype.play = function () {
-    if (!this.gif) {
+    /* Safe to call at any time, including after the hand-off, which is not a
+     * state the player can control: the IntersectionObserver resumes anything
+     * it was playing when a figure scrolls back into view, and a backgrounded
+     * tab does the same, and by then the canvas is gone and this.canvas would
+     * be null. */
+    if (!this.gif || !this.canvas) {
       /* Pressed before the bytes arrived. A recording is a couple of hundred
        * kilobytes and the load starts when the figure comes within 300px of
        * the viewport, so this is the window a reader who scrolls straight to
@@ -522,7 +545,7 @@
      * makes the button self-healing if the loop was ever lost, and stops "the
      * play button does nothing" from being a reachable state. */
     if (this.raf) cancelAnimationFrame(this.raf);
-    this.moved = false;
+    this.ticked = false;          // the loop must prove itself again
     this.raf = requestAnimationFrame(this.tick);
     this.guarded("first frame", this.render);
     this.armWatchdog();
@@ -585,7 +608,6 @@
     var n = this.gif.frames.length;
     this.index = Math.max(0, Math.min(n - 1, this.index + delta));
     this.acc = 0;
-    this.moved = true;
     this.guarded("step", this.render);
   };
 
@@ -611,7 +633,7 @@
       players.forEach(function (p) {
         if (document.hidden) {
           if (p.playing) { p.wasPlaying = true; p.pause(); }
-        } else if (p.wasPlaying && p.visible) {
+        } else if (p.wasPlaying && p.visible && !p.handedOff) {
           p.play();
         }
       });
@@ -623,6 +645,7 @@
         if (!player) return;
         if (entry.isIntersecting) {
           player.visible = true;
+          if (player.handedOff) return;      // a native image has nothing to resume
           player.load();
           if (player.wasPlaying) player.play();
         } else {
