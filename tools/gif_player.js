@@ -195,7 +195,6 @@
     this.index = 0;
     this.acc = 0;
     this.speed = 1;
-    this.loop = true;
     this.playing = false;
     this.drawn = -1;
     this.raf = 0;
@@ -213,97 +212,57 @@
   GifPlayer.prototype.el = function (sel) { return this.figure.querySelector(sel); };
 
   GifPlayer.prototype.build = function () {
-    var tpl = document.getElementById("gifPlayerControls");
-    if (!tpl) return;
-    var bar = tpl.content.cloneNode(true);
-    /* Directly under the image, not at the end of the figure: the controls
-     * belong to the recording, and the caption reads better after them. */
-    this.stage.parentNode.insertBefore(bar, this.stage.nextSibling);
-    this.seek = this.el("[data-role=seek], .player__seek");
-    this.posOut = this.el("[data-role=pos]");
-    this.durOut = this.el("[data-role=dur]");
-    this.frameOut = this.el("[data-role=frame]");
-    this.countOut = this.el("[data-role=count]");
-    this.status = this.el("[data-role=status]");
-    this.playBtn = this.el('[data-act="play"]');
-    this.buttons = Array.prototype.slice.call(this.figure.querySelectorAll(".player__btn"));
-
     var self = this;
-    this.figure.addEventListener("click", function (ev) {
-      /* Walk up by hand rather than relying on Element.closest: the click
-       * lands on the <path> inside the button's SVG, and closest() on SVG
-       * elements is exactly the sort of thing that differs between browsers.
-       * A control that silently swallows its click is the failure this whole
-       * player keeps having to be careful about, so do not lean on it. */
-      var btn = null;
-      for (var node = ev.target; node && node !== self.figure; node = node.parentNode) {
-        if (node.getAttribute && node.getAttribute("data-act")) { btn = node; break; }
-      }
-      if (!btn) return;
-      var act = btn.getAttribute("data-act");
-      if (act === "play") { self.playing ? self.pause() : self.play(); }
-      else if (act === "prev") { self.pause(); self.step(-1); }
-      else if (act === "next") { self.pause(); self.step(1); }
-      else if (act === "stop") { self.pause(); self.seekTo(0); self.guarded("stop", self.render); }
-      else if (act === "full") { self.toggleFullscreen(); }
-    });
-    this.seek.addEventListener("input", function () {
-      self.pause();
-      self.seekTo(parseInt(self.seek.value, 10) || 0);
-      self.guarded("seek", self.render);
-    });
-    this.el("[data-role=speed]").addEventListener("change", function (ev) {
-      self.speed = parseFloat(ev.target.value) || 1;
-    });
-    this.el("[data-role=loop]").addEventListener("change", function (ev) {
-      self.loop = ev.target.checked;
-    });
+    var canFull = !!(this.figure.requestFullscreen || this.figure.webkitRequestFullscreen);
 
-    /* Clicking the recording itself is the obvious thing to try, so it is a
-     * real <button> laid over it rather than a click handler on a div: that
-     * way it is focusable, activates on Enter and Space for free, and is
-     * announced as what it is, none of which a div with a click listener and
-     * an aria-label bolted on afterwards reliably manages. */
+    /* Clicking the recording is the control, so the controls are on the
+     * recording. Both are real <button>s laid over it: focusable, activated by
+     * Enter and Space without code of our own, and announced as what they are.
+     * A div with a click listener and an aria-label attached afterwards is the
+     * version of this that ends up unfocusable or unlabelled. */
     this.hit = document.createElement("button");
     this.hit.type = "button";
     this.hit.className = "player__hit";
     /* Named from the start: the label is otherwise only written when playback
-       starts, so a player that is loaded but not yet playing -- reduced
-       motion, or a figure that scrolled away -- has an unnamed button. */
+     * begins, so a player that is loaded but idle -- reduced motion, or a
+     * figure that scrolled away -- would leave a nameless button on the page. */
     this.hit.setAttribute("aria-label", "Play the recording");
     this.stage.appendChild(this.hit);
     this.hit.addEventListener("click", function () {
       if (self.gif) { self.playing ? self.pause() : self.play(); }
     });
 
-    if (this.hit) this.hit.disabled = true;
-
-    this.fullBtn = this.el('[data-act="full"]');
-    if (this.fullBtn) {
-      var canFull = !!(this.figure.requestFullscreen || this.figure.webkitRequestFullscreen);
-      if (!canFull) {
-        this.fullBtn.remove();
-        this.fullBtn = null;
-      } else {
-        /* No listener of its own: the figure delegates every [data-act] click,
-         * so the button is already wired. Only the document-wide state change
-         * needs subscribing, because Escape and the browser's own exit never
-         * pass through here. */
-        document.addEventListener(fullscreenEvent, function () { self.syncFullscreen(); });
-      }
+    /* Full screen used to live in the transport row, which is gone, so it
+     * moves to a corner of the image. Omitted entirely where the API is
+     * missing rather than shipped as a control that cannot work. */
+    this.fullBtn = null;
+    if (canFull) {
+      this.fullBtn = document.createElement("button");
+      this.fullBtn.type = "button";
+      this.fullBtn.className = "player__corner";
+      this.fullBtn.innerHTML = ICON_FULLSCREEN;
+      this.fullBtn.setAttribute("aria-label", "Full screen");
+      this.stage.appendChild(this.fullBtn);
+      this.fullBtn.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        self.toggleFullscreen();
+      });
+      document.addEventListener(fullscreenEvent, function () { self.syncFullscreen(); });
+      this.hit.addEventListener("dblclick", function (ev) {
+        ev.preventDefault();
+        self.toggleFullscreen();
+      });
     }
-
-    /* Play stays live while the bytes are in flight so the click can be queued;
-     * stepping and seeking need a decoded frame, so they start disabled. */
-    this.buttons.forEach(function (b) {
-      if (b.getAttribute("data-act") !== "play") b.disabled = true;
-    });
-    this.seek.disabled = true;
-    this.setStatus("Loads when it scrolls into view");
+    this.hit.disabled = true;
+    if (this.fullBtn) this.fullBtn.disabled = true;
   };
 
+  /* There is no status line any more. The reason a player gave up is kept on
+   * the stage as data-why, which is what the reader sees, and every failure
+   * still goes to the console. */
   GifPlayer.prototype.setStatus = function (text) {
-    if (this.status) this.status.textContent = text;
+    this.note = text || "";
+    if (text) console.info("walkthrough: " + text);
   };
 
   /* Fetch once per URL; three figures asking for the same file share the bytes. */
@@ -374,16 +333,8 @@
     this.scratch.height = gif.height;
     this.sctx = this.scratch.getContext("2d");
 
-    this.total = gif.frames.reduce(function (sum, f) {
-      return sum + Math.max(MIN_FRAME_MS, f.delay);
-    }, 0);
-    this.durOut.textContent = (this.total / 1000).toFixed(1) + "s";
-    this.countOut.textContent = gif.frames.length;
-    this.seek.max = gif.frames.length - 1;
-
-    this.buttons.forEach(function (b) { b.disabled = false; });
-    this.seek.disabled = false;
-    if (this.hit) this.hit.disabled = false;
+    this.hit.disabled = false;
+    if (this.fullBtn) this.fullBtn.disabled = false;
     this.stage.setAttribute("data-state", "ready");
     this.setStatus("");
 
@@ -486,10 +437,9 @@
     this.clearWatchdog();
     if (this.canvas) { this.canvas.remove(); this.canvas = null; }
     if (this.hit) { this.hit.remove(); this.hit = null; }
+    if (this.fullBtn) { this.fullBtn.remove(); this.fullBtn = null; }
     this.poster.hidden = false;
     this.poster.setAttribute("src", this.src);
-    var bar = this.el(".player");
-    if (bar) bar.remove();
     this.stage.setAttribute("data-state", "native");
     if (why) this.stage.setAttribute("data-why", why);
   };
@@ -500,14 +450,7 @@
     return t + this.acc;
   };
 
-  GifPlayer.prototype.update = function () {
-    if (!this.gif) return;
-    if (document.activeElement !== this.seek) this.seek.value = this.index;
-    this.posOut.textContent = (this.elapsed() / 1000).toFixed(1) + "s";
-    this.frameOut.textContent = this.index + 1;
-    this.seek.setAttribute("aria-valuetext",
-      "frame " + (this.index + 1) + " of " + this.gif.frames.length);
-  };
+  GifPlayer.prototype.update = function () {};
 
   /* Any throw in here would otherwise leave the transport claiming to play
    * with no animation frame scheduled, and the play button doing nothing. Fail
@@ -549,12 +492,6 @@
     while (guard-- > 0 && this.acc >= this.delayOf(this.index)) {
       this.acc -= this.delayOf(this.index);
       if (this.index >= this.gif.frames.length - 1) {
-        if (!this.loop) {
-          this.acc = 0;
-          this.pause();
-          this.update();
-          return;
-        }
         this.index = -1;                 // wrap: the next step draws frame 0
       }
       this.index++;
@@ -636,10 +573,6 @@
 
   GifPlayer.prototype.setPlayIcon = function (playing) {
     var label = playing ? "Pause" : "Play";
-    if (this.playBtn) {
-      this.playBtn.setAttribute("aria-label", label);
-      this.playBtn.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
-    }
     if (this.hit) {
       this.hit.setAttribute("aria-label", label + " the recording");
       this.hit.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
