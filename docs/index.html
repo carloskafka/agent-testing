@@ -512,9 +512,10 @@ td code { white-space: nowrap; }
 .walkthrough .figure:fullscreen .player,
 .walkthrough .figure:-webkit-full-screen .player { flex: 0 0 auto; }
 
-/* When the player hands the file back to the browser, say so rather than
-   leaving a reader wondering where the controls went. */
-.walkthrough__stage[data-state="native"]::after {
+/* Why the controls went, or why a request was refused. Renders whenever
+   data-why is set: the player sets it when it hands the file back to the
+   browser, and briefly when something is refused. */
+.walkthrough__stage[data-why]::after {
   content: attr(data-why);
   position: absolute;
   left: 10px; bottom: 10px;
@@ -1636,9 +1637,27 @@ breeds, varying in size, color, and temperament.</code></pre>
   /* There is no status line any more. The reason a player gave up is kept on
    * the stage as data-why, which is what the reader sees, and every failure
    * still goes to the console. */
+  /* Nothing is logged to the console on the way through: a reader who opens a
+   * documentation page should not find it talking to them. Problems surface on
+   * the recording itself, and a genuine exception still goes to console.error
+   * from guarded(), where it is a real defect rather than an outcome. */
   GifPlayer.prototype.setStatus = function (text) {
     this.note = text || "";
-    if (text) console.info("walkthrough: " + text);
+  };
+
+  /* Show something on the recording for a few seconds: the controls are gone
+   * from the page now, so a message in a status line nobody can see would be a
+   * control that appears to have done nothing. */
+  GifPlayer.prototype.flash = function (text, ms) {
+    this.stage.setAttribute("data-why", text);
+    if (this.whyTimer) window.clearTimeout(this.whyTimer);
+    var self = this;
+    if (this.whyTimer) this.whyTimer = 0;
+    this.whyTimer = window.setTimeout(function () {
+      if (self.stage.dataset.state === "native") return;   // keep the reason
+      self.stage.removeAttribute("data-why");
+      self.whyTimer = 0;
+    }, ms || 4500);
   };
 
   /* Fetch once per URL; three figures asking for the same file share the bytes. */
@@ -1975,12 +1994,21 @@ breeds, varying in size, color, and temperament.</code></pre>
       if (activeFullscreen()) {
         if (exit) exit.call(document);
       } else if (request) {
-        request.call(this.figure);
+        /* It returns a promise, and that promise rejects when the browser says
+         * no -- no user activation, a policy, a frame without allowfullscreen.
+         * A try/catch around the call never sees that, so the rejection goes
+         * unhandled and lands in the reader's console as an error they did
+         * nothing to cause. Handle it, and tell them on the recording. */
+        var asked = request.call(this.figure);
+        if (asked && typeof asked.catch === "function") {
+          var self0 = this;
+          asked.catch(function (err) {
+            self0.flash("Full screen was refused: " + (err && err.message ? err.message : err));
+          });
+        }
       }
     } catch (err) {
-      /* Refused -- no user activation, or a policy. Say so rather than
-       * leaving a button that appears to have done nothing. */
-      this.setStatus("Full screen was refused by the browser");
+      this.flash("Full screen was refused by the browser");
     }
     /* Read the state back instead of trusting the call: a browser can turn the
      * request into a window-level fullscreen, and an exit can quietly do
