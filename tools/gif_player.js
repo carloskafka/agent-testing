@@ -207,6 +207,8 @@
     this.canvas = null;
     this.ctx = null;
     this.scale = 1;
+    this.ox = 0;
+    this.oy = 0;
     this.scratch = null;
     this.sctx = null;
     this.luts = new Map();
@@ -338,6 +340,25 @@
    * result is the pixelation and the sense of one image sitting inside
    * another. Draw at device resolution instead and the browser has nothing to
    * invent: the frame is scaled once, on the way in, by the same maths. */
+  /* Frame coordinates in, device pixels out. Everything downstream paints in
+   * the recording's own coordinates -- clearFrame and paint never see the
+   * backing store -- so the scale and the centring belong in one place. */
+  GifPlayer.prototype.applyTransform = function () {
+    this.ctx.setTransform(this.scale, 0, 0, this.scale, this.ox, this.oy);
+  };
+
+  /* What the bars beside a letterboxed frame should be: whatever the stage, or
+   * failing that the figure, is painted with. */
+  GifPlayer.prototype.panelColour = function () {
+    for (var i = 0; i < 2; i++) {
+      var el = i ? this.stage.parentNode : this.stage;
+      if (!el) continue;
+      var c = window.getComputedStyle(el).backgroundColor;
+      if (c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent") return c;
+    }
+    return "#000";
+  };
+
   GifPlayer.prototype.resize = function () {
     if (!this.gif || !this.canvas) return;
     var dpr = window.devicePixelRatio || 1;
@@ -355,8 +376,22 @@
     if (this.canvas.width === pw && this.canvas.height === ph) return;
     this.canvas.width = pw;
     this.canvas.height = ph;
-    this.scale = pw / this.gif.width;
-    this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+    /* One uniform scale off whichever axis is tighter, centred in the rest.
+     * The stage is normally exactly the shape the recording was made at, so
+     * the width is the tighter axis, the offsets come out as zero and nothing
+     * moves -- but full screen in a window shorter than the recording forces
+     * the box to a wider shape, and scaling by the width alone then painted a
+     * squashed frame with the bottom 138 rows off the top of the buffer. */
+    this.scale = Math.min(pw / this.gif.width, ph / this.gif.height);
+    this.ox = (pw - this.gif.width * this.scale) / 2;
+    this.oy = (ph - this.gif.height * this.scale) / 2;
+    /* The context is opaque (alpha:false, for compositing cost), so a letterbox
+     * bar is solid black rather than the panel showing through. Full screen in a
+     * window shorter than the recording bars the sides, and black beside a
+     * #0d1014 panel draws a visible rectangle around the frame. Remember the
+     * colour the replay below fills with. */
+    this.bg = this.panelColour();
+    this.applyTransform();
     this.drawn = -1;                 // the old contents went with the resize
     if (this.gif) this.render();
   };
@@ -397,6 +432,8 @@
     this.hit.disabled = false;
     if (this.fullBtn) this.fullBtn.disabled = false;
     this.scale = 1;                            // sane until the first measurement
+    this.ox = 0;
+    this.oy = 0;
     this.stage.setAttribute("data-state", "ready");
     this.setStatus("");
 
@@ -460,8 +497,9 @@
       /* A jump (seek, step backwards, loop): replay from the start. These
        * recordings are a few dozen frames, so this is well under a frame. */
       this.ctx.setTransform(1, 0, 0, 1, 0, 0);
-      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-      this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+      this.ctx.fillStyle = this.bg || "#000";
+      this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+      this.applyTransform();
       for (var k = 0; k <= i; k++) {
         if (k > 0) this.clearFrame(frames[k - 1]);
         this.paint(frames[k]);

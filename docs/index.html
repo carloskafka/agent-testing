@@ -480,14 +480,24 @@ td code { white-space: nowrap; }
 .walkthrough__stage [hidden] { display: none; }
 
 /* Fullscreen: the figure goes full-screen rather than just the image, so the
-   transport comes with it -- a full-screen video whose controls live back on
-   the page is not a control. The caption is prose and would dominate, so it
-   steps aside, and both the canvas and the poster get object-fit: contain
-   because the stage is no longer the shape the recording was recorded at. */
+   click-to-pause control comes with it. The caption is prose and would
+   dominate, so it steps aside.
+
+   The stage is capped at the recording's own width and centred, NOT stretched
+   to fill the screen. These are 920x640 recordings and there is nothing
+   above that resolution: letting the stage grow to a 1920px display magnified
+   the frame about 2x and read as a zoom, which is the opposite of what a
+   full-screen button should do on a desktop. A screen narrower than 920 --
+   a phone, a small window -- still gets a genuine enlargement, which is the
+   case full screen is actually for. object-fit: contain stays as a backstop so
+   the frame letterboxes rather than distorts if the box ends up the wrong
+   shape. */
 .walkthrough .figure:fullscreen,
 .walkthrough .figure:-webkit-full-screen {
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
   gap: 12px;
   margin: 0;
   padding: 16px;
@@ -496,9 +506,13 @@ td code { white-space: nowrap; }
 }
 .walkthrough .figure:fullscreen .walkthrough__stage,
 .walkthrough .figure:-webkit-full-screen .walkthrough__stage {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 1 auto;
+  width: 100%;
+  max-width: 920px;          /* the recording's natural width, not the screen's */
+  min-height: 0;             /* shrink to fit a short window rather than overflow it */
+  aspect-ratio: 920 / 640;
   border: 0;
+  margin: 0 auto;
 }
 .walkthrough .figure:fullscreen img,
 .walkthrough .figure:fullscreen canvas,
@@ -510,7 +524,7 @@ td code { white-space: nowrap; }
 .walkthrough .figure:fullscreen figcaption,
 .walkthrough .figure:-webkit-full-screen figcaption { display: none; }
 .walkthrough .figure:fullscreen .player,
-.walkthrough .figure:-webkit-full-screen .player { flex: 0 0 auto; }
+.walkthrough .figure:-webkit-full-screen .player { flex: 0 0 auto; width: 100%; max-width: 920px; }
 
 /* Why the controls went, or why a request was refused. Renders whenever
    data-why is set: the player sets it when it hands the file back to the
@@ -1586,6 +1600,8 @@ breeds, varying in size, color, and temperament.</code></pre>
     this.canvas = null;
     this.ctx = null;
     this.scale = 1;
+    this.ox = 0;
+    this.oy = 0;
     this.scratch = null;
     this.sctx = null;
     this.luts = new Map();
@@ -1717,6 +1733,25 @@ breeds, varying in size, color, and temperament.</code></pre>
    * result is the pixelation and the sense of one image sitting inside
    * another. Draw at device resolution instead and the browser has nothing to
    * invent: the frame is scaled once, on the way in, by the same maths. */
+  /* Frame coordinates in, device pixels out. Everything downstream paints in
+   * the recording's own coordinates -- clearFrame and paint never see the
+   * backing store -- so the scale and the centring belong in one place. */
+  GifPlayer.prototype.applyTransform = function () {
+    this.ctx.setTransform(this.scale, 0, 0, this.scale, this.ox, this.oy);
+  };
+
+  /* What the bars beside a letterboxed frame should be: whatever the stage, or
+   * failing that the figure, is painted with. */
+  GifPlayer.prototype.panelColour = function () {
+    for (var i = 0; i < 2; i++) {
+      var el = i ? this.stage.parentNode : this.stage;
+      if (!el) continue;
+      var c = window.getComputedStyle(el).backgroundColor;
+      if (c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent") return c;
+    }
+    return "#000";
+  };
+
   GifPlayer.prototype.resize = function () {
     if (!this.gif || !this.canvas) return;
     var dpr = window.devicePixelRatio || 1;
@@ -1734,8 +1769,22 @@ breeds, varying in size, color, and temperament.</code></pre>
     if (this.canvas.width === pw && this.canvas.height === ph) return;
     this.canvas.width = pw;
     this.canvas.height = ph;
-    this.scale = pw / this.gif.width;
-    this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+    /* One uniform scale off whichever axis is tighter, centred in the rest.
+     * The stage is normally exactly the shape the recording was made at, so
+     * the width is the tighter axis, the offsets come out as zero and nothing
+     * moves -- but full screen in a window shorter than the recording forces
+     * the box to a wider shape, and scaling by the width alone then painted a
+     * squashed frame with the bottom 138 rows off the top of the buffer. */
+    this.scale = Math.min(pw / this.gif.width, ph / this.gif.height);
+    this.ox = (pw - this.gif.width * this.scale) / 2;
+    this.oy = (ph - this.gif.height * this.scale) / 2;
+    /* The context is opaque (alpha:false, for compositing cost), so a letterbox
+     * bar is solid black rather than the panel showing through. Full screen in a
+     * window shorter than the recording bars the sides, and black beside a
+     * #0d1014 panel draws a visible rectangle around the frame. Remember the
+     * colour the replay below fills with. */
+    this.bg = this.panelColour();
+    this.applyTransform();
     this.drawn = -1;                 // the old contents went with the resize
     if (this.gif) this.render();
   };
@@ -1776,6 +1825,8 @@ breeds, varying in size, color, and temperament.</code></pre>
     this.hit.disabled = false;
     if (this.fullBtn) this.fullBtn.disabled = false;
     this.scale = 1;                            // sane until the first measurement
+    this.ox = 0;
+    this.oy = 0;
     this.stage.setAttribute("data-state", "ready");
     this.setStatus("");
 
@@ -1839,8 +1890,9 @@ breeds, varying in size, color, and temperament.</code></pre>
       /* A jump (seek, step backwards, loop): replay from the start. These
        * recordings are a few dozen frames, so this is well under a frame. */
       this.ctx.setTransform(1, 0, 0, 1, 0, 0);
-      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-      this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+      this.ctx.fillStyle = this.bg || "#000";
+      this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+      this.applyTransform();
       for (var k = 0; k <= i; k++) {
         if (k > 0) this.clearFrame(frames[k - 1]);
         this.paint(frames[k]);
