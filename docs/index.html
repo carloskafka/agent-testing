@@ -1400,6 +1400,7 @@ breeds, varying in size, color, and temperament.</code></pre>
   "use strict";
 
   var MIN_FRAME_MS = 20;   // browsers clamp short GIF delays; do it explicitly
+  var MAX_WAKE_MS = 100;   // longest a tick may sleep, so timing cannot drift
   var SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4];
 
   /* --- decoder ------------------------------------------------------------ */
@@ -1855,25 +1856,52 @@ breeds, varying in size, color, and temperament.</code></pre>
     }
   };
 
-  GifPlayer.prototype.tick = function (now) {
+  /* Driven by setTimeout, not requestAnimationFrame.
+   *
+   * rAF is tied to compositing: it stops delivering whenever the page is not
+   * being painted -- a window that is occluded or minimised, a display that is
+   * off, some automation and embedded contexts -- and nothing on screen
+   * changes while it is stopped, which is precisely when a reader is least
+   * likely to notice and most likely to come back to a player that has thrown
+   * itself away. Timers keep running in all of those states, and this thing
+   * only needs to redraw a few times a second: the expensive work (decode
+   * already done, one putImageData and one drawImage) happens only when a
+   * frame boundary is crossed, not on every tick.
+   *
+   * The next wake is scheduled for when the current frame is actually due
+   * rather than on a fixed cadence, so the common case is one timer per
+   * frame of the recording -- the same cost as a rAF loop, and it costs
+   * nothing while a long scene is being read. */
+  GifPlayer.prototype.schedule = function () {
+    var self = this;
+    this.cancel();
+    var due = this.delayOf(this.index) - this.acc;
+    this.raf = window.setTimeout(function () { self.tick(); },
+                                 Math.max(1, Math.min(MAX_WAKE_MS, due)));
+  };
+
+  GifPlayer.prototype.cancel = function () {
+    if (this.raf) { window.clearTimeout(this.raf); this.raf = 0; }
+  };
+
+  GifPlayer.prototype.tick = function () {
+    this.raf = 0;
     if (!this.playing) return;
-    /* Proof of life. The first callback cancels the watchdog, so a browser
-     * where rAF works never comes near the hand-off. */
+    /* Proof of life. The first tick cancels the watchdog, so a working browser
+     * never comes near the hand-off. */
     this.ticked = true;
     this.clearWatchdog();
     var self = this;
-    this.guarded("tick", function () { self.advance(now); });
+    this.guarded("tick", function () { self.advance(Date.now()); });
     if (!this.playing) return;
-    this.raf = requestAnimationFrame(this.tick);
+    this.schedule();
   };
 
   GifPlayer.prototype.advance = function (now) {
     /* A backgrounded tab stops rAF and comes back with one enormous delta;
      * clamping keeps that from fast-forwarding through the whole recording. */
-    /* Clamped at both ends: a backgrounded tab comes back with an enormous
-     * delta, and rAF's timestamp is the frame's start time, which can predate
-     * the performance.now() that seeded `last`, making the first delta
-     * slightly negative. */
+    /* Clamped at both ends. A backgrounded tab comes back with an enormous
+     * delta, and a timer firing early would make the first delta negative. */
     var dt = Math.max(0, Math.min(now - this.last, 250));
     this.last = now;
     this.acc += dt * this.speed;
@@ -1911,17 +1939,19 @@ breeds, varying in size, color, and temperament.</code></pre>
     }
     this.canvas.hidden = false;   // laid over the poster, which stays put
     this.playing = true;
-    this.last = window.performance ? performance.now() : Date.now();
+    this.last = Date.now();
     this.acc = 0;
     this.setPlayIcon(true);
     /* Restart the loop rather than returning early when already playing: that
      * makes the button self-healing if the loop was ever lost, and stops "the
      * play button does nothing" from being a reachable state. */
-    if (this.raf) cancelAnimationFrame(this.raf);
+    this.cancel();
     this.ticked = false;          // the loop must prove itself again
-    this.raf = requestAnimationFrame(this.tick);
+    this.last = Date.now();
+    this.acc = 0;
     this.guarded("first frame", this.render);
     this.armWatchdog();
+    this.schedule();
   };
 
   GifPlayer.prototype.pause = function () {
@@ -1929,8 +1959,7 @@ breeds, varying in size, color, and temperament.</code></pre>
     this.clearWatchdog();
     if (!this.playing) return;
     this.playing = false;
-    if (this.raf) cancelAnimationFrame(this.raf);
-    this.raf = 0;
+    this.cancel();
     this.setPlayIcon(false);
   };
 
