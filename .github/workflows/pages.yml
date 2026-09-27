@@ -1,0 +1,55 @@
+name: Publish the documentation
+
+# The site is a folder of static files, so publishing is copying docs/ and
+# nothing else. The previous arrangement was "Deploy from a branch", which is a
+# setting in the repository's options rather than anything recorded here: it
+# cannot be seen by reading the repository, cannot be changed from a clone, and
+# rebuilds the site on every push to main whether or not the site changed.
+
+on:
+  push:
+    branches: [main]
+    # Only a change to the site itself is worth republishing. Most commits in
+    # this repository are the agent and its tests, and none of them are on the
+    # page.
+    paths:
+      - docs/**
+      - .github/workflows/pages.yml
+  # Lets it be republished from the Actions tab without an empty commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. A run in progress is not cancelled: a half-finished
+# publish is worse than waiting a few seconds for the one ahead of it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Collect the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          # docs/, not the repository root. The starter template uploads ".",
+          # which would publish the agent's source alongside the site and let
+          # any later file in the root land on the web.
+          path: docs
+
+      - name: Publish
+        id: deployment
+        uses: actions/deploy-pages@v5
