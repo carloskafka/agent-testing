@@ -23,14 +23,33 @@ Both are read from the live invocation, never from a literal:
 If neither can be resolved, the field is **omitted** rather than guessed. Notes
 written before these fields existed therefore have no recorded provenance, and
 ``sources.render_sources`` renders that case as the literal ``unknown``.
+
+Untrusted input
+---------------
+``title``, ``summary_content`` and ``topics`` are *model output*, which is to say
+attacker-influenced: anything the user pasted lands in the title, and a jailbreak
+lands in the topics. Two consequences are designed for rather than discovered:
+
+* ``title`` and every topic reach the filesystem, so both are reduced by
+  :func:`_safe_name` to an allowlist of ``[A-Za-z0-9 _-]`` and, independently,
+  every path this module writes is asserted to resolve inside the vault
+  (:func:`_assert_in_vault`). The sanitiser makes an escape unrepresentable; the
+  assert is there so that if it ever stops doing that, the failure is a loud
+  exception rather than a file outside the vault.
+* ``title`` and every topic also reach the note's frontmatter, which YAML -- not
+  the note reader -- interprets, so their values are quoted (:func:`_yaml_str`).
+  Unquoted interpolation meant a title containing a newline could close the
+  ``---`` block and add keys of its own.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from datetime import date, datetime
+from pathlib import Path
 
 from . import vaults
 from .sources import (
@@ -111,10 +130,94 @@ def source_fingerprint(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _safe_name(value: str, max_len: int = 60) -> str:
+    """Reduce arbitrary model output to a name that is safe as a path component.
+
+    Everything here is an allowlist, not a blocklist. The rules, in order:
+
+    1. any run of path separators (``/``, ``\\``) becomes a space;
+    2. any run of dots becomes a space -- which is what kills ``..`` *and* makes a
+       bare ``.``/``..``/``...`` reduce to ``""`` rather than to a name that is
+       itself a parent reference;
+    3. anything outside ``[A-Za-z0-9 _-]`` becomes a space (a character, not a
+       deletion, so ``a/b`` reads as ``a-b`` and not ``ab``);
+    4. whitespace and underscores collapse to ``-``, case is lowered, the result is
+       truncated at ``max_len`` and any dangling ``-`` trimmed.
+
+    Rule 3 is why the ASCII-only class is the whole defence: it removes Unicode
+    lookalikes (``／``, U+2024 one-dot leader, RTL overrides) by construction, so
+    there is no separator variant left to enumerate. The cost is that a
+    non-ASCII title loses its accents -- deliberate, since these names become
+    filenames, and Obsidian resolves wikilinks case-insensitively but not
+    accent-insensitively.
+
+    The cost of reducing two different strings to the same name -- ``a/b`` and
+    ``a b`` both become ``a-b`` -- is merging, never loss: a repeated topic
+    appends a backlink to the stub that already exists instead of making a second
+    one, and a same-day title collision overwrites, which is the tool's documented
+    behaviour anyway.
+    """
+    text = "" if value is None else str(value)
+    text = re.sub(r"[/\\]+", " ", text)
+    text = re.sub(r"\.+", " ", text)
+    text = re.sub(r"[^A-Za-z0-9 _-]+", " ", text)
+    text = re.sub(r"[\s_]+", "-", text.strip().lower())
+    return text[:max_len].strip("-")
+
+
 def _slug(value: str, max_len: int = 60) -> str:
-    value = re.sub(r"[^\w\s-]", "", value).strip().lower()
-    value = re.sub(r"[\s_]+", "-", value)
-    return value[:max_len].rstrip("-")
+    """Kept under its old name for callers that predate :func:`_safe_name`.
+
+    The writer calls :func:`_safe_name` directly, so this is an alias rather than a
+    second implementation -- two sluggers is how the old one got a weaker one.
+    """
+    return _safe_name(value, max_len=max_len)
+
+
+def _assert_in_vault(path: str) -> None:
+    """Refuse to write anything that does not resolve inside the vault.
+
+    Called from :func:`_write` -- the single place a path becomes a syscall --
+    rather than from each caller, because a check that has to be remembered at
+    every call site is a check that is eventually forgotten. Both sides are
+    ``resolve()``d, so a symlinked ``VAULT_ROOT`` (``/tmp`` -> ``/private/tmp`` on
+    macOS) compares like with like.
+
+    This is a second line of defence, not the first: :func:`_safe_name` makes an
+    escaping path unrepresentable, so this only fires if that has regressed. It
+    raises rather than warns, because the only safe response to "this write would
+    land outside the vault" is to not perform it.
+    """
+    root = Path(VAULT_ROOT).resolve()
+    target = Path(path).resolve()
+    if target != root and not target.is_relative_to(root):
+        raise ValueError(f"refusing to write outside the vault: {path} (vault: {root})")
+
+
+def _yaml_str(value: str) -> str:
+    """Render a string as a YAML scalar that cannot escape the line it is on.
+
+    ``json.dumps`` because its output *is* a valid YAML 1.2 double-quoted scalar:
+    every escape it can emit (``\\"``, ``\\\\``, ``\\n``, ``\\t``, ``\\uXXXX``) is in
+    YAML's own double-quoted escape set, so a value containing a newline becomes
+    the two characters ``\\n`` inside the scalar instead of a line break that
+    closes the frontmatter block and lets the rest of the value be read as new
+    keys. ``ensure_ascii=False`` keeps accented text readable in the vault, which
+    is the point of writing a note a human will open.
+    """
+    return json.dumps("" if value is None else str(value), ensure_ascii=False)
+
+
+def _wikilink_target(topic: str) -> str:
+    """Make a topic safe to sit between ``[[`` and ``]]``.
+
+    Deliberately *not* :func:`_yaml_str`: this is markdown, not YAML, and quoting
+    it would break every link in the vault rather than secure one. Obsidian treats
+    ``[``, ``]``, ``|``, ``#``, ``^`` and newlines as link syntax, so those are
+    replaced with a space; a plain topic like ``Mobile App`` is returned unchanged,
+    which is what keeps the ``## Related`` section human-readable.
+    """
+    return re.sub(r"[\[\]|#^\n\r]+", " ", str(topic or "")).strip()
 
 
 def _read(path: str) -> str:
@@ -126,6 +229,7 @@ def _read(path: str) -> str:
 
 
 def _write(path: str, content: str) -> None:
+    _assert_in_vault(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
@@ -247,6 +351,31 @@ def _provenance_lines(provenance: dict[str, str]) -> str:
     return "".join(lines)
 
 
+def _split_topics(topics: str) -> tuple[list[str], list[str]]:
+    """Split the model's topic list into usable topics and ones with no file name.
+
+    The split keeps the *original* string in both halves. The slug is computed
+    only to answer "can this be a file?", and only the file on disk uses it: the
+    stub's ``# heading`` and the ``## Related`` wikilink stay the human-readable
+    text, because they are the copy a person reads and clicks.
+
+    A topic that is non-empty but has no usable file name (``..``, ``.``, ``///``,
+    a lone ``-``) is **dropped and reported** rather than written as a stub called
+    ``...md`` or emitted as a tag the vault cannot link to. Degrading loudly is
+    the point: silently vanishing would read to the agent as "that topic was
+    filed" when nothing was written, and a stub with a meaningless name is worse
+    than an absent one because it is indistinguishable from a real topic later.
+    """
+    kept: list[str] = []
+    dropped: list[str] = []
+    for raw in (topics or "").split(","):
+        topic = raw.strip()
+        if not topic:
+            continue
+        (kept if _safe_name(topic) else dropped).append(topic)
+    return kept, dropped
+
+
 def save_summary_to_second_brain(
     title: str,
     summary_content: str,
@@ -263,6 +392,11 @@ def save_summary_to_second_brain(
     The model and vault that produced the summary are recorded alongside
     (see ``note_provenance``); unresolvable provenance is omitted, not guessed.
 
+    All three arguments are model output, so all three are treated as untrusted:
+    ``title`` and ``topics`` are reduced by :func:`_safe_name` before they name
+    anything on disk, every write is confined by :func:`_assert_in_vault`, and
+    every value that lands in frontmatter is quoted by :func:`_yaml_str`.
+
     Args:
         title: Short descriptive title for the summary (e.g. "Customer Feedback 2026-09-25").
         summary_content: Markdown body with the bullet-point summary.
@@ -271,20 +405,21 @@ def save_summary_to_second_brain(
             key. Not for the model.
     """
     today = date.today().isoformat()
-    slug = _slug(title)
+    slug = _safe_name(title)
     note_title = f"{today} - {slug}" if slug else f"{today} - summary"
     note_path = os.path.join(VAULT_ROOT, BRAIN_DIR, f"{note_title}.md")
     index_path = os.path.join(VAULT_ROOT, f"{INDEX_NAME}.md")
-    topic_names = [t.strip() for t in topics.split(",") if t.strip()]
+    topic_names, dropped_topics = _split_topics(topics)
 
-    tags = "\n".join(f"  - {t}" for t in topic_names)
+    tags = "\n".join(f"  - {_yaml_str(t)}" for t in topic_names)
     key_text = cache_key_text(tool_context)
     fp_line = f"source_fingerprint: {source_fingerprint(key_text)}\n" if key_text else ""
     provenance_line = _provenance_lines(note_provenance(tool_context))
     frontmatter = (
-        f"---\ntags:\n{tags}\ndate: {today}\n{fp_line}{provenance_line}aliases:\n  - {title}\n---\n\n"
+        f"---\ntags:\n{tags}\ndate: {today}\n{fp_line}{provenance_line}"
+        f"aliases:\n  - {_yaml_str(title)}\n---\n\n"
     )
-    links = "\n".join(f"- [[{t}]]" for t in topic_names)
+    links = "\n".join(f"- [[{_wikilink_target(t)}]]" for t in topic_names)
     body = f"{frontmatter}{summary_content}\n\n## Related\n{links}\n"
 
     _write(note_path, body)
@@ -298,7 +433,10 @@ def save_summary_to_second_brain(
 
     created_topics = []
     for topic in topic_names:
-        topic_path = os.path.join(VAULT_ROOT, TOPICS_DIR, f"{topic}.md")
+        # Only the *filename* is slugged. The link in the body above and the
+        # stub's heading keep the readable original, so a topic is still
+        # recognisable to whoever opens the note.
+        topic_path = os.path.join(VAULT_ROOT, TOPICS_DIR, f"{_safe_name(topic)}.md")
         topic_body = _read(topic_path)
         if not topic_body.strip():
             topic_body = f"# {topic}\n\n## Backlinks\n{_link_line(note_title)}"
@@ -311,16 +449,44 @@ def save_summary_to_second_brain(
                 topic_body = topic_body.rstrip() + "\n\n## Backlinks\n" + _link_line(note_title)
             _write(topic_path, topic_body)
 
-    created = []
-    if note_title not in index_body or index_body:
-        created.append(note_path)
+    dropped_line = (
+        f"Dropped topics ({len(dropped_topics)}): {', '.join(dropped_topics)}\n"
+        if dropped_topics
+        else ""
+    )
+    # No created/updated field for the note itself: the old one was
+    # ``if note_title not in index_body or index_body``, whose right-hand operand is
+    # the non-empty index body this function has just written, so it was always true
+    # and the list it guarded was always ``[note_path]`` -- and was then never read.
+    # "Saved note" is the accurate wording for both cases (the file was written
+    # either way, overwriting a same-day note of the same name), and the genuinely
+    # new information is already reported by "Created topic stubs".
     result = (
         f"Saved note: {note_path}\n"
         f"Linked topics ({len(topic_names)}): {', '.join(topic_names) or 'none'}\n"
+        f"{dropped_line}"
         f"Created topic stubs: {', '.join(created_topics) or 'none'}\n"
         f"Updated index: {index_path}"
     )
     return result
+
+
+def _split_frontmatter(text: str) -> tuple[str, str]:
+    """Split a note into ``(frontmatter, body)``, recognising the fence by *line*.
+
+    A regex cannot do this correctly, and neither can a reader that assumes the
+    frontmatter ends at the first ``---`` it finds: a quoted scalar may still
+    *contain* that string, and stopping inside it hands the rest of the
+    frontmatter back as body. The value is inert to a YAML reader and very much not
+    inert to a regex, so only a line that is exactly the fence closes the block.
+    """
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return "", text
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "".join(lines[1:index]), "".join(lines[index + 1:])
+    return "", text
 
 
 def find_cached_summary(source_text: str) -> str | None:
@@ -334,6 +500,11 @@ def find_cached_summary(source_text: str) -> str | None:
     :func:`cache_key_text`. Both sides must keep using the same input or the cache
     silently never hits.
 
+    Reads the fence with :func:`_split_frontmatter` rather than a ``^---.*?---``
+    regex, so a note whose title contained ``---`` replays its summary instead of
+    the tail of its own frontmatter. That is the same injection as the write side,
+    read back.
+
     Known cost: O(n) reads over the whole Second Brain directory on every model
     call. Measured at well under a millisecond for a few dozen notes, so it is not
     worth an index file until a vault is large enough for that to show up.
@@ -346,12 +517,13 @@ def find_cached_summary(source_text: str) -> str | None:
     for name in os.listdir(brain_dir):
         if not name.endswith(".md"):
             continue
-        body = _read(os.path.join(brain_dir, name))
-        m = re.search(frontmatter_spec, body)
+        frontmatter, body = _split_frontmatter(_read(os.path.join(brain_dir, name)))
+        m = re.search(frontmatter_spec, frontmatter)
         if m and m.group(1) == digest:
-            stripped = re.sub(r"^---.*?---\s*", "", body, flags=re.DOTALL)
-            stripped = stripped.split("## Related", 1)[0].rstrip()
-            return stripped
+            # Both ends: the regex this replaced ended its match with ``\s*``, so the
+            # caller saw the body without the blank line the writer puts after the
+            # closing fence.
+            return body.split("## Related", 1)[0].strip()
     return None
 
 
