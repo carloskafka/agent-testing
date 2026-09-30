@@ -92,6 +92,24 @@ def _files_below(root: Path) -> list[Path]:
     return [p for p in root.rglob("*") if p.is_file()]
 
 
+def _mtime_ns(path: Path) -> int | None:
+    """The path's mtime, or ``None`` if it is not there.
+
+    ``None`` means "this file is not present", and a path whose name is too long
+    for the filesystem cannot be present -- so it reads as ``None`` too. That is
+    not pedantry: some payloads here are 500 characters, and whether
+    ``Path.exists()`` returns ``False`` or raises ``ENAMETOOLONG`` for such a
+    path depends on the Python version. It returns ``False`` on 3.14 and raises
+    on 3.12, which is how this suite passed locally and failed in CI on the same
+    commit. A path we cannot even ask about is not a path the code under test
+    created.
+    """
+    try:
+        return path.stat().st_mtime_ns if path.exists() else None
+    except OSError:
+        return None
+
+
 def _stamp(paths: list[Path]) -> dict[Path, int | None]:
     """Record whether each path exists, and its mtime if it does.
 
@@ -102,16 +120,17 @@ def _stamp(paths: list[Path]) -> dict[Path, int | None]:
     meant -- *this* call created and touched nothing there -- and still fails the
     moment the code under test does write there.
     """
-    return {p: (p.stat().st_mtime_ns if p.exists() else None) for p in paths}
+    return {p: _mtime_ns(p) for p in paths}
 
 
 def _assert_untouched(snapshot: dict[Path, int | None], what: str) -> None:
     for path, before in snapshot.items():
         if before is None:
-            assert not path.exists(), f"{what} wrote outside the vault: {path}"
+            assert _mtime_ns(path) is None, f"{what} wrote outside the vault: {path}"
         else:
-            assert path.exists(), f"{what} deleted {path}"
-            assert path.stat().st_mtime_ns == before, f"{what} rewrote {path}"
+            after = _mtime_ns(path)
+            assert after is not None, f"{what} deleted {path}"
+            assert after == before, f"{what} rewrote {path}"
 
 
 def test_a_traversing_topic_cannot_escape_the_vault(monkeypatch, tmp_path):
