@@ -190,6 +190,15 @@ omit = [
 # No floor is set yet. When it is, set it as `fail_under` under
 # [tool.coverage.report] so it applies however pytest-cov is invoked.
 
+[tool.coverage.report]
+# Enforced by pytest-cov however it is invoked -- the Makefile's `test` target, the
+# `coverage` target, and CI's TEST_ARGS all go through here, so there is one floor
+# rather than one per caller (P1). A run with no --cov at all is not coverage and
+# is not gated, which is correct: `make test` should stay fast and offline.
+fail_under = 88
+show_missing = true
+skip_covered = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # `-q` on the command line; these two keep the run honest rather than fast.
