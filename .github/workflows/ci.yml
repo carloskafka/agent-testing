@@ -1,0 +1,131 @@
+name: Check
+
+# The gate: lint, types, tests, on every change that can affect them.
+#
+# This is the second workflow because the first one is not a gate. `pages.yml`
+# publishes `docs/` and deliberately filters to `docs/**`, so an agent commit
+# publishes nothing -- which is correct for publishing and is exactly why there
+# could be no CI for the Python at all until now. A gate that skips a commit is
+# worse than one that runs on an unrelated one, so this one runs on the source.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # The agent, its tests, its eval set, and all of its config (pyproject.toml,
+      # uv.lock, .env.example) live under text_summarizer/. This one entry is most
+      # of the reason to run at all.
+      - "text_summarizer/**"
+      # The walkthrough recorders drive the real agent in a container, so a change
+      # there can break a run that the Python gate would call green.
+      - "tools/**"
+      # Everything that builds or runs the stack. The Dockerfiles install the
+      # project with `uv sync --frozen`, so a dependency change breaks the image
+      # before it breaks the tests.
+      - "Dockerfile"
+      - "Dockerfile.*"
+      - "docker-compose.yml"
+      - "resolve-vault.sh"
+      - "run.sh"
+      - "run-agent.ps1"
+      - "patch-adk-devui-mobile.py"
+      # The gate itself.
+      - "Makefile"
+      - ".github/workflows/ci.yml"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The suite is offline and takes seconds; 15 minutes is a hang detector, not a
+# budget. A run that reaches it is waiting on something it should not be.
+timeout-minutes: 15
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a major version, matching pages.yml. Not a commit SHA: the two
+      # workflows would then be pinned at different strictness, and a SHA pin here
+      # would need rotating by hand.
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          # setup-uv caches the download and the build cache; the key is the
+          # lockfile, so an unchanged uv.lock reuses the environment as-is.
+          enable-cache: true
+          cache-dependency-glob: "text_summarizer/uv.lock"
+
+      # `--frozen` is the point: it refuses to re-resolve, so a pyproject.toml that
+      # has drifted from uv.lock fails the build instead of silently producing an
+      # environment nobody reviewed. `--group dev` installs the
+      # `[dependency-groups] dev` table (pytest, pytest-cov, ruff, mypy) on top of
+      # the runtime dependencies.
+      - name: Install dependencies
+        run: uv sync --frozen --group dev --directory text_summarizer
+
+      # `make <target>` rather than the bare command, so CI and a developer run
+      # byte-identical recipes. `make check` is these three steps in this order;
+      # they are separate steps so a failure is attributed to a tool rather than to
+      # "the gate".
+      - name: Lint (ruff check)
+        run: make lint
+
+      - name: Types (mypy)
+        run: make types
+
+      # One pytest run produces the summary, the coverage data and the JUnit XML
+      # that the next two steps consume. `pipefail` is what keeps the run red when
+      # pytest fails under a `tee`.
+      - name: Test (pytest)
+        run: |
+          set -o pipefail
+          make test TEST_ARGS="--junitxml=pytest-report.xml --cov=text_summarizer --cov-report=xml" \
+            2>&1 | tee pytest-output.txt
+
+      # The counts, on the run page rather than only in the log. A gate nobody reads
+      # is a gate that gets ignored when it is inconvenient.
+      - name: Publish the summary
+        if: always()
+        run: |
+          {
+            echo "## Tests"
+            echo
+            if [ -f pytest-output.txt ]; then
+              echo '```text'
+              tail -n 40 pytest-output.txt
+              echo '```'
+            else
+              echo "pytest did not run; the step above failed before it produced output."
+            fi
+            echo
+            if [ -f coverage.xml ]; then
+              echo "Coverage XML: \`coverage.xml\` (attached to this run)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # .coverage rather than a rendered report: the number is only comparable
+      # against a baseline produced the same way, and the raw data is what lets
+      # someone re-derive it. coverage.xml and the JUnit XML ride along. All three
+      # land in the working directory (the repository root), not in text_summarizer:
+      # `make test` runs from the root and every tool is given `--project`, so
+      # nothing here writes inside the Python project.
+      - name: Upload the coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            .coverage
+            coverage.xml
+            pytest-report.xml
+          if-no-files-found: warn
+          retention-days: 14

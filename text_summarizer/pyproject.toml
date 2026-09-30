@@ -11,6 +11,14 @@ dependencies = [
     "python-dotenv",
 ]
 
+# PEP 735. The gate (`make check`, `.github/workflows/ci.yml`) needs these four and
+# nothing else; declaring them here is what retires the out-of-tree install
+# (`uv pip install --target /tmp/agent-testing-testlibs pytest` plus a
+# PYTHONPATH) that used to be the documented way to run the suite. `uv sync` installs
+# the group by default, so `uv run pytest` works with no extra flags.
+[dependency-groups]
+dev = ["pytest", "pytest-cov", "ruff", "mypy"]
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
@@ -18,3 +26,133 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["text_summarizer"]
 package-dir = {"text_summarizer" = "."}
+
+[tool.ruff]
+# This is the only Python project, so paths are relative to this file's directory
+# (text_summarizer/) and CI runs ruff with `--project text_summarizer`.
+src = ["."]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "tests/eval"]
+
+[tool.ruff.lint]
+# E/F: pycodestyle errors and pyflakes. I: import order, which several modules got
+# wrong by hand. B: bugbear. UP: pyupgrade. SIM: simplifications that read better,
+# e.g. `contextlib.suppress` over try/except/pass.
+select = ["E", "F", "I", "B", "UP", "SIM"]
+# E501 is off while the tree is unformatted. Turning it on now would demand the
+# ~6,700-line reindent this commit is explicitly not making, and the formatter
+# enforces line length the day it is adopted -- ruff's own guidance is that E501 and
+# the formatter do not coexist. Remove this line in the same commit as
+# `ruff format .`; until then the formatter is the thing that owns line length.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Every entry below is a finding this commit could not fix because the file is owned
+# by another workstream. Each is pinned to the *specific* codes reported today, so a
+# different class of problem in the same file still fails the gate.
+"__init__.py" = ["E402", "F401"]           # env pinned by load_dotenv() before imports
+"agent.py" = ["SIM105"]                     # try/except/pass around renderer call sites
+"auto_optimize.py" = ["F541"]               # f-string with no placeholder
+"check_free_models.py" = ["I001"]
+"eval_exercise.py" = ["F401", "F541", "I001", "UP015"]
+"eval_scoring.py" = ["UP015"]
+"gmail_oauth.py" = ["B904", "F841", "UP015"]  # re-raise of SystemExit that does nothing
+"second_brain.py" = ["F541"]
+# Another workstream owns test_run_script.py; the brief allows deleting one dead
+# assertion there and nothing else, so UP031 is configured out rather than edited.
+"tests/test_run_script.py" = ["UP031"]
+
+[tool.ruff.format]
+# Configured, deliberately not run. `ruff format` over the tree is a ~6,700-line
+# mechanical diff that belongs in its own commit; the gate is `ruff check` only.
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+# No `python_version`: mypy uses the interpreter it runs under. Pinning it to the
+# `requires-python` floor of 3.11 makes mypy reject `type` statements in the
+# third-party stubs it reads (numpy alone is enough), which is a hard error that
+# stops the run before it checks any of this project's code. The floor is still
+# enforced where it belongs -- ruff's `target-version` above.
+#
+# `files` is the only Python project, relative to the repository root (which is where
+# `make types` and CI run from). Without it mypy would also walk `tools/` and the
+# root scripts, which are standalone utilities and are not this project.
+files = ["text_summarizer"]
+# Non-strict on purpose. This is the first run of mypy on a codebase that was never
+# type-checked, and the alternative -- a strict migration -- is a project of its own.
+# Untyped defs are not errors; the ones that are annotated are still checked.
+check_untyped_defs = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+exclude = ['^\.venv/', 'text_summarizer/tests/eval/']
+
+# Third-party libraries that ship no type information. Both are Google's, and
+# `google-api-python-client` and `google-auth-oauthlib` do not publish stubs or a
+# py.typed marker, so without this every import from them is an error that says
+# nothing about this code.
+[[tool.mypy.overrides]]
+module = ["googleapiclient.*", "google_auth_oauthlib.*"]
+ignore_missing_imports = true
+
+# The day-one allowlist. A module listed here is still *analys*ysed (its imports are
+# followed, its types are used) but its own errors are not reported, so the gate can
+# be green while the migration happens module by module. This is a deliberate ratchet,
+# not a permanent configuration: shorten it as each module is cleaned up, and never
+# add a module without saying what is wrong with it.
+#
+# Two groups, and the distinction matters.
+#
+# **The ADK-typed seams.** These read live framework state off duck-typed contexts
+# (`CallbackContext`, `ToolContext`, `Event`) that the library's own types do not
+# describe -- ADK is partly untyped and the values are only present at runtime.
+# Annotating them would mean asserting shapes the framework does not promise.
+#   agent, second_brain
+#
+# **Pre-existing findings, in modules this change does not own.** Each is a real
+# mypy error, not a false positive:
+#   sources        -- `env` defaults to `os.environ` and is annotated `dict | None`,
+#                     so `env = os.environ` and `env.get(...)` are both complaints
+#                     about a signature that is correct at runtime;
+#   vaults         -- `candidates` is bound to `tuple[str, ...]` in the error path
+#                     and rebound to `list[Vault]` below; harmless (the rebind
+#                     precedes every use) and worth renaming;
+#   eval_scoring   -- four narrow annotation mismatches in the ROUGE-1 shim;
+#   auto_optimize  -- one `str | None` reaching `.strip()`;
+#   obsidian_tools -- MCP transport params are a union the library types loosely.
+[[tool.mypy.overrides]]
+module = [
+    "text_summarizer.agent",
+    "text_summarizer.second_brain",
+    "text_summarizer.sources",
+    "text_summarizer.vaults",
+    "text_summarizer.eval_scoring",
+    "text_summarizer.auto_optimize",
+    "text_summarizer.obsidian_tools",
+]
+ignore_errors = true
+
+# The tests deliberately build `SimpleNamespace` stand-ins for ADK Events and
+# contexts -- that is what keeps the suite offline and free of API cost -- so they
+# describe framework shapes on purpose rather than by accident.
+[[tool.mypy.overrides]]
+module = ["text_summarizer.tests.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Same reason, narrower: the tests deliberately build SimpleNamespace stand-ins for
+# ADK Events and contexts, which is what keeps them offline and free of API cost.
+module = ["text_summarizer.tests.*"]
+ignore_errors = true
+disable_error_code = ["no-untyped-def", "no-untyped-call", "misc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `-q` on the command line; these two keep the run honest rather than fast.
+# `filterwarnings=error` is deliberately NOT set: importing google-adk emits
+# DeprecationWarnings from inside the library (Python 3.17 removals) that this
+# project does not control and cannot fix from here.
+addopts = "--strict-markers"
