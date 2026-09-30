@@ -12,7 +12,7 @@ import os
 import pathlib
 
 import pytest
-
+from _helpers import _make_vault, _run_resolver
 from text_summarizer import vaults
 from text_summarizer.vaults import (
     DEFAULT_VAULT_NAME,
@@ -23,15 +23,6 @@ from text_summarizer.vaults import (
     obsidian_vaults,
     select_vault,
 )
-
-
-def _make_vault(parent, name: str, *, second_brain: bool = True) -> str:
-    path = os.path.join(parent, name)
-    os.makedirs(path, exist_ok=True)
-    if second_brain:
-        os.makedirs(os.path.join(path, vaults.BRAIN_DIR), exist_ok=True)
-    return path
-
 
 # --- discovery ----------------------------------------------------------------
 
@@ -354,38 +345,15 @@ def test_resolve_vault_root_degrades_instead_of_guessing(monkeypatch, tmp_path, 
 # The script and vaults.py implement the same rules and MUST agree: an agent
 # pointed at a different vault than its MCP server is worse than an agent that
 # does not start. These run the real script with a stub binary on PATH, so the
-# shell logic is covered rather than assumed. No daemon needed.
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RESOLVER = os.path.join(REPO_ROOT, "resolve-vault.sh")
-
-
-def _run_resolver(parent: str, *, vault_name: str | None = None, tmp_path=None):
-    """Run resolve-vault.sh against a stub obsidian-mcp; return (rc, stdout+stderr)."""
-    import subprocess
-
-    stub_dir = tmp_path / "stubbin"
-    stub_dir.mkdir(exist_ok=True)
-    stub = stub_dir / "obsidian-mcp"
-    stub.write_text('#!/bin/sh\necho "SERVE: $*"\n')
-    stub.chmod(0o755)
-
-    env = dict(os.environ, PATH=f"{stub_dir}:{os.environ['PATH']}", VAULT_PARENT=parent)
-    env.pop("VAULT_NAME", None)
-    env.pop("OBSIDIAN_VAULT_NAME", None)
-    if vault_name is not None:
-        env["VAULT_NAME"] = vault_name
-    result = subprocess.run(
-        ["sh", RESOLVER], env=env, capture_output=True, text=True, timeout=30
-    )
-    return result.returncode, result.stdout + result.stderr
+# shell logic is covered rather than assumed. No daemon needed. The driver is
+# `_helpers._run_resolver`, shared with the port-override case below.
 
 
 def test_resolver_serves_the_only_vault(tmp_path):
     parent = str(tmp_path / "mount")
     os.makedirs(parent)
     _make_vault(parent, "ck")
-    rc, output = _run_resolver(parent, tmp_path=tmp_path)
+    rc, output = _run_resolver(parent, tmp_path)
     assert rc == 0, output
     assert f"SERVE: --http --host 0.0.0.0 --port 37842 {parent}/ck" in output
 
@@ -393,7 +361,7 @@ def test_resolver_serves_the_only_vault(tmp_path):
 def test_resolver_auto_creates_the_default_vault(tmp_path):
     parent = str(tmp_path / "mount")
     os.makedirs(parent)
-    rc, output = _run_resolver(parent, tmp_path=tmp_path)
+    rc, output = _run_resolver(parent, tmp_path)
     assert rc == 0, output
     assert f"SERVE: --http --host 0.0.0.0 --port 37842 {parent}/{DEFAULT_VAULT_NAME}" in output
     assert os.path.isdir(os.path.join(parent, DEFAULT_VAULT_NAME, vaults.BRAIN_DIR))
@@ -406,7 +374,7 @@ def test_resolver_serves_a_vault_named_by_VAULT_NAME(tmp_path):
     for name in ("personal", "work", "archive"):
         _make_vault(parent, name)
 
-    rc, output = _run_resolver(parent, vault_name="work", tmp_path=tmp_path)
+    rc, output = _run_resolver(parent, tmp_path, vault_name="work")
     assert rc == 0, output
     assert f"{parent}/work" in output
     assert "personal" not in output.split("SERVE:")[-1]
@@ -418,7 +386,7 @@ def test_resolver_refuses_an_ambiguous_mount_and_lists_the_candidates(tmp_path):
     for name in ("personal", "work"):
         _make_vault(parent, name)
 
-    rc, output = _run_resolver(parent, tmp_path=tmp_path)
+    rc, output = _run_resolver(parent, tmp_path)
     assert rc != 0
     assert "refusing to guess" in output
     assert "OBSIDIAN_VAULT_NAME" in output
@@ -431,7 +399,7 @@ def test_resolver_rejects_a_name_that_matches_nothing(tmp_path):
     os.makedirs(parent)
     _make_vault(parent, "personal")
 
-    rc, output = _run_resolver(parent, vault_name="wrok", tmp_path=tmp_path)
+    rc, output = _run_resolver(parent, tmp_path, vault_name="wrok")
     assert rc != 0
     assert "wrok" in output
     assert "personal" in output, "the error should list what is available"
@@ -440,7 +408,7 @@ def test_resolver_rejects_a_name_that_matches_nothing(tmp_path):
 def test_resolver_uses_the_mounted_directory_when_it_is_a_vault(tmp_path):
     parent = str(tmp_path / "mount" / "solo")
     _make_vault(str(tmp_path / "mount"), "solo")
-    rc, output = _run_resolver(parent, tmp_path=tmp_path)
+    rc, output = _run_resolver(parent, tmp_path)
     assert rc == 0, output
     assert f"SERVE: --http --host 0.0.0.0 --port 37842 {parent}" in output
 
@@ -449,23 +417,11 @@ def test_resolver_honours_the_port_override(tmp_path):
     parent = str(tmp_path / "mount")
     os.makedirs(parent)
     _make_vault(parent, "ck")
-    import subprocess
 
-    stub_dir = tmp_path / "stubbin"
-    stub_dir.mkdir(exist_ok=True)
-    stub = stub_dir / "obsidian-mcp"
-    stub.write_text('#!/bin/sh\necho "SERVE: $*"\n')
-    stub.chmod(0o755)
-    env = dict(
-        os.environ,
-        PATH=f"{stub_dir}:{os.environ['PATH']}",
-        VAULT_PARENT=parent,
-        OBSIDIAN_MCP_PORT="39999",
-    )
-    env.pop("VAULT_NAME", None)
-    result = subprocess.run(
-        ["sh", RESOLVER], env=env, capture_output=True, text=True, timeout=30
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "--port 39999" in result.stdout
+    rc, output = _run_resolver(parent, tmp_path, port="39999")
+    assert rc == 0, output
+    # The override, and nothing else: the default port must not also appear, or a
+    # script that passed both would satisfy this.
+    assert "--port 39999" in output
+    assert "--port 37842" not in output
 

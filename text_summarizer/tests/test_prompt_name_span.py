@@ -13,35 +13,18 @@ This runs a real ``LlmAgent`` through a real ``InMemoryRunner`` with a stub
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncGenerator
 
+from _helpers import _StubLlm
 from google.adk.agents import LlmAgent
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-
 from text_summarizer import observability
 
 PROMPT_NAME_ATTR = "langfuse.observation.prompt.name"
-
-
-class _StubLlm(BaseLlm):
-    """A BaseLlm that returns one canned answer and reports a model_version."""
-
-    async def generate_content_async(
-        self, llm_request: LlmRequest, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse, None]:
-        yield LlmResponse(
-            content=types.Content(role="model", parts=[types.Part(text="- stub answer")]),
-            finish_reason=types.FinishReason.STOP,
-            model_version=self.model,
-        )
 
 
 def _capture_spans(agent: LlmAgent, message: str = "Summarize: hello world") -> list:
