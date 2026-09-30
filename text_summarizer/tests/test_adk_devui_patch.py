@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,51 @@ def test_the_patch_is_injected_before_head_closes():
     patched, _ = patcher.patch(_fake_index())
     assert patched.index(patcher.MARKER) < patched.index("</head>")
     assert patched.count("</head>") == 1
+
+
+def test_the_patch_is_wrapped_in_a_style_element():
+    """The override must be *CSS the browser applies*, not text the browser shows.
+
+    Every other assertion in this module is a substring check, and a substring
+    check cannot tell the two apart: an unwrapped blob of CSS injected into the
+    document still contains ``100dvh``, still sits before ``</head>``, and still
+    leaves the vendor rule intact -- it just renders as a wall of visible text at
+    the top of the page instead of taking effect. That is exactly the bug this
+    test now pins.
+    """
+    patched, _ = patcher.patch(_fake_index())
+
+    class Collector(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.style_depth = 0
+            self.style_text = []
+            self.visible_text = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "style":
+                self.style_depth += 1
+
+        def handle_endtag(self, tag):
+            if tag == "style":
+                self.style_depth -= 1
+
+        def handle_data(self, data):
+            if self.style_depth:
+                self.style_text.append(data)
+            elif data.strip():
+                self.visible_text.append(data)
+
+    collector = Collector()
+    collector.feed(patched)
+
+    styles = "".join(collector.style_text)
+    assert patcher.MARKER in styles, "the patch must live inside a <style> element"
+    assert "100dvh" in styles, "the overrides must reach the CSSOM, not the DOM text"
+    assert not any("100dvh" in t for t in collector.visible_text), (
+        "CSS is reaching the document as visible text -- the <style> wrapper is "
+        "missing, so the browser is rendering the stylesheet instead of applying it"
+    )
 
 
 def test_the_patch_does_not_rewrite_vendor_css():

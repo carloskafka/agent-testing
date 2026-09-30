@@ -82,7 +82,7 @@ VIEWPORT_META = re.compile(
     r'<meta\s+name="viewport"\s+content="(?P<content>[^"]*)"\s*/?>', re.IGNORECASE
 )
 
-OVERRIDE_CSS = f"""
+OVERRIDE_CSS = f"""<style>
 /* {MARKER}: injected by patch-adk-devui-mobile.py -- see AGENTS.md.
    The bundled ADK dev UI is a desktop tool that sizes itself with 100vh and
    hides page overflow, so on a phone the chat composer sits below the fold with
@@ -111,7 +111,7 @@ OVERRIDE_CSS = f"""
     height: calc(100dvh - 72px) !important;
   }}
 }}
-"""
+</style>"""
 
 
 def find_default_target() -> Path | None:

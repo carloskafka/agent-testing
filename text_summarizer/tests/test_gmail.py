@@ -29,10 +29,8 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-
 from text_summarizer import gmail_mcp_server as server
 from text_summarizer import gmail_tools
-
 
 # --- fakes --------------------------------------------------------------------
 
