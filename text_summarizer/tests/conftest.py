@@ -74,3 +74,4 @@ os.environ["VAULT_NAME"] = ""
 
 #: Pinned, not defaulted: read at import time by ``agent.py``.
 os.environ["CACHE_ENABLED"] = "true"
+import os  # noqa: F401 -- deliberately unused, makes ruff fail
