@@ -29,8 +29,38 @@ the format still cannot produce duplicates.
 Rendered shape::
 
     **Sources**
-    [obsidian][<vault_name>][<model_name>][[Note Title]]: why it is relevant
-    [obsidian][<vault_name>][unknown][[Older Note]]: provenance not recorded
+    - [obsidian][<vault_name>][<model_name>][[Note Title]]: why it is relevant
+    - [obsidian][<vault_name>][unknown][[Older Note]]: provenance not recorded
+
+Every source line is a markdown list item. Bare lines would be joined into a
+single paragraph by every markdown renderer (and by the dev UI's message
+component), which reads as one unreadable run-on block once the note titles get
+long -- so the bullet is part of the format, not decoration. The model is not
+asked for it: the renderer emits the list itself.
+
+Clickable titles
+----------------
+The note title becomes a real markdown link when the title can be resolved to a
+file in the vault, so a click lands on the source instead of on nothing::
+
+    - [obsidian][ck][gemini-3.5-flash-lite][[Email]](/vault/Topics/Email.md): why
+
+``[[Email]]`` alone is Obsidian wikilink syntax, which no browser and not even
+the ADK dev UI's markdown renderer understands -- it renders as literal
+``[Email]``. Wrapping it as ``[[Email]](href)`` is the one spelling that both
+survives that renderer as a link *and* still shows the brackets, so the line
+keeps its Obsidian-readable shape while being clickable.
+
+The href is served by the same FastAPI app that serves the dev UI
+(``/vault/<path relative to the vault root>``), because the browser cannot read
+a path inside the container and ``obsidian://`` does not resolve when Obsidian
+is itself containerised.
+
+Resolution is a **title lookup, never a guess**: the title the model wrote is
+matched against real files under the vault root, and a title that matches
+nothing is rendered as a plain ``[[wikilink]]`` exactly as before. The model is
+never asked for a path -- it only ever saw a title, and a path it invented
+would produce a link that 404s.
 
 Notes written before ``generated_by_model`` existed in the frontmatter have no
 recorded provenance. That renders as the literal ``unknown`` -- never guessed,
@@ -44,16 +74,20 @@ import os
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from urllib.parse import quote
 
 __all__ = [
     "MODEL_TOKEN",
     "SOURCES_HEADING",
+    "SOURCE_BULLET",
     "SOURCE_KIND",
     "UNKNOWN",
     "VAULT_TOKEN",
+    "VAULT_WEB_PREFIX",
     "SourceEntry",
     "VaultIdentity",
     "mcp_vault_name_from_events",
+    "note_href",
     "render_sources",
     "resolve_vault_name",
     "served_model_from_events",
@@ -74,11 +108,18 @@ _TOKEN_RE = re.compile(f"{re.escape(VAULT_TOKEN)}|{re.escape(MODEL_TOKEN)}")
 
 SOURCES_HEADING = "**Sources**"
 
+#: One source per markdown list item. See the module docstring.
+SOURCE_BULLET = "- "
+
 #: Leading kind marker, kept stable so the block stays machine-greppable.
 SOURCE_KIND = "obsidian"
 
 #: Rendered for provenance that was never recorded. Never a guess.
 UNKNOWN = "unknown"
+
+#: URL prefix under which the dev UI app serves the vault read-only. It has to
+#: match the mount point in ``serve.py``; see the module docstring.
+VAULT_WEB_PREFIX = "/vault"
 
 # ``## Sources`` / ``### Sources`` / ``**Sources**`` / ``Sources:`` on its own line.
 _HEADING_RE = re.compile(
@@ -86,6 +127,13 @@ _HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
+# The linked spelling the renderer emits, e.g. ``[\[\[Note\]\](/vault/Topics/Note.md)``:
+# a link whose *text* is the escaped wikilink, so the brackets survive to the
+# screen instead of being eaten as link syntax. The capture excludes backslashes
+# so it cannot run past the closing escape into the URL.
+_LINKED_WIKILINK_RE = re.compile(
+    r"\[\\\[\\\[([^\[\]\\\n]+?)\\\]\\\]\]\(([^)\s]*)\)"
+)
 _BULLET_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
 _REASON_SEP_RE = re.compile(r"^(?::|\||[-—–])[ \t]*")
 _KIND_RE = re.compile(rf"^\[?{re.escape(SOURCE_KIND)}\]?", re.IGNORECASE)
@@ -243,6 +291,147 @@ def resolve_vault_name(
     return VaultIdentity(UNKNOWN, "unknown")
 
 
+# --- note path resolution ----------------------------------------------------
+
+#: Bytes of a note read when looking for its frontmatter. The alias list sits
+#: near the top; reading the whole file for every note in the vault on every
+#: render would be wasteful, and the walk already touches each file.
+_FRONTMATTER_PREFIX_BYTES = 8192
+
+_ALIASES_BLOCK_RE = re.compile(
+    r"^aliases?[ \t]*:[ \t]*(?:\[(?P<inline>[^\]\n]*)\]|\n(?P<items>(?:[ \t]*-[^\n]*\n?)*))?",
+    re.MULTILINE,
+)
+_ALIAS_LINE_RE = re.compile(r"^[ \t]*-[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+
+
+def _frontmatter_aliases(path: str) -> list[str]:
+    """The ``aliases`` (or ``alias``) values from a note's YAML frontmatter.
+
+    Obsidian resolves ``[[Title]]`` against an alias as readily as against the
+    filename, and it has to: every note this agent writes carries
+    ``aliases: [<the title the model chose>]`` while the file on disk is named
+    ``<date> - <slug>`` (``save_summary_to_second_brain``). The model cites the
+    alias, because that is the readable name it was shown, so an index built
+    from filenames alone would leave most citations unlinked.
+
+    Returns ``[]`` for a note with no frontmatter, no aliases, or a body that
+    cannot be read -- all of which mean "no aliases", never "guess some".
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(_FRONTMATTER_PREFIX_BYTES)
+    except OSError:
+        return []
+    if not head.startswith("---"):
+        return []
+    end = head.find("\n---", 3)
+    if end == -1:
+        return []
+    block = head[:end]
+    match = _ALIASES_BLOCK_RE.search(block)
+    if not match:
+        return []
+    if match.group("inline") is not None:
+        # `aliases: [One, Two]` -- valid YAML, and Obsidian accepts it.
+        raw = "\n".join(f"- {part}" for part in match.group("inline").split(","))
+    else:
+        raw = match.group("items") or ""
+    return [
+        m.group(1).strip().strip("\"'")
+        for m in _ALIAS_LINE_RE.finditer(raw)
+        if m.group(1).strip()
+    ]
+
+
+def _build_title_index(vault_root: str) -> dict[str, str]:
+    """Map every name a note answers to, to its vault-relative path.
+
+    Two kinds of key, in Obsidian's own precedence: the filename stem first, then
+    the frontmatter aliases. Filenames are indexed in a full pass before any
+    alias, so a filename always beats an alias that happens to collide with it.
+
+    Built once per render call by walking the vault. A few hundred notes is a
+    few milliseconds -- the same order as the cache lookup that already runs on
+    the first model call of every turn -- and caching across turns would mean
+    invalidating on writes this module cannot see.
+
+    Titles collide in Obsidian: two notes may share a name in different folders.
+    The first match wins, in a deterministic order (see :func:`_vault_walk_order`),
+    so the same vault always yields the same link.
+    """
+    index: dict[str, str] = {}
+    notes = list(_vault_walk_order(vault_root))
+    for abs_path, rel_path in notes:
+        index.setdefault(os.path.splitext(os.path.basename(abs_path))[0], rel_path)
+    for abs_path, rel_path in notes:
+        for alias in _frontmatter_aliases(abs_path):
+            if alias:
+                index.setdefault(alias, rel_path)
+    return index
+
+
+def _vault_walk_order(vault_root: str) -> Iterator[tuple[str, str]]:
+    """Yield ``(absolute path, vault-relative path)`` for every note, stably.
+
+    Sorted at each level rather than left in ``os.walk`` order, so which note
+    wins a duplicate title does not depend on the filesystem's enumeration.
+    Symlinked directories are not followed: a link out of the vault would both
+    escape the mount and make the walk unbounded.
+    """
+    if not vault_root or not os.path.isdir(vault_root):
+        return
+    for dirpath, dirnames, filenames in os.walk(vault_root, followlinks=False):
+        dirnames[:] = sorted(
+            d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))
+        )
+        for name in sorted(filenames):
+            if not name.endswith(".md") or name.startswith("."):
+                continue
+            abs_path = os.path.join(dirpath, name)
+            yield abs_path, os.path.relpath(abs_path, vault_root)
+
+
+def note_href(title: str, vault_root: str | None) -> str | None:
+    """Return the dev-UI URL for the note called ``title``, or ``None``.
+
+    ``None`` means "no such note": the caller then leaves the title as a plain
+    ``[[wikilink]]``, which is what the renderer did before links existed. A
+    link is only ever emitted for a file that is actually there, because a dead
+    link is worse than an unlinked title -- it looks like the note is there and
+    is not.
+
+    Titles are matched exactly, and then case-insensitively, so a title the
+    model cased differently still resolves. Nothing is fuzzy-matched: picking
+    the closest note would be a guess about which one was meant.
+
+    Building the index is a whole-vault walk, so a caller resolving several
+    titles at once should build it once and use :func:`_href_from_index`. That
+    is what :func:`render_sources` does.
+    """
+    if not title or not vault_root:
+        return None
+    return _href_from_index(title, _build_title_index(vault_root))
+
+
+def _href_from_index(title: str, index: dict[str, str]) -> str | None:
+    """Resolve one title against a prebuilt index. See :func:`note_href`."""
+    rel = index.get(title)
+    if rel is None:
+        folded = title.casefold()
+        for name, candidate in index.items():
+            if name.casefold() == folded:
+                rel = candidate
+                break
+    if rel is None:
+        return None
+    # Quote per segment: a title with a space or a '#' in it would otherwise
+    # produce a URL the browser truncates at the fragment.
+    return VAULT_WEB_PREFIX + "/" + "/".join(
+        quote(segment) for segment in rel.split(os.sep)
+    )
+
+
 # --- served model resolution -------------------------------------------------
 
 
@@ -269,6 +458,12 @@ def served_model_from_events(events) -> str | None:
     by the agent and carry no ``model_version``), and so is a cached replay --
     a replayed ``LlmResponse`` has no model_version, which is exactly the signal
     that the text was not freshly generated.
+
+    For the response itself there is no need to search: the rewriting callback
+    holds the ``LlmResponse`` the model just produced, so it reads
+    ``model_version`` off that. This helper exists for the paths that have no
+    response in hand -- ``save_summary_to_second_brain`` writing note frontmatter
+    from inside a tool call (``second_brain.note_provenance``).
     """
     for event in reversed(_events_list(events)):
         if getattr(event, "partial", False):
@@ -290,9 +485,20 @@ def _parse_source_line(line: str) -> SourceEntry | None:
     """Parse one source line into a :class:`SourceEntry`.
 
     Accepts the canonical token form as well as legacy spellings the model may
-    still produce (``[vault] [[Note]]``, ``- [[Note]]: reason``). The note is
-    the first ``[[wikilink]]``; the reason is whatever follows it.
+    still produce (``[vault] [[Note]]``, ``- [[Note]]: reason``), and the linked
+    spelling the renderer itself emits, so a rendered block re-parses into the
+    same entries -- that is what keeps rendering idempotent. The note is the
+    first ``[[wikilink]]``; the reason is whatever follows it.
     """
+    match = _LINKED_WIKILINK_RE.search(line)
+    if match:
+        # The href is the renderer's own, so it is dropped and the href is
+        # recomputed from the vault on the next pass. Keeping it would let a
+        # stale path survive a note being renamed.
+        note = match.group(1).strip()
+        reason = _REASON_SEP_RE.sub("", line[match.end():].strip()).strip()
+        return SourceEntry(note=note, reason=reason) if note else None
+
     match = _WIKILINK_RE.search(line)
     if not match:
         return None
@@ -305,7 +511,9 @@ def _parse_source_line(line: str) -> SourceEntry | None:
 
 def _starts_source_block(line: str) -> bool:
     """True for a line that opens a Sources block without a heading."""
-    if _WIKILINK_RE.search(line) and _TOKEN_RE.search(line):
+    if (_WIKILINK_RE.search(line) or _LINKED_WIKILINK_RE.search(line)) and (
+        _TOKEN_RE.search(line)
+    ):
         return True
     return bool(_KIND_RE.match(line.strip()))
 
@@ -317,6 +525,7 @@ def _is_block_line(line: str) -> bool:
     return (
         bool(_BULLET_RE.match(line))
         or bool(_WIKILINK_RE.search(line))
+        or bool(_LINKED_WIKILINK_RE.search(line))
         or bool(_KIND_RE.match(line.strip()))
     )
 
@@ -345,11 +554,20 @@ def _dedupe(entries: Iterable[SourceEntry]) -> list[SourceEntry]:
 
 
 def _format_block(
-    entries: Iterable[SourceEntry], vault: str, model: str
+    entries: Iterable[SourceEntry],
+    vault: str,
+    model: str,
+    index: dict[str, str] | None = None,
 ) -> list[str]:
     lines = [SOURCES_HEADING]
     for entry in entries:
-        line = f"[{SOURCE_KIND}][{vault}][{model}][[{entry.note}]]"
+        title = f"[[{entry.note}]]"
+        href = _href_from_index(entry.note, index) if index else None
+        if href:
+            # Backslash-escaped so the title still *displays* as [[Note]] while
+            # being a link; see _LINKED_WIKILINK_RE.
+            title = rf"[\[\[{entry.note}\]\]]({href})"
+        line = f"{SOURCE_BULLET}[{SOURCE_KIND}][{vault}][{model}]{title}"
         if entry.reason:
             line += f": {entry.reason}"
         lines.append(line)
@@ -361,13 +579,21 @@ def render_sources(
     *,
     vault_name: str | None = None,
     model_name: str | None = None,
+    vault_root: str | None = None,
 ) -> str:
     """Re-emit the model's Sources block with the real vault and model names.
 
     Any ``**Sources**`` / ``## Sources`` heading the model produced is discarded
     and exactly one canonical block is written in its place, so a model that
-    ignores the format can never yield duplicates. Identifiers that could not be
-    resolved render as :data:`UNKNOWN`; they are never invented.
+    ignores the format can never yield duplicates. Each source is emitted as its
+    own list item (:data:`SOURCE_BULLET`) regardless of the spelling it arrived
+    in, and identifiers that could not be resolved render as :data:`UNKNOWN`;
+    they are never invented.
+
+    ``vault_root`` enables clickable titles: a note title that resolves to a
+    real file under it is linked to the dev UI's ``/vault`` route, and one that
+    does not is left as a plain ``[[wikilink]]``. Omit it and every title stays
+    unlinked, which is the behaviour when the vault is not readable.
 
     Returns the input unchanged (modulo stray sentinel tokens) when it contains
     no Sources block.
@@ -415,7 +641,9 @@ def render_sources(
         # empty section.
         return "\n".join(out).rstrip()
 
-    out[anchor:anchor] = _format_block(deduped, vault, model)
+    # One walk of the vault for the whole block, not one per source line.
+    index = _build_title_index(vault_root) if vault_root else None
+    out[anchor:anchor] = _format_block(deduped, vault, model, index)
     return "\n".join(out)
 
 

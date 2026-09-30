@@ -25,4 +25,7 @@ WORKDIR /workspace
 EXPOSE 8000
 
 ENTRYPOINT []
-CMD ["text_summarizer/.venv/bin/adk", "web", "--host", "0.0.0.0", "--port", "8000", "text_summarizer"]
+# `adk web` with one addition: the active vault served read-only at /vault, so
+# the note titles in every **Sources** line are clickable. Same app, same port,
+# still one process -- see text_summarizer/serve.py.
+CMD ["text_summarizer/.venv/bin/python", "-m", "text_summarizer.serve", "--host", "0.0.0.0", "--port", "8000", "text_summarizer"]
