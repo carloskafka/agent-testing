@@ -49,7 +49,8 @@ agent-testing/
     |-- gmail_mcp_server.py     # Stdio Gmail MCP server spawned by gmail_tools
     |-- gmail_oauth.py          # One-time helper that mints GOOGLE_REFRESH_TOKEN
     |-- observability.py        # Langfuse tracing (no-op if unconfigured)
-    |-- sources.py              # Deterministic **Sources** rendering: vault name + served model
+    |-- sources.py              # Deterministic **Sources** rendering: vault name, served model, note links
+    |-- serve.py                # `adk web` + the active vault served read-only at /vault
     |-- vaults.py               # Which vault is active: discovery, selection, import
     |-- second_brain.py         # Vault writes: notes, chat log, index, cache lookup
     |-- eval_exercise.py        # Manual eval-loop helper (MODIFIES agent.py)
@@ -62,6 +63,7 @@ agent-testing/
     `-- tests/
         |-- conftest.py                    # Blanks LANGFUSE_PUBLIC_KEY so imports don't do a network auth check
         |-- test_sources.py                # **Sources** renderer unit tests
+        |-- test_serve.py                  # The /vault route: serving, and traversal guards
         |-- test_agent_callback.py         # before/after agent callbacks (rewrite, cache hit/miss, key)
         |-- test_adk_wiring.py             # In-process ADK run with a stub Llm (no API cost)
         |-- test_obsidian_tool_schema.py   # MCP JSON-Schema sanitiser (the fallback-path 400)
@@ -92,7 +94,7 @@ Import chain (all through `text_summarizer/__init__.py`):
 - Both paths return a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors.
 - Models referenced are the free-tier aliases used by this project; don't "fix" the names to older released models.
 
-The LlmAgent has: name `text_summarizer`, the model above, a description, bullet-point `instruction` rules, and `tools` = `build_obsidian_tools()` + `build_gmail_tools()` — each returns `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_agent_callback=report_scores_after_agent`, which does two independent jobs: it pushes deterministic `quality.*` scores AND — when the incoming prompt matches an eval-set golden answer — a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call; and it returns rewritten content so the response's `**Sources**` block carries the real vault name and the real served model (see below). `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
+The LlmAgent has: name `text_summarizer`, the model above, a description, bullet-point `instruction` rules, and `tools` = `build_obsidian_tools()` + `build_gmail_tools()` — each returns `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second rewrites the response's `**Sources**` block with the real vault name and the real served model (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
 
 ### `**Sources**` provenance — `sources.py` + `agent.py`
 
@@ -100,15 +102,17 @@ Every fresh, uncached response ends with a block like:
 
 ```
 **Sources**
-[obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - dogs-summary]]: why it is relevant
+- [obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - dogs-summary]](/vault/Second%20Brain/2026-09-25%20-%20dogs-summary.md): why it is relevant
 ```
 
 - **The model is never asked for its own name.** Rule 7 makes the model emit the *shape* of a source line with two sentinel tokens, `@@ADK_VAULT@@` and `@@ADK_MODEL@@`; `sources.render_sources` replaces them in code after the run. The sentinels are collision-proof by construction (doubled `@` + SCREAMING_SNAKE is not markdown-significant and never appears in prose), and any stray occurrence is scrubbed.
-- **One block, always.** The renderer discards whatever heading the model wrote (`**Sources**`, `## Sources`, none at all) and re-emits exactly one canonical block in the same position, so a model that ignores the format still cannot produce duplicates. Legacy `[vault] [[Note]]` lines from pre-existing output are adopted and normalized, not dropped.
-- **Served model — `Event.model_version`.** `Event` subclasses `LlmResponse`, and `_finalize_model_response_event` (`google/adk/flows/llm_flows/base_llm_flow.py`) merges every non-`None` `LlmResponse` field onto the model-response event. `model_version` is set by `LlmResponse.create` from `generate_content_response.model_version` (Gemini, `google/adk/models/google_llm.py`) and from `response.model` (`google/adk/models/lite_llm.py`). `FallbackModel` yields the sub-model's response unmodified, so the value is whichever backend actually answered. Read it via `sources.served_model_from_events`, which walks the session **backwards** and takes the last non-partial model event that has text *or* a function call.
-- **Unresolvable provenance renders as the literal `unknown`** — never a guess, never back-filled from the currently-serving model. A cached replay carries no `model_version`, so if the callback ever ran on one it would say `unknown`; in practice it returns `None` first (below).
+- **One bullet per source, and the model is not asked for that either.** The heading, the `- ` prefix and the real identifiers are all the renderer's output (`sources.SOURCE_BULLET`). Bare lines are joined into a single run-on paragraph by every markdown renderer and by the dev UI's message component, so the bullet is part of the format. `summary_only` therefore has to strip the block before `quality.bullet_count` counts bullets, or every cited note would inflate it.
+- **One block, always.** The renderer discards whatever heading the model wrote (`**Sources**`, `## Sources`, none at all) and re-emits exactly one canonical block in the same position, so a model that ignores the format still cannot produce duplicates. Legacy `[vault] [[Note]]` lines from pre-existing output are adopted and normalized, not dropped. Rendering is idempotent: a second pass over an already-rendered block re-parses its own bullets and reproduces it byte for byte (`test_sources.test_rendering_is_idempotent`).
+- **The rewrite happens in `after_model_callback`, and it has to.** An `LlmResponse` returned from there *replaces* the model's own response, so the answer lives on one event. Content returned from `after_agent_callback` does **not** replace it — ADK builds an extra `Event` for whatever comes back (`BaseAgent._handle_after_agent_callback`) and yields it after the flow is done. That is gotcha 16; it is what made the answer appear twice.
+- **Served model — `LlmResponse.model_version`.** The rewriting callback holds the response the model just produced, so it reads `model_version` straight off it. The same field reaches the event: `Event` subclasses `LlmResponse`, and `_finalize_model_response_event` (`google/adk/flows/llm_flows/base_llm_flow.py`) merges every non-`None` `LlmResponse` field onto the model-response event. It is set by `LlmResponse.create` from `generate_content_response.model_version` (Gemini, `google/adk/models/google_llm.py`) and from `response.model` (`google/adk/models/lite_llm.py`). `FallbackModel` yields the sub-model's response unmodified, so the value is whichever backend actually answered. `sources.served_model_from_events` walks the session **backwards** for the same value and exists for the path that has no response in hand — `save_summary_to_second_brain` writing note frontmatter from inside a tool call.
+- **Unresolvable provenance renders as the literal `unknown`** — never a guess, never back-filled from the currently-serving model. A cached replay carries no `model_version`, so it would say `unknown`; in practice it is never rendered at all (below).
 - **Both call sites pass the *resolved* root.** `second_brain.note_provenance` and
-  `agent._render_final_response` must both call `resolve_vault_name(vault_root=VAULT_ROOT, ...)`.
+  `agent._render_sources_text` must both call `resolve_vault_name(vault_root=VAULT_ROOT, ...)`.
   Under Docker `SECOND_BRAIN_VAULT` is the **parent** that gets bind-mounted (`/vaults`) and the
   active vault is its single child (`/vaults/ck`), so a caller that lets the helper fall back to
   the env var renders the parent's basename: a plausible-looking `[vaults]` in the response while
@@ -117,7 +121,42 @@ Every fresh, uncached response ends with a block like:
   takes, so nothing covered the path production actually uses. Two tests now pin the parent/child
   shape; if you touch either call site, they are the ones that will catch it.
 - **Notes record their own provenance.** `save_summary_to_second_brain` writes `generated_by_model` and `generated_in_vault` into the note frontmatter, read from the live invocation via the framework-injected `tool_context` (a parameter named `tool_context` is supplied by ADK and hidden from the model's schema — do not "fix" its absence from the JSON schema). Notes written **before** these fields existed have no recorded model; that is surfaced as `unknown` and never invented. Such a field is omitted entirely when unresolvable.
-- **Cache hits are untouched.** `report_scores_after_agent` returns `None` before any rendering when `state["vault_cache_hit"]` is true, so a stored note replays verbatim (including the old `## From the vault` shape in notes saved before this change). Scoring is likewise skipped on a hit, as before.
+- **Note titles are clickable, and only when the note is real.** `sources.note_href` resolves the
+  title the model wrote to a file under `VAULT_ROOT`, and the renderer emits it as a markdown link
+  to `/vault/<path relative to the vault root>`, which `text_summarizer/serve.py` mounts read-only
+  on the same FastAPI app that serves the dev UI. A title matching no file stays a plain
+  `[[wikilink]]` — a link is never emitted for a note that is not there, because a dead link
+  asserts the note exists when it does not. The href is derived in code from the vault, never from
+  anything the model wrote, so a cited title cannot walk out of the mount; `test_serve.py` pins
+  that with four traversal spellings.
+- **`obsidian://` is deliberately not used.** It is the canonical Obsidian answer, but the protocol
+  handler only exists on a machine with Obsidian installed, and this deployment runs Obsidian
+  itself in a container while the browser is on the host — so the link would resolve to nothing.
+  Serving the note over HTTP works from any browser, phone or OS. The cost is that it shows the
+  note's markdown source, not a rendered vault page; rendering that needs Obsidian, a different
+  product.
+- **Titles resolve against filenames *and* frontmatter aliases, filenames first.** Notes are
+  written as `Second Brain/<date> - <slug>.md` with `aliases: [<the title the model chose>]`
+  (`save_summary_to_second_brain`), so the readable name the model cites and the name on disk are
+  different strings — and Obsidian resolves both. An index built from filenames alone left most
+  citations unlinked; found live, on a turn citing `[[Voyager 1 Interstellar Space Mission]]`, whose
+  file is `2026-09-26 - voyager-1-interstellar-space-mission.md`. The whole vault is indexed for
+  filenames before any alias, so a real filename always wins a collision, and duplicate titles
+  resolve in a sorted walk order rather than filesystem order, so the same vault always produces the
+  same link. The index is built **once per render**, not once per source line: it reads the
+  frontmatter of every note (~10 ms for 135 notes, the same order as the cache lookup that already
+  runs on the first model call of every turn).
+- **The brackets are backslash-escaped, and that is load-bearing.** The emitted spelling is
+  `[\[\[Note\]\](/vault/...)` — a link whose *text* is the escaped wikilink. Written as
+  `[[Note]](href)` it still links, but `marked` consumes the outer brackets as link syntax and the
+  user sees `[Note]`, with no hint it was Obsidian syntax. Verified against the `marked` build bundled
+  in the dev UI's `main-*.js`, whose ngx-markdown pipeline assigns straight to `innerHTML` under
+  Angular's `SecurityContext.HTML` sanitizer and no DOMPurify; that sanitizer's URL pattern is
+  `/^\s*(?!javascript:)(?:[\w+.-]+:|[^:/?#]*(?:[/?#]|$))/i`, so a relative `/vault/...` href passes
+  untouched. The linked form must stay re-parseable for rendering to remain idempotent, so
+  `_LINKED_WIKILINK_RE` matches it and **drops** the href, recomputing it from the vault on the
+  next pass — a note that is renamed or moved re-points instead of keeping a dead path.
+- **Cache hits are untouched.** A hit short-circuits inside `before_model_callback` (`cache_hit_before_model`), which returns before the model is called, so no `after_model_callback` fires at all and a stored note replays verbatim — including the old `## From the vault` shape in notes saved before this change. `report_scores_after_agent` scores nothing on a hit either, as before.
 
 #### Which vault is active — `vaults.py`
 
@@ -198,8 +237,8 @@ A hit therefore also skips `log_conversation`: the replay happens before any too
 
 ### Langfuse scoring — `agent.py` + `eval_scoring.py`
 
-- `report_scores_after_agent` runs after every agent invocation and posts numeric scores to the current OTel trace: `quality.bullet_count`, `quality.source_overlap`, `quality.fidelity` (deterministic heuristics, zero extra LLM calls). Scores attach to the **trace**, not the generation — in a multi-turn session each turn overwrites the previous turn's score of the same name. Scores are **skipped entirely on a cache hit** (the response was replayed, not generated).
-- The same callback also rewrites the response's `**Sources**` block (see the section above). The two jobs are independent: rendering runs first and is wrapped so a failure can never suppress the scores, and a turn with nothing to rewrite returns `None` so the callback stays a pure no-op.
+- `report_scores_after_agent` runs after every agent invocation and posts numeric scores to the current OTel trace: `quality.bullet_count`, `quality.source_overlap`, `quality.fidelity` (deterministic heuristics, zero extra LLM calls). Scores attach to the **trace**, not the generation — in a multi-turn session each turn overwrites the previous turn's score of the same name. Scores are **skipped entirely on a cache hit** (the response was replayed, not generated). It returns `None` and must keep doing so: see gotcha 16.
+- The `**Sources**` rewrite lives in a different callback, `render_sources_after_model` (`after_model_callback`), because that is the one that can *replace* the model's response instead of appending a second event to it. The two are independent: the renderer is wrapped so a failure can never break the turn, and a response with nothing to substitute returns `None` so the callback stays a pure no-op.
 - `quality.*` is computed on `sources.summary_only(response)`, i.e. with the Sources block removed — otherwise source lines would be counted as summary bullets.
 - **Vault cache observability — `cache_hit_before_model` + `observability.report_cache_outcome`.** Every turn emits a trace tag `cache-hit` / `cache-miss` / `cache-disabled`, trace metadata `cache.outcome` + `cache.lookup_ms`, and two scores: `cache.hit` (1.0/0.0) and `cache.lookup_ms`. This is what makes the two cohorts separable — filter traces by the `cache-hit` tag to compare latency and cost against `cache-miss`. `CACHE_ENABLED=false` bypasses the cache and tags the trace `cache-disabled`; **keep it off for `adk eval`** (see gotcha 10).
 - `eval_scoring.py` loads `tests/eval/*.test.json` and `*.evalset.json`, matches the live user prompt to a case's golden answer, and computes `response_match_score` using ADK's own `google.adk.evaluation.final_response_match_v1._calculate_rouge_1_scores` — the exact same scored value the `adk eval` loop reports. Requires the `google-adk[eval]` extra (provides `rouge_score`); degrades to no-op if it's missing.
@@ -337,7 +376,7 @@ present, 6 × `100dvh`, correct meta, vendor rule intact, injected exactly once 
 ### Docker topology — `docker-compose.yml`
 
 - `obsidian-mcp` service (port 37842) runs inside the `agent-testing` network namespace (`network_mode: service:agent-testing`), so the agent reaches it via `OBSIDIAN_MCP_URL=http://127.0.0.1:37842/mcp`.
-- `agent-testing` service: builds from `Dockerfile`, runs `adk web` on host port **8001 → 8000**, reads `.env`, points Langfuse at `http://host.docker.internal:3099` via `extra_hosts`.
+- `agent-testing` service: builds from `Dockerfile`, runs `text_summarizer/serve.py` (the `adk web` app plus the read-only `/vault` mount) on host port **8001 → 8000**, reads `.env`, points Langfuse at `http://host.docker.internal:3099` via `extra_hosts`.
 - The vault's **parent** is mounted into both containers at `/vaults` (not the vault itself), so the real vault directory name survives in the path. The host path defaults to `./vaults` and is overridable via `OBSIDIAN_VAULT_PARENT_HOST` in `.env`; an empty mount auto-creates the `agent-vault` folder on first boot, so a fresh clone-and-run needs zero vault setup. `SECOND_BRAIN_VAULT: /vaults` points at the same place. The MCP container resolves the actual vault at startup via `resolve-vault.sh`, which mirrors `second_brain.resolve_vault_root()`; the two must never disagree about which vault is in use, so the script **fails loudly** on an ambiguous mount (>1 child directory) rather than picking one, and the agent surfaces the same ambiguity as `unknown` provenance instead of a wrong name.
 
 ## Common commands
@@ -468,6 +507,33 @@ run leaves the previously published site up, which looks like success.
 13. **Notes saved before 2026-09-26 have no provenance.** Their frontmatter has no `generated_by_model`, and their bodies use the old `## From the vault` / `[vault] [[Note]]` shape. They are never rewritten, and citing one does not invent a model. They are also unreachable by the vault cache (their `source_fingerprint` is a fingerprint of the model's paraphrase — see gotcha 15). To backfill either, re-ask the question: the note is then written fresh with provenance and a usable key. There is no migration script.
 14. **`save_summary_to_second_brain`'s `tool_context` parameter is intentional.** ADK injects it and keeps it out of the model's JSON schema; deleting it as "unused" silently removes both `generated_by_model` and the cache key from every new note.
 15. **`save_summary_to_second_brain` has no `source_text` parameter, on purpose.** It used to, and the model was asked to fill it in (rule 8). That was the cache bug: the note was keyed on the model's paraphrase while the lookup used the user's prompt, so the two could never agree. Do not re-add it "for provenance" — the key is computed in code from the live turn. Removing the argument also removed ~1k output tokens per call, which is where a 7.6s generation went. A stale tool call that still carries the argument is harmless: `FunctionTool` filters unknown args before invoking (`google/adk/tools/function_tool.py`, `_prepare_invocation_args`).
+16. **Content returned from `after_agent_callback` APPENDS an event; it does not replace the response.** This is the single most misleading thing about the callback API, and it was invisible in the code and in Langfuse while being obvious in the UI. What the callback returns is wrapped in a **new** `Event` (`BaseAgent._handle_after_agent_callback`, `google/adk/agents/base_agent.py`) and yielded after the flow has finished — the model's own event is already emitted and already persisted, untouched. The dev UI builds one chat message per event and only checks `author === "user"` (`buildUiEventFromEvent` in the bundled `main-*.js`), so two assistant-authored text events render as the answer twice, the second one at the end.
+
+    Found on session `55b1f828-6ff0-498e-953f-8cc29b84cb93`, where the `**Sources**` rewrite lived there: nine events, the last two carrying the same answer, the first of them still holding the raw `@@ADK_VAULT@@` / `@@ADK_MODEL@@` sentinels. Neither Langfuse trace nor any unit test showed it — the trace records one `AGENT agent_run` whose output is the *last* event, i.e. the correct text, and the test that covered it asserted on that same last event.
+
+    The fix is `after_model_callback`, whose returned `LlmResponse` *replaces* the model's response (`_handle_after_model_callback` → `_finalize_model_response_event`): one event, substituted in place, and the served model readable straight off the response. The rule generalises: **`after_agent_callback` can score a turn but must return `None`; to change what the user sees, use `after_model_callback`.** `test_adk_wiring.test_the_answer_is_one_event_with_the_sources_substituted` runs a real runner and asserts on the event *count*, and `test_agent_callback.test_after_agent_callback_never_returns_content` pins the callback contract.
+17. **A bug you can see in the UI may already be fixed in your working tree — check the image
+    before you start debugging.** Gotcha 16's duplicated answer was reported again on session
+    `8603b287-b38d-4e6d-81a0-3546c62367a0` (event `#19` the raw model response carrying
+    `@@ADK_VAULT@@`, event `#20` a second event with the substituted text, `model_version` present
+    on the first and `null` on the second — the signature of gotcha 16 exactly). The fix was
+    already committed to the tree; the container was running an image built before it. There is
+    nothing in the UI, the trace or the events that tells you this, because from the session's
+    point of view it is indistinguishable from the bug still being live.
+
+    Confirm before reading any code:
+
+    ```bash
+    docker exec agent-testing md5sum /workspace/text_summarizer/agent.py   # the deployed copy
+    md5sum text_summarizer/agent.py                                       # your tree
+    docker exec agent-testing grep -n 'after_model_callback' /workspace/text_summarizer/agent.py
+    ```
+
+    Two things follow from this being easy to get wrong. First, the running container is not the
+    repository: `docker compose up -d --build` rebuilds **both** services (see the walkthrough
+    note below on why the sidecar must go with it). Second, a *live* verification means a real
+    turn after the rebuild — reading the event list out of `.adk/session.db` is how you see
+    whether the answer is one event or two, and neither the trace nor the UI tells you.
 
 ## Environment variables (see `.env.example`)
 
@@ -511,3 +577,5 @@ Tracked, not yet fixed. Ordered by how much they mislead.
 9. **Non-atomic writes** — `_write` truncates then writes; `log_conversation` and the index do read-modify-write on shared files. Concurrent sessions lose entries. Use append mode for the chat log plus a lock for the index.
 10. **`find_cached_summary` is O(n) full-file reads per model call** and regexes the whole note body rather than just the frontmatter. An index file (fingerprint → path) written by `save_summary_to_second_brain` makes it O(1). Deliberately not done yet: measured at 0.5ms against a 19-note vault, so the payoff only appears at a vault size nobody has reached. Note this is now the *only* thing standing between a cache miss and a hit — the key mismatch that used to guarantee a miss is fixed, so this cost is on the path of every single turn.
 11. **The vault cache is now exercised end to end, on built code.** `docker compose build` and `up -d --build` both work on this host as of 2026-09-26 (the "two daemons, neither socket serving these containers" problem is gone), and the rebuilt containers resolved the real vault to `/vaults/ck` on both sides. Measured on a real prompt: first ask 23.5s / 11 events, the same prompt in two further new sessions 0.04s / 2 events each with `vault_cache_hit=True`, `cache.hit=1` and no `quality.*` scores. Two bugs were found only by doing this and are now pinned by tests — see "The vault cache" above. Note the containers still stop on their own here; `docker start agent-testing obsidian-mcp` brings them back.
+12. **The `**Sources**` rewrite is skipped on streamed chunks.** `render_sources_after_model` returns early for a `partial` response, because a chunk is not the whole answer and a sentinel can straddle two chunks — so a turn served with `StreamingMode.SSE` would show the raw `@@ADK_VAULT@@` / `@@ADK_MODEL@@`. Inert as deployed: the dev UI posts `streaming: false` (`google/adk/cli/api_server.py` defaults it to false and the bundled UI sends `streaming:!1`), and `run.sh` passes no streaming flag. If streaming is ever turned on, this needs buffering or a per-chunk token-safe substitution.
+13. **The duplication that gotcha 16 fixes was never visible in the code or in Langfuse** — only in the dev UI, and only because two events carried the same text. The same blind spot applies to anything else asserted on "the last event" or on a trace's output, both of which report the *correct* text. When a UI complaint cannot be reproduced from a trace, read the session's raw events (`sqlite3 .adk/session.db 'select event_data from events'`, or the `events` table through the session service) before concluding the trace is right.

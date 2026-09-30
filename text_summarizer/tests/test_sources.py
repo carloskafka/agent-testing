@@ -14,15 +14,17 @@ Run with::
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
+from _helpers import SERVED_MODEL, _event, _point_vault_at
 from text_summarizer.sources import (
     MODEL_TOKEN,
     SOURCES_HEADING,
     UNKNOWN,
     VAULT_TOKEN,
+    note_href,
     render_sources,
     resolve_vault_name,
     served_model_from_events,
@@ -30,18 +32,6 @@ from text_summarizer.sources import (
 )
 
 BULLETS = "- Dogs are domesticated mammals.\n- They come in many breeds.\n- Dogs are social animals."
-
-
-def _event(text="", *, author="text_summarizer", model_version=None, parts=None):
-    """A minimal stand-in for an ADK ``Event`` (which subclasses LlmResponse)."""
-    return SimpleNamespace(
-        author=author,
-        content=SimpleNamespace(parts=parts if parts is not None else (
-            [SimpleNamespace(text=text, function_response=None)] if text else [SimpleNamespace(text=None, function_response=None)]
-        )),
-        model_version=model_version,
-        partial=False,
-    )
 
 
 # --- normal substitution -----------------------------------------------------
@@ -58,7 +48,7 @@ def test_substitutes_vault_and_model_into_single_source():
     assert out == (
         f"{BULLETS}\n\n"
         f"{SOURCES_HEADING}\n"
-        "[obsidian][ck][gemini-3.5-flash-lite][[Dogs Overview]]: same topic"
+        "- [obsidian][ck][gemini-3.5-flash-lite][[Dogs Overview]]: same topic"
     )
 
 
@@ -75,10 +65,45 @@ def test_substitutes_multi_source_block_in_place():
     assert out == (
         f"{BULLETS}\n\n"
         f"{SOURCES_HEADING}\n"
-        "[obsidian][ck][openrouter/google/gemma-4-26b-a4b-it:free][[Dogs Overview]]: primary\n"
-        "[obsidian][ck][openrouter/google/gemma-4-26b-a4b-it:free][[Wolves]]: related canid\n\n"
+        "- [obsidian][ck][openrouter/google/gemma-4-26b-a4b-it:free][[Dogs Overview]]: primary\n"
+        "- [obsidian][ck][openrouter/google/gemma-4-26b-a4b-it:free][[Wolves]]: related canid\n\n"
         'Saved to the second brain as "Dogs Summary".'
     )
+
+
+def test_each_source_is_its_own_bullet():
+    """One list item per note, whatever shape the model wrote them in.
+
+    Bare lines collapse into a single run-on paragraph in the chat UI, which is
+    what the block looked like before the bullet was part of the format.
+    """
+    model_text = (
+        f"{BULLETS}\n\n"
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Dogs Overview]]: primary\n"
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Wolves]]: related canid\n"
+    )
+    out = render_sources(model_text, vault_name="ck", model_name="m1")
+    source_lines = out.split(f"{SOURCES_HEADING}\n", 1)[1].splitlines()
+    assert source_lines == [
+        "- [obsidian][ck][m1][[Dogs Overview]]: primary",
+        "- [obsidian][ck][m1][[Wolves]]: related canid",
+    ]
+
+
+def test_rendering_is_idempotent():
+    """Re-rendering an already-rendered block must not change it or double it.
+
+    The block is re-parsed and re-emitted on every render, so a second pass has
+    to recognise its own bulleted output -- the case that matters once a response
+    is stored and then read back.
+    """
+    model_text = (
+        f"{BULLETS}\n\n"
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Dogs Overview]]: primary\n"
+    )
+    once = render_sources(model_text, vault_name="ck", model_name="m1")
+    assert render_sources(once, vault_name="ck", model_name="m1") == once
+    assert once.count(SOURCES_HEADING) == 1
 
 
 def test_model_emitted_heading_is_replaced_not_duplicated():
@@ -91,7 +116,7 @@ def test_model_emitted_heading_is_replaced_not_duplicated():
     out = render_sources(model_text, vault_name="ck", model_name="m1")
     assert out.count(SOURCES_HEADING) == 1
     assert "## Sources" not in out
-    assert out.endswith("[[Dogs Overview]]: primary\n")
+    assert out.endswith("- [obsidian][ck][m1][[Dogs Overview]]: primary\n")
 
 
 def test_duplicate_headings_collapse_to_one_block():
@@ -120,8 +145,8 @@ def test_legacy_vault_prefixed_lines_are_normalized():
     assert out == (
         f"{BULLETS}\n\n"
         f"{SOURCES_HEADING}\n"
-        "[obsidian][ck][m1][[Dogs Overview]]\n"
-        "[obsidian][ck][m1][[Wolves]]: related canid\n"
+        "- [obsidian][ck][m1][[Dogs Overview]]\n"
+        "- [obsidian][ck][m1][[Wolves]]: related canid\n"
     )
 
 
@@ -141,7 +166,7 @@ def test_duplicate_notes_are_deduped_case_insensitively():
 def test_unknown_model_renders_as_literal_unknown_not_a_guess():
     model_text = f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Dogs Overview]]: primary"
     out = render_sources(model_text, vault_name="ck", model_name=None)
-    assert out.endswith("[obsidian][ck][unknown][[Dogs Overview]]: primary")
+    assert out.endswith("- [obsidian][ck][unknown][[Dogs Overview]]: primary")
     assert UNKNOWN in out
     # Nothing plausible was invented.
     assert "gemini" not in out and "gemma" not in out and "qwen" not in out
@@ -150,7 +175,7 @@ def test_unknown_model_renders_as_literal_unknown_not_a_guess():
 def test_unknown_vault_and_model_together():
     model_text = f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Dogs Overview]]: primary"
     out = render_sources(model_text, vault_name="", model_name="")
-    assert out.endswith("[obsidian][unknown][unknown][[Dogs Overview]]: primary")
+    assert out.endswith("- [obsidian][unknown][unknown][[Dogs Overview]]: primary")
 
 
 def test_served_model_is_read_from_the_last_complete_model_event():
@@ -171,7 +196,7 @@ def test_served_model_is_none_for_a_cache_replay():
         vault_name="ck",
         model_name=served_model_from_events(events),
     )
-    assert "[unknown]" in out
+    assert "- [obsidian][ck][unknown][[Dogs Overview]]: primary" in out
 
 
 def test_served_model_ignores_user_and_empty_events():
@@ -218,7 +243,7 @@ def test_strip_sources_block_keeps_text_after_the_block():
     rendered = (
         f"{BULLETS}\n\n"
         f"{SOURCES_HEADING}\n"
-        "[obsidian][ck][m1][[Dogs Overview]]: primary\n\n"
+        "- [obsidian][ck][m1][[Dogs Overview]]: primary\n\n"
         'Saved to the second brain as "Dogs Summary".'
     )
     assert strip_sources_block(rendered) == (
@@ -227,8 +252,16 @@ def test_strip_sources_block_keeps_text_after_the_block():
 
 
 def test_strip_sources_block_lets_metrics_ignore_source_lines():
-    """Source lines must not be counted as summary bullets."""
-    rendered = f"{BULLETS}\n\n{SOURCES_HEADING}\n[obsidian][ck][m1][[Dogs Overview]]: x"
+    """Source lines must not be counted as summary bullets.
+
+    This matters more now that source lines *are* bullets: without the strip,
+    every cited note would inflate ``quality.bullet_count``.
+    """
+    rendered = (
+        f"{BULLETS}\n\n{SOURCES_HEADING}\n"
+        "- [obsidian][ck][m1][[Dogs Overview]]: x\n"
+        "- [obsidian][ck][m1][[Wolves]]: y"
+    )
     assert strip_sources_block(rendered).count("\n- ") == 2
 
 
@@ -310,23 +343,96 @@ def test_mcp_vault_info_payload_shapes():
 # --- note frontmatter provenance --------------------------------------------
 
 
-def test_pre_existing_note_without_generated_by_model_is_treated_as_unknown():
-    """A note written before provenance existed must not gain an invented model."""
+def test_a_pre_existing_note_never_gains_an_invented_model(monkeypatch, tmp_path):
+    """A note written before provenance existed must render as ``unknown``.
+
+    The previous version of this test built a ``legacy`` frontmatter string, asserted
+    that the word ``generated_by_model`` was absent from *its own literal*, and then
+    never passed it to anything. It could not fail: the interesting behaviour --
+    "what does the system do when it reads such a note?" -- was never exercised.
+
+    So this walks the real path with a real note on disk:
+
+    1. ``find_cached_summary`` finds it by fingerprint and replays the body;
+    2. nothing back-fills the frontmatter -- the note is byte-identical afterwards,
+       so a model that happens to be serving now cannot claim it;
+    3. the provenance resolved for that replay has no model, because a cache hit
+       short-circuits *before* the model is called and so the session holds no
+       model event at all;
+    4. and that absence is what makes the renderer say ``unknown`` rather than the
+       currently-serving model. Step 5 is the anchor: the same resolver, given one
+       model event, does return a name -- so "unknown" is a fact about this input,
+       not a constant.
+    """
+    from text_summarizer import second_brain
+
+    vault = Path(_point_vault_at(monkeypatch, tmp_path))
+    brain = vault / second_brain.BRAIN_DIR
+    brain.mkdir(parents=True, exist_ok=True)
+
+    prompt = "Summarize: dogs are social animals."
     legacy = (
         "---\ntags:\n  - Dogs\ndate: 2026-09-25\n"
-        "source_fingerprint: " + "a" * 64 + "\naliases:\n  - Dogs\n---\n\n"
-        "- Dogs are social animals."
+        f"source_fingerprint: {second_brain.source_fingerprint(prompt)}\n"
+        "aliases:\n  - Dogs\n---\n\n"
+        "- Dogs are social animals.\n\n## From the vault\n[[Dogs Overview]]\n"
+        "\n## Related\n- [[Dogs]]\n"
     )
-    assert "generated_by_model" not in legacy
-    # Nothing in the renderer invents one for it.
+    note = brain / "2026-09-25 - dogs.md"
+    note.write_text(legacy, encoding="utf-8")
+
+    # 1. The real lookup: this note is reachable by the cache.
+    replayed = second_brain.find_cached_summary(prompt)
+    assert replayed is not None
+    assert replayed.startswith("- Dogs are social animals.")
+    assert "generated_by_model" not in replayed, "the frontmatter is stripped on replay"
+
+    # 2. Never back-filled.
+    assert note.read_text(encoding="utf-8") == legacy
+
+    # 3. A cache hit short-circuits in before_model_callback, so the session holds
+    #    the prompt and the replayed text and no model event whatsoever.
+    replay_events = [
+        _event(prompt, author="user"),
+        _event(replayed, model_version=None),
+    ]
+    assert served_model_from_events(replay_events) is None
+    provenance = second_brain.note_provenance(_session(replay_events))
+    assert "generated_by_model" not in provenance
+
+    # 4. Which is exactly what the renderer turns into `unknown`.
     out = render_sources(
         f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[2026-09-25 - dogs]]: pre-existing",
         vault_name="ck",
-        model_name="gemini-3.5-flash-lite",
+        model_name=served_model_from_events(replay_events),
     )
-    assert out.endswith(
-        "[obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - dogs]]: pre-existing"
+    assert out.endswith("- [obsidian][ck][unknown][[2026-09-25 - dogs]]: pre-existing")
+
+    # 5. The anchor. One model event on the session and the same resolver names the
+    #    backend, so step 3 is a property of a replay -- not a stub that always
+    #    answers `unknown`.
+    served_events = replay_events + [_event("- a fresh answer", model_version=SERVED_MODEL)]
+    assert served_model_from_events(served_events) == SERVED_MODEL
+    backfilled = render_sources(
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[2026-09-25 - dogs]]: pre-existing",
+        vault_name="ck",
+        model_name=served_model_from_events(served_events),
     )
+    assert backfilled.endswith(
+        f"- [obsidian][ck][{SERVED_MODEL}][[2026-09-25 - dogs]]: pre-existing"
+    )
+    assert backfilled != out, "the two cases must not render identically"
+
+
+def _session(events) -> SimpleNamespace:
+    """A ``ToolContext``-shaped object exposing only ``session.events``.
+
+    That is the entire surface ``second_brain._session_events`` reads, and the
+    whole point of the shape is that it is *only* that: a real ``ToolContext`` also
+    carries ``state``, ``functions`` and a live invocation, none of which
+    ``note_provenance`` looks at.
+    """
+    return SimpleNamespace(session=SimpleNamespace(events=list(events)))
 
 
 @pytest.mark.parametrize("tool_context", [None, object()])
@@ -337,3 +443,237 @@ def test_note_provenance_omits_unresolvable_fields(tool_context):
     assert "generated_by_model" not in provenance
     # The vault is still resolvable from configuration alone.
     assert provenance.get("generated_in_vault")
+
+
+# --- clickable source titles -------------------------------------------------
+
+
+def linked(title: str, href: str) -> str:
+    """The exact markdown the renderer emits for a clickable note title.
+
+    Built from ``chr(92)`` and concatenated rather than written as a literal:
+    the escaping is the whole point of the format, and a hand-written ``\\\\[``
+    hides the off-by-one that costs a bracket. What it produces is::
+
+        [\\[\\[Note\\]\\](/vault/Topics/Note.md)
+
+    i.e. a markdown link whose text is the escaped wikilink, so the brackets
+    reach the screen instead of being eaten as link syntax.
+    """
+    bs = chr(92)
+    return "".join(
+        (
+            "[", bs, "[",          # [ + escaped [
+            bs, "[", title,        # escaped [ + the note title
+            bs, "]", bs, "]",      # escaped ] + escaped ]
+            "]",                   # closes the markdown link
+            "(", href, ")",
+        )
+    )
+
+
+@pytest.fixture
+def vault(tmp_path):
+    """A small vault: a topic note, a dated note, and an aliased note."""
+    (tmp_path / "Topics").mkdir()
+    (tmp_path / "Topics" / "Email.md").write_text("# Email\n", encoding="utf-8")
+    brain = tmp_path / "Second Brain"
+    brain.mkdir()
+    (brain / "2026-09-25 - dogs.md").write_text("# Dogs\n", encoding="utf-8")
+    (brain / "2026-09-26 - voyager-1-interstellar-space-mission.md").write_text(
+        "---\n"
+        "tags:\n  - Space\n"
+        "date: 2026-09-26\n"
+        "aliases:\n"
+        "  - Voyager 1 Interstellar Space Mission\n"
+        "  - Voyager 1\n"
+        "---\n\n"
+        "# Voyager 1\n",
+        encoding="utf-8",
+    )
+    return str(tmp_path)
+
+
+def test_a_resolved_title_renders_a_link(vault):
+    model_text = f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Email]]: covers inbox"
+    out = render_sources(
+        model_text, vault_name="ck", model_name="m1", vault_root=vault
+    )
+    assert out.endswith(
+        f"- [obsidian][ck][m1]{linked('Email', '/vault/Topics/Email.md')}: covers inbox"
+    )
+
+
+def test_a_link_still_displays_the_wikilink_brackets(vault):
+    """The visible text has to stay ``[[Email]]``, or the format is not preserved.
+
+    The brackets are backslash-escaped so the markdown parser shows them instead
+    of consuming them as link syntax. Drop the escaping and the title still
+    links, but silently reads as ``[Email]``.
+
+    Asserted on the *link text* -- the span between the link's own delimiters --
+    because that is what a CommonMark renderer puts inside the ``<a>``. The
+    delimiters are not displayed at all, so unescaping the whole line would be
+    asserting the wrong thing.
+    """
+    model_text = f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Email]]: covers inbox"
+    out = render_sources(
+        model_text, vault_name="ck", model_name="m1", vault_root=vault
+    )
+    emitted = out.split("[m1]", 1)[1].split(":")[0]
+    assert emitted == linked("Email", "/vault/Topics/Email.md")
+
+    link_text = emitted[1 : emitted.rindex("](")]
+    assert link_text.replace("\\", "") == "[[Email]]"
+
+
+def test_an_unresolvable_title_stays_a_plain_wikilink(vault):
+    """A title with no file behind it must not become a link that 404s."""
+    model_text = f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Ghost Note]]: hallucinated"
+    out = render_sources(
+        model_text, vault_name="ck", model_name="m1", vault_root=vault
+    )
+    assert out.endswith("- [obsidian][ck][m1][[Ghost Note]]: hallucinated")
+    assert "/vault/" not in out
+
+
+def test_no_vault_root_means_no_links():
+    """With no readable vault every title stays unlinked, as it was before."""
+    model_text = f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Email]]: covers inbox"
+    out = render_sources(model_text, vault_name="ck", model_name="m1")
+    assert out.endswith("- [obsidian][ck][m1][[Email]]: covers inbox")
+
+
+def test_titles_in_subdirectories_link_to_their_path(vault):
+    model_text = (
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}]"
+        "[[2026-09-25 - dogs]]: primary"
+    )
+    out = render_sources(
+        model_text, vault_name="ck", model_name="m1", vault_root=vault
+    )
+    # The space is percent-encoded, or the browser truncates the URL there.
+    assert "(/vault/Second%20Brain/2026-09-25%20-%20dogs.md)" in out
+
+
+def test_title_lookup_ignores_case_but_not_spelling(vault):
+    assert note_href("email", vault) == "/vault/Topics/Email.md"
+    assert note_href("Emai", vault) is None
+
+
+def test_rendering_is_idempotent_with_links(vault):
+    """A linked block must re-parse into the same entries, links and all.
+
+    The href is dropped on re-parse and recomputed from the vault, so a note
+    that is renamed or moved re-points instead of keeping a dead path.
+    """
+    model_text = (
+        f"{BULLETS}\n\n"
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Email]]: covers inbox\n"
+    )
+    once = render_sources(
+        model_text, vault_name="ck", model_name="m1", vault_root=vault
+    )
+    twice = render_sources(once, vault_name="ck", model_name="m1", vault_root=vault)
+    assert once == twice
+    assert once.count(SOURCES_HEADING) == 1
+    assert once.count("/vault/Topics/Email.md") == 1
+
+
+def test_a_renamed_note_repoints_instead_of_keeping_a_dead_link(vault, tmp_path):
+    model_text = f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Email]]: covers inbox"
+    once = render_sources(
+        model_text, vault_name="ck", model_name="m1", vault_root=vault
+    )
+    (tmp_path / "Topics" / "Email.md").rename(tmp_path / "Topics" / "Email (old).md")
+    (tmp_path / "Topics" / "Email.md").write_text("# Email\n", encoding="utf-8")
+    twice = render_sources(once, vault_name="ck", model_name="m1", vault_root=vault)
+    assert twice == once  # same title, same resolved file -> same link
+
+
+def test_note_href_refuses_to_walk_out_of_the_vault(vault):
+    """Titles are matched against real files, so no path can be injected."""
+    assert note_href("../../../etc/passwd", vault) is None
+    assert note_href("", vault) is None
+    assert note_href("Email", None) is None
+    assert note_href("Email", "/nonexistent/vault") is None
+
+
+def test_duplicate_titles_resolve_deterministically(tmp_path):
+    """Obsidian allows the same note name in two folders; the link must not flap."""
+    (tmp_path / "Topics").mkdir()
+    (tmp_path / "Archive").mkdir()
+    (tmp_path / "Topics" / "Email.md").write_text("a", encoding="utf-8")
+    (tmp_path / "Archive" / "Email.md").write_text("b", encoding="utf-8")
+    root = str(tmp_path)
+    assert note_href("Email", root) == note_href("Email", root)
+
+
+# --- alias resolution --------------------------------------------------------
+
+
+def test_a_cited_alias_links_to_the_note_that_declares_it(vault):
+    """The model cites the note's alias, not its ``<date> - <slug>`` filename.
+
+    Every note this agent writes carries ``aliases: [<the title the model
+    chose>]`` while the file is named after a slug of it, so the readable name
+    the model cites and the name on disk are different strings. Obsidian
+    resolves both; an index built from filenames alone left most citations
+    unlinked. Found live: a turn citing
+    ``[[Voyager 1 Interstellar Space Mission]]`` produced no link until the
+    alias was indexed.
+    """
+    model_text = (
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}]"
+        "[[Voyager 1 Interstellar Space Mission]]: prior note"
+    )
+    out = render_sources(
+        model_text, vault_name="ck", model_name="m1", vault_root=vault
+    )
+    assert out.endswith(
+        linked(
+            "Voyager 1 Interstellar Space Mission",
+            "/vault/Second%20Brain/2026-09-26%20-%20voyager-1-interstellar-space-mission.md",
+        )
+        + ": prior note"
+    )
+    # The filename spelling resolves to the same note.
+    by_name = render_sources(
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}]"
+        "[[2026-09-26 - voyager-1-interstellar-space-mission]]: by name",
+        vault_name="ck",
+        model_name="m1",
+        vault_root=vault,
+    )
+    assert "2026-09-26%20-%20voyager-1-interstellar-space-mission.md" in by_name
+
+
+def test_an_inline_alias_list_is_understood(tmp_path):
+    """``aliases: [A, B]`` is valid YAML and valid Obsidian."""
+    (tmp_path / "n.md").write_text("---\naliases: [Inline One, Inline Two]\n---\n")
+    assert note_href("Inline One", str(tmp_path)) == "/vault/n.md"
+    assert note_href("Inline Two", str(tmp_path)) == "/vault/n.md"
+
+
+def test_a_filename_beats_a_colliding_alias(tmp_path):
+    """Obsidian resolves a real filename first, and so does the index."""
+    (tmp_path / "Topics").mkdir()
+    (tmp_path / "Archive").mkdir()
+    (tmp_path / "Topics" / "Report.md").write_text("# real\n", encoding="utf-8")
+    (tmp_path / "Archive" / "old.md").write_text(
+        "---\naliases:\n  - Report\n---\n", encoding="utf-8"
+    )
+    assert note_href("Report", str(tmp_path)) == "/vault/Topics/Report.md"
+
+
+def test_aliases_are_not_read_out_of_the_note_body(tmp_path):
+    """Only the frontmatter declares an alias; a body mention is not one."""
+    (tmp_path / "n.md").write_text(
+        "# Note\n\nSome prose mentioning aliases:\n  - Not An Alias\n"
+    )
+    assert note_href("Not An Alias", str(tmp_path)) is None
+
+
+def test_a_note_with_no_frontmatter_is_fine(tmp_path):
+    (tmp_path / "plain.md").write_text("# Plain\n")
+    assert note_href("Plain", str(tmp_path)) == "/vault/plain.md"

@@ -27,7 +27,8 @@ agent-testing/
     |-- gmail_mcp_server.py     # Stdio Gmail MCP server spawned by gmail_tools
     |-- gmail_oauth.py          # One-time helper that mints GOOGLE_REFRESH_TOKEN
     |-- observability.py        # Langfuse tracing (no-op if unconfigured)
-    |-- sources.py              # Deterministic **Sources** rendering: vault name + served model
+    |-- sources.py              # Deterministic **Sources** rendering: vault name, served model, note links
+    |-- serve.py                # `adk web` + the vault served read-only at /vault
     |-- vaults.py               # Which vault is active: discovery, selection, import
     |-- second_brain.py         # Vault writes: notes, chat log, index, cache lookup
     |-- eval_exercise.py        # Manual eval-loop helper (MODIFIES agent.py)
@@ -38,7 +39,8 @@ agent-testing/
     `-- tests/
         |-- conftest.py                    # Blanks LANGFUSE_PUBLIC_KEY so imports don't hit the network
         |-- test_sources.py                # **Sources** renderer unit tests
-        |-- test_agent_callback.py         # after_agent_callback unit tests
+        |-- test_serve.py                  # The /vault route: serving and traversal guards
+        |-- test_agent_callback.py         # after_model/after_agent callback unit tests
         |-- test_prompt_name_span.py       # prompt-name span tagging tests
         |-- test_adk_wiring.py             # In-process ADK run with a stub Llm (no API cost)
         |-- test_vaults.py                # Vault selection + resolve-vault.sh parity
@@ -66,11 +68,11 @@ Key callbacks:
 
 - `before_model_callback=cache_hit_before_model` — replays a stored summary from
   the vault (zero LLM calls) when the exact text was summarized before.
-- `after_model_callback=tag_current_span` — reports the prompt name on the
-  generation span.
+- `after_model_callback=[tag_current_span, render_sources_after_model]` — reports
+  the prompt name on the generation span, and rewrites the `**Sources**` block
+  with the real vault name + served model.
 - `after_agent_callback=report_scores_after_agent` — pushes `quality.*` and
-  `response_match_score` scores to Langfuse **and** rewrites the `**Sources**`
-  block with the real vault name + served model.
+  `response_match_score` scores to Langfuse. Returns `None` on purpose.
 
 ## `**Sources**` Provenance
 
@@ -78,14 +80,32 @@ Every fresh, uncached response ends with a block like:
 
 ```
 **Sources**
-[obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - dogs-summary]]: why it is relevant
+- [obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - dogs-summary]](/vault/Second%20Brain/2026-09-25%20-%20dogs-summary.md): why it is relevant
 ```
 
 - The model is never asked for its own name. Rule 7 emits sentinel tokens
   `@@ADK_VAULT@@` / `@@ADK_MODEL@@` that `sources.render_sources` replaces in
-  code after the run. The heading and real identifiers are added by the callback.
+  code after the run. The heading, the bullets and the real identifiers are all
+  added by the renderer, so the model writes bare lines and nothing else.
 - The vault name resolves at runtime; the served model comes from
-  `Event.model_version` after the run.
+  `LlmResponse.model_version` on the response being rewritten.
+- The rewrite happens in `after_model_callback` because an `LlmResponse`
+  returned from there *replaces* the model's response. `after_agent_callback`
+  cannot do that: content returned from it becomes an extra event, and the UI
+  then shows the answer twice.
+- Note titles are **clickable**. `sources.note_href` resolves a title to a real
+  file under the vault and the renderer links it to `/vault/...`, which
+  `text_summarizer/serve.py` mounts read-only on the same app that serves the
+  dev UI. A title that matches no file stays a plain `[[wikilink]]` — a dead
+  link would claim a note exists when it does not.
+- Titles resolve against **filenames and frontmatter aliases**, in that order,
+  because notes are written as `<date> - <slug>.md` with
+  `aliases: [<the title the model chose>]`, and the model cites the readable
+  alias. Filenames are indexed for the whole vault before any alias, so a real
+  filename always wins a collision.
+- The brackets are escaped (`[\[\[Note\]\](href)`) so they survive to the
+  screen. `marked` would otherwise eat one pair as link syntax and the user
+  would see `[Note]` with no hint it was Obsidian syntax.
 
 ## Observability (Langfuse)
 
@@ -124,7 +144,8 @@ note the agent writes mid-turn cannot be replayed over its own answer. See
   server on port 37842 inside the `agent-testing` network namespace
   (`network_mode: service:agent-testing`), so the agent reaches it via
   `OBSIDIAN_MCP_URL=http://127.0.0.1:37842/mcp`.
-- `agent-testing` — builds from `Dockerfile`, runs `adk web` on host port
+- `agent-testing` — builds from `Dockerfile`, runs `text_summarizer/serve.py`
+  (the `adk web` app plus the read-only `/vault` mount) on host port
   **8001 → 8000**, reads `.env`, points Langfuse at
   `http://host.docker.internal:3099` via `extra_hosts`.
 

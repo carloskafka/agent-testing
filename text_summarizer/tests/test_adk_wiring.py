@@ -1,14 +1,16 @@
 """In-process ADK wiring test: proves the provenance path end to end, offline.
 
 The unit tests in ``test_sources.py`` and ``test_agent_callback.py`` cover the
-renderer and the callback in isolation. This file runs a *real* ``LlmAgent``
+renderer and the callbacks in isolation. This file runs a *real* ``LlmAgent``
 through a *real* ``InMemoryRunner`` with a stub ``BaseLlm``, so it verifies the
-three ADK facts the whole feature rests on, at zero API cost:
+ADK facts the whole feature rests on, at zero API cost:
 
-1. ``Event.model_version`` really carries the backend that served the call
+1. ``LlmResponse.model_version`` really carries the backend that served the call
    (ADK merges non-``None`` ``LlmResponse`` fields into the model event).
-2. Content returned from ``after_agent_callback`` really does become the
-   agent's emitted response.
+2. An ``LlmResponse`` returned from ``after_model_callback`` really does
+   *replace* the model's response -- and content returned from
+   ``after_agent_callback`` really does append a second event, which is how the
+   answer came to be rendered twice.
 3. A ``FunctionTool`` really does receive ``tool_context`` -- which is how
    ``save_summary_to_second_brain`` reads the live model at write time.
 """
@@ -17,48 +19,34 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
+from _helpers import (
+    SERVED_MODEL,
+    _agent_texts,
+    _all_text,
+    _final_model_text,
+    _make_vault,
+    _point_vault_at,
+    _StubLlm,
+)
 from google.adk.agents import LlmAgent
-from google.adk.runners import InMemoryRunner
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
+from google.adk.runners import InMemoryRunner
 from google.genai import types
-
 from text_summarizer import agent as agent_module
-from text_summarizer.sources import MODEL_TOKEN, SOURCES_HEADING, VAULT_TOKEN
 from text_summarizer.second_brain import note_provenance
-
-SERVED_MODEL = "gemini-3.5-flash-lite"
-
-MODEL_ANSWER = (
-    "- Dogs are domesticated mammals valued for loyalty and companionship.\n"
-    "- Dogs come in many breeds with varying size, color, and temperament.\n"
-    "- Dogs are social animals that thrive on human and canine interaction.\n"
-    "\n"
-    f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[Dogs Overview]]: same topic\n"
-    "\n"
-    'Saved to the second brain as "Dogs Summary".'
+from text_summarizer.sources import (
+    MODEL_TOKEN,
+    SOURCES_HEADING,
+    UNKNOWN,
+    VAULT_TOKEN,
+    resolve_vault_name,
 )
-
-
-class _StubLlm(BaseLlm):
-    """A BaseLlm that returns one canned answer and reports a model_version."""
-
-    answer: str = MODEL_ANSWER
-    calls: int = 0
-
-    async def generate_content_async(
-        self, llm_request: LlmRequest, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse, None]:
-        yield LlmResponse(
-            content=types.Content(role="model", parts=[types.Part(text=self.answer)]),
-            finish_reason=types.FinishReason.STOP,
-            model_version=self.model,
-        )
 
 
 class _ToolCallingStubLlm(BaseLlm):
@@ -137,54 +125,35 @@ def _run(agent: LlmAgent, message: str) -> list:
     return asyncio.run(_go())
 
 
-def _point_vault_at(monkeypatch, tmp_path, name: str = "ck") -> str:
-    """Repoint the vault at a temp dir.
+def test_the_answer_is_one_event_with_the_sources_substituted(monkeypatch):
+    """Fact 2: the substitution replaces the model's response instead of adding one.
 
-    ``second_brain.VAULT_ROOT`` is read at import time, so the env var alone
-    would not move it; both are set.
+    The rendered block used to arrive as a *second* event, because
+    ``after_agent_callback`` cannot edit the response -- ADK builds an extra
+    ``Event`` for whatever it returns (``BaseAgent._handle_after_agent_callback``).
+    Both are assistant-authored, so the dev UI drew the answer twice, the second
+    copy at the end of the turn. Asserted on the event count, not just the text,
+    because the text was right in both versions -- and the *last* event's text is
+    what a Langfuse trace reports, so a text-only assertion here is the one blind
+    spot that hid this bug (see ``_helpers._final_model_text`` and ``AGENTS.md``
+    gotcha 13).
     """
-    from text_summarizer import second_brain
-
-    vault = tmp_path / name
-    monkeypatch.setenv("SECOND_BRAIN_VAULT", str(vault))
-    monkeypatch.setattr(second_brain, "VAULT_ROOT", str(vault))
-    return str(vault)
-
-
-def _final_model_text(events) -> str:
-    texts = [
-        "".join(p.text for p in (e.content.parts or []) if getattr(p, "text", None))
-        for e in events
-        if e.author == "text_summarizer" and e.content and e.content.parts
-    ]
-    return texts[-1] if texts else ""
-
-
-def _all_text(events) -> str:
-    """Every piece of text on every event, tool payloads included."""
-    return "".join(
-        p.text
-        for e in events
-        for p in ((e.content.parts if e.content else None) or [])
-        if getattr(p, "text", None)
-    )
-
-
-def test_after_agent_callback_output_becomes_the_response(monkeypatch):
-    """Fact 2: the callback's return value is what the caller ends up seeing."""
     monkeypatch.setenv("VAULT_NAME", "ck")
     agent = LlmAgent(
         name="text_summarizer",
         model=_StubLlm(model=SERVED_MODEL),
+        after_model_callback=agent_module.render_sources_after_model,
         after_agent_callback=agent_module.report_scores_after_agent,
     )
     events = _run(agent, "Summarize: dogs are great.")
-    final = _final_model_text(events)
+    texts = _agent_texts(events)
+    assert len(texts) == 1, f"the answer was emitted {len(texts)} times: {texts}"
+    final = texts[0]
     assert SOURCES_HEADING in final
-    assert f"[obsidian][ck][{SERVED_MODEL}][[Dogs Overview]]: same topic" in final
-    assert VAULT_TOKEN not in final and MODEL_TOKEN not in final
-    # The raw model text is still on the preceding event, unmodified.
-    assert any(MODEL_TOKEN in _final_model_text([e]) for e in events)
+    assert f"- [obsidian][ck][{SERVED_MODEL}][[Dogs Overview]]: same topic" in final
+    # One bullet per source, and no sentinel left anywhere in the turn.
+    assert final.count("\n- [obsidian]") == 1
+    assert VAULT_TOKEN not in _all_text(events) and MODEL_TOKEN not in _all_text(events)
 
 
 def test_model_version_reaches_the_event(monkeypatch):
@@ -203,10 +172,10 @@ def test_fallback_model_name_is_what_gets_rendered(monkeypatch):
     agent = LlmAgent(
         name="text_summarizer",
         model=_StubLlm(model=served),
-        after_agent_callback=agent_module.report_scores_after_agent,
+        after_model_callback=agent_module.render_sources_after_model,
     )
     final = _final_model_text(_run(agent, "Summarize: dogs are great."))
-    assert f"[obsidian][ck][{served}]" in final
+    assert f"- [obsidian][ck][{served}]" in final
     assert SERVED_MODEL not in final
 
 
@@ -270,19 +239,18 @@ def test_cache_hit_replays_the_stored_note_verbatim(monkeypatch, tmp_path):
         name="text_summarizer",
         model=_StubLlm(model=SERVED_MODEL, answer="SHOULD NOT BE CALLED"),
         before_model_callback=agent_module.cache_hit_before_model,
+        after_model_callback=agent_module.render_sources_after_model,
         after_agent_callback=agent_module.report_scores_after_agent,
     )
     events = _run(agent, prompt)
     final = _final_model_text(events)
     assert final.strip() == stored
     assert SOURCES_HEADING not in final
-    every_text = "".join(
-        p.text
-        for e in events
-        for p in ((e.content.parts if e.content else None) or [])
-        if getattr(p, "text", None)
-    )
-    assert "SHOULD NOT BE CALLED" not in every_text
+    # The renderer is registered but never reached: the short-circuit in
+    # before_model_callback returns before the model is called, so no
+    # after_model_callback fires. A stored note is never re-shaped.
+    assert len(_agent_texts(events)) == 1
+    assert "SHOULD NOT BE CALLED" not in _all_text(events)
 
 
 def test_saved_note_records_provenance_in_frontmatter(monkeypatch, tmp_path):
@@ -518,18 +486,48 @@ def test_tool_written_note_records_the_live_served_model(monkeypatch, tmp_path):
         tools=[agent_module.FunctionTool(second_brain.save_summary_to_second_brain)],
     )
     _run(agent, "Summarize: dogs are great.")
-    notes = list((__import__("pathlib").Path(vault) / "Second Brain").glob("*.md"))
+    notes = list((Path(vault) / "Second Brain").glob("*.md"))
     assert notes, "note was not written"
     body = notes[0].read_text(encoding="utf-8")
     assert f'generated_by_model: "{SERVED_MODEL}"' in body
     assert 'generated_in_vault: "ck"' in body
 
 
-@pytest.mark.parametrize("root", ["/", "", "."])
-def test_vault_root_without_a_usable_basename(root):
-    from text_summarizer.sources import resolve_vault_name
+@pytest.mark.parametrize("root", ["/", "", ".", "..", "./", "vaults/..", "/vaults/.."])
+def test_a_vault_root_that_names_no_vault_renders_as_unknown(root):
+    """A root that resolves to a *directory* but not to a name must say ``unknown``.
 
+    ``sources._vault_name_from_root`` has two guards and this is the one that only
+    the second of them covers: ``.`` and ``..`` **exist and are directories**, so
+    ``os.path.isdir`` accepts them, and the name can only be refused by comparing
+    the normalised path against ``os.sep``/``.``/``..``. The first guard (the path
+    must exist at all) does nothing here.
+
+    That is what made the previous version of this test unfailable. It asserted
+    ``identity.name in {"vault", os.path.basename(os.path.abspath(root))} or
+    identity.name == "unknown"`` -- which permits the two plausible regressions
+    outright: a resolver that returns the literal ``"vault"`` (the name a
+    directly-mounted vault collapses to) *and* one that returns
+    ``basename(abspath(root))``, i.e. the process's own working directory for
+    ``"."``. The second is the real defect, and the ``or`` arm waved it through.
+
+    The per-input expectation is therefore exact, and each case additionally asserts
+    that the wrong-but-plausible answer was not returned.
+    """
     identity = resolve_vault_name(env={}, vault_root=root)
-    assert identity.name in {"vault", os.path.basename(os.path.abspath(root))} or (
-        identity.name == "unknown"
-    )
+
+    assert identity.name == UNKNOWN
+    assert identity.source == "unknown"
+    # The value the old assertion allowed: the current directory's own name.
+    assert identity.name != os.path.basename(os.path.abspath(root))
+
+
+def test_a_vault_root_that_does_name_a_vault_still_wins(tmp_path):
+    """The anchor that stops the case above from passing by always returning unknown.
+
+    Without this, a resolver that returned ``unknown`` for everything would satisfy
+    every assertion in the parametrised test.
+    """
+    identity = resolve_vault_name(env={}, vault_root=str(_make_vault(str(tmp_path), "ck")))
+    assert identity.name == "ck"
+    assert identity.source == "vault-path"

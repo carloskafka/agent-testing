@@ -28,7 +28,6 @@ from .sources import (
     mcp_vault_name_from_events,
     render_sources,
     resolve_vault_name,
-    served_model_from_events,
     summary_only,
 )
 
@@ -259,33 +258,87 @@ def _current_trace_id() -> str | None:
 
 
 def report_scores_after_agent(callback_context, agent_response_list=None):
-    """Score the turn, then rewrite its Sources block with real provenance.
+    """Attach the turn's quality scores to the current trace, and return ``None``.
 
-    Returning content from ``after_agent_callback`` makes ADK emit it as the
-    agent's response (``BaseAgent._handle_after_agent_callback``), which is how
-    the ``**Sources**`` block gets the real vault name and the real served model
-    substituted in *after* the model has run. Returning ``None`` keeps the
-    model's own response byte-for-byte, which is what the cache-hit path wants.
+    Scoring only. The ``**Sources**`` block is rewritten by
+    :func:`render_sources_after_model`, in place, on the response the model
+    produced.
 
-    Scoring is unconditional and unchanged apart from being computed on the
-    Sources-free text; a failure in the rewrite cannot suppress the scores.
+    **This callback must never return content.** Content returned from an
+    ``after_agent_callback`` does not replace the agent's response, it becomes an
+    *additional* ``Event`` (``BaseAgent._handle_after_agent_callback`` builds a
+    new one and yields it after the flow is done). Both events are
+    assistant-authored, so the dev UI draws the same answer twice -- see
+    :func:`render_sources_after_model` for the session that showed it.
     """
-    rewritten = None
-    if not _was_cache_hit(callback_context):
-        try:
-            rewritten = _render_final_response(callback_context)
-        except Exception as exc:  # pragma: no cover - never break the agent
-            print(f"[sources] render failed: {exc}")
     _report_scores_after_agent(callback_context)
-    return rewritten
+    return None
 
 
-def _render_final_response(callback_context):
-    """Return the rewritten response content, or None to keep the model's own.
+def _llm_response_text(llm_response) -> str:
+    """Every text part of a model response, concatenated."""
+    content = getattr(llm_response, "content", None)
+    parts = getattr(content, "parts", None) or []
+    return "".join(
+        part.text for part in parts if getattr(part, "text", None) is not None
+    )
 
-    Both identifiers are resolved at runtime: the vault name via
-    ``resolve_vault_name`` and the served model via ``Event.model_version``
-    (see ``sources.py``). Nothing is hardcoded and nothing is asked of the model.
+
+def render_sources_after_model(callback_context, llm_response):
+    """Substitute the real vault and served model into the response's Sources block.
+
+    Wired as an ``after_model_callback``: an ``LlmResponse`` returned from there
+    **replaces** the model's own response (``_handle_after_model_callback`` ->
+    ``_finalize_model_response_event``), so the answer exists once, on the event
+    the model produced.
+
+    It used to be an ``after_agent_callback``, which appends a second event
+    instead of editing the first. The user saw the answer twice, the copy on the
+    end being the rendered one and the first copy still carrying the raw
+    ``@@ADK_VAULT@@`` / ``@@ADK_MODEL@@`` sentinels. Confirmed against session
+    ``55b1f828-6ff0-498e-953f-8cc29b84cb93``: nine events, the last two the same
+    answer, one of them the pre-substitution text.
+
+    Two things this gets for free by running here rather than at the end of the
+    turn: the served model is ``llm_response.model_version`` directly, with no
+    backwards scan of the session; and the substituted text is what the scoring
+    callback later reads, so ``response_match_score`` is computed on the response
+    the user actually sees rather than on the model's raw draft.
+
+    Returns ``None`` -- leaving the response untouched -- when there is nothing
+    to substitute, which is the case for every model call that is not the final
+    answer: a tool-calling response has no text, and text without a Sources block
+    renders to itself.
+    """
+    if getattr(llm_response, "partial", False):
+        # A streamed chunk is not the whole answer, and a sentinel token can
+        # straddle two chunks. `adk web` does not stream (the dev UI posts
+        # streaming=false), so this guard is inert in this deployment.
+        return None
+
+    text = _llm_response_text(llm_response)
+    if not text.strip():
+        return None
+
+    try:
+        rendered = _render_sources_text(callback_context, llm_response, text)
+    except Exception as exc:  # pragma: no cover - never break the turn
+        print(f"[sources] render failed: {exc}")
+        return None
+
+    if rendered == text:
+        return None
+    return llm_response.model_copy(
+        update={"content": Content(role="model", parts=[Part(text=rendered)])}
+    )
+
+
+def _render_sources_text(callback_context, llm_response, text: str) -> str:
+    """Substitute both identifiers into ``text``. See :func:`render_sources`.
+
+    Both are resolved at runtime: the vault name via ``resolve_vault_name`` and
+    the served model via ``LlmResponse.model_version`` (see ``sources.py``).
+    Nothing is hardcoded and nothing is asked of the model.
 
     The resolved vault root has to be passed in explicitly. Under Docker
     ``SECOND_BRAIN_VAULT`` is the *parent* that gets bind-mounted (``/vaults``)
@@ -295,22 +348,21 @@ def _render_final_response(callback_context):
     says ``ck``. ``second_brain.note_provenance`` already passes the root; this
     is the same call on the response side.
     """
-    events = _session_events(callback_context)
-    text = _last_session_model_text(callback_context)
-    if not text.strip():
-        return None
-
     vault = resolve_vault_name(
         vault_root=VAULT_ROOT,
-        mcp_reported=mcp_vault_name_from_events(events),
+        mcp_reported=mcp_vault_name_from_events(_session_events(callback_context)),
     )
-    model = served_model_from_events(events)
-    rendered = render_sources(text, vault_name=vault.name, model_name=model)
-    if rendered == text:
-        # Nothing to substitute (no Sources block): leave the response alone so
-        # the callback stays a pure no-op for the common case.
-        return None
-    return Content(role="model", parts=[Part(text=rendered)])
+    return render_sources(
+        text,
+        vault_name=vault.name,
+        # Same field as `Event.model_version` -- Event subclasses LlmResponse --
+        # but reachable without walking the session.
+        model_name=getattr(llm_response, "model_version", None) or None,
+        # Makes the note titles clickable: a title that resolves to a real file
+        # in the vault is linked to the dev UI's /vault route, one that does not
+        # stays a plain [[wikilink]]. See sources.note_href.
+        vault_root=VAULT_ROOT,
+    )
 
 
 def _report_scores_after_agent(callback_context) -> None:
@@ -402,8 +454,12 @@ root_agent = LlmAgent(
     before_agent_callback=tag_trace_identity,
     # after_model (not before_model) so the prompt name lands on the still-open
     # generation span -- OTel drops attributes set on an ended span, and the
-    # dashboards group by prompt name.
-    after_model_callback=tag_current_span,
+    # dashboards group by prompt name. The Sources block is substituted here
+    # too, and for the same reason: an altered LlmResponse returned from
+    # after_model_callback *replaces* the model's response, so the answer is one
+    # event. after_agent_callback cannot do that (it appends a second event, and
+    # the dev UI then shows the answer twice) -- see render_sources_after_model.
+    after_model_callback=[tag_current_span, render_sources_after_model],
     after_agent_callback=report_scores_after_agent,
     instruction="""You are a text summarization agent backed by an Obsidian vault that acts as a second brain. Your job is to take long text provided by the user, convert it into a short, clear bullet-point summary, and persist it in the vault so the knowledge is graph-aware and reusable.
 
@@ -414,7 +470,7 @@ Rules:
 4. Aim for 3-5 bullet points depending on the length and complexity of the input.
 5. Do not add information that is not present in the original text.
 6. Use clear, professional language, maintaining a direct, factual tone that reflects the core statements of the input.
-7. USE THE SECOND BRAIN - RETRIEVE FIRST: Before summarizing, identify the 1-3 main topics of the input. Use the vault search tools (search_text) and note_read to look up existing notes on those topics and on the Second Brain Index. If relevant related notes exist, list them at the very END of your answer, one note per line, copying this template EXACTLY: [obsidian][@@ADK_VAULT@@][@@ADK_MODEL@@][[Exact Note Title]]: short reason this note is relevant. The two tokens @@ADK_VAULT@@ and @@ADK_MODEL@@ are placeholders that a later step replaces with the real vault and model names - copy them verbatim and NEVER write a real vault or model name there yourself. Do NOT write a heading of any kind (no "Sources", no "## Sources", no "**Sources**") and do not write anything after the last source line - the heading and the real identifiers are added for you afterwards. If nothing relevant exists, list nothing at all.
+7. USE THE SECOND BRAIN - RETRIEVE FIRST: Before summarizing, identify the 1-3 main topics of the input. Use the vault search tools (search_text) and note_read to look up existing notes on those topics and on the Second Brain Index. If relevant related notes exist, list them at the very END of your answer, one note per line, copying this template EXACTLY: [obsidian][@@ADK_VAULT@@][@@ADK_MODEL@@][[Exact Note Title]]: short reason this note is relevant. The two tokens @@ADK_VAULT@@ and @@ADK_MODEL@@ are placeholders that a later step replaces with the real vault and model names - copy them verbatim and NEVER write a real vault or model name there yourself. Do NOT write a heading of any kind (no "Sources", no "## Sources", no "**Sources**"), do NOT add a bullet or number in front of the lines, and do not write anything after the last source line - the heading, the bullets and the real identifiers are added for you afterwards. If nothing relevant exists, list nothing at all.
 8. ALWAYS persist the summary: after producing the summary, call save_summary_to_second_brain with a short descriptive title, the bullet-point content, and a comma-separated list of the 2-5 main topics it covers. This keeps the vault graph connected and enables zero-cost dedup on repeated requests. Pass ONLY those three arguments - do not repeat the user's text back in any argument; the tool records the request itself for deduplication, and echoing the text back wastes a large number of output tokens on every call.
 9. ALWAYS log the conversation: after producing and persisting your final answer, call log_conversation with the user's exact message and your final answer, so every exchange is recorded in the vault's chat log for later recall.
 10. Mention in your final answer that the summary was saved to the second brain and its title.
