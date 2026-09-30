@@ -94,10 +94,18 @@ test:
 	@echo "==> test (pytest)"
 	$(PYTEST) $(TESTS) -q $(TEST_ARGS)
 
+# coverage looks for its config file starting from the *current directory*, and
+# there is no pyproject.toml at the repository root -- by design, text_summarizer/
+# is the only Python project. So a run from the root finds no config at all and
+# silently ignores [tool.coverage.run], which is how `--cov=text_summarizer`
+# ended up measuring the test suite and reporting 87% for a project at 69%.
+# Naming the file makes the measurement identical from either directory (P1).
+COV_CFG := --cov-config=$(PKG)/pyproject.toml
+
 ## coverage: the same suite under coverage, writing .coverage and a term report
 coverage:
 	@echo "==> coverage"
-	$(PYTEST) $(TESTS) -q \
+	$(PYTEST) $(TESTS) -q $(COV_CFG) \
 		$(TEST_ARGS) \
 		--cov=$(PKG) \
 		--cov-report=term-missing:skip-covered \
