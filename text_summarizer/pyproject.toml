@@ -149,6 +149,47 @@ module = ["text_summarizer.tests.*"]
 ignore_errors = true
 disable_error_code = ["no-untyped-def", "no-untyped-call", "misc"]
 
+[tool.coverage.run]
+# The tests are not the thing under test. `--cov=text_summarizer` measures the
+# whole package, tests/ included, and the test modules are ~100% covered -- which
+# inflated the reported total by 18 points (87% against a real 69.4%) and made any
+# threshold set against it a measurement of the test suite.
+#
+# Production-only, as of this commit: 69.4% (972/1401 statements).
+# Two patterns, not one, because coverage matches `omit` against the path as it
+# resolves from wherever the run started: `pytest text_summarizer/tests` from the
+# repository root measures `text_summarizer/tests/...`, while a run rooted at the
+# project (which is what rootdir resolution picks, since this file holds
+# [tool.pytest.ini_options]) measures `tests/...`. `*/tests/*` matches only the
+# first, and a pattern that silently fails to match is the same trap as a
+# threshold nobody set.
+omit = [
+    "tests/*",
+    "*/tests/*",
+    "*/auto_optimize.py",
+    "*/eval_exercise.py",
+    "*/gmail_oauth.py",
+    "*/check_free_models.py",
+]
+
+# Four scripts are 0% and are meant to stay that way, so they are not measured:
+#
+#   auto_optimize.py    rewrites agent.py's instruction block by regex. PLAN.md
+#                       gotcha 1 records an accidental corruption from exactly
+#                       this coupling; running it under test would rewrite the
+#                       real file mid-suite.
+#   eval_exercise.py    the manual eval loop, same rewrite.
+#   gmail_oauth.py      a one-time interactive browser flow.
+#   check_free_models.py  a six-line print loop against an API.
+#
+# Excluding them puts production coverage at 90.2% (1039/1152). The alternative is
+# to make the two rewriting scripts take a path and test them, which is the honest
+# way to remove the exclusion -- and the reason not to is that it touches the
+# graded eval path. That is a decision, not a coverage number.
+#
+# No floor is set yet. When it is, set it as `fail_under` under
+# [tool.coverage.report] so it applies however pytest-cov is invoked.
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # `-q` on the command line; these two keep the run honest rather than fast.

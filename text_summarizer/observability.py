@@ -153,11 +153,19 @@ def _auth_check_with_timeout(client, timeout: float) -> bool | None:
     "unknown" and the caller proceeds to instrument anyway -- a genuinely invalid
     key then fails at export time, where the error is actionable, rather than at
     startup, where it looks like "observability is off".
+
+    The executor is shut down with ``wait=False`` and deliberately *not* used as a
+    context manager. ``ThreadPoolExecutor.__exit__`` calls ``shutdown(wait=True)``,
+    which joins the worker -- so a ``with`` block turns the timeout back into a
+    full wait, and the caller blocks for however long the wedged call takes. The
+    timeout then reports the right answer and still costs the time it was added to
+    save. Measured: a 6 s call under a 0.2 s timeout returned ``None`` after 6.0 s.
     """
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeout
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
         future = pool.submit(client.auth_check)
         try:
             return bool(future.result(timeout=timeout))
@@ -167,6 +175,9 @@ def _auth_check_with_timeout(client, timeout: float) -> bool | None:
         except Exception as exc:
             print(f"[observability] auth check error ({type(exc).__name__}: {exc})")
             return False
+    finally:
+        # wait=False, and never in a `with`: see the docstring.
+        pool.shutdown(wait=False)
 
 
 def setup_observability() -> None:
