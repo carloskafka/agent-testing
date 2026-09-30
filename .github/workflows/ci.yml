@@ -38,10 +38,6 @@ on:
 permissions:
   contents: read
 
-# The suite is offline and takes seconds; 15 minutes is a hang detector, not a
-# budget. A run that reaches it is waiting on something it should not be.
-timeout-minutes: 15
-
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
@@ -49,6 +45,15 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # The suite is offline and takes seconds; 15 minutes is a hang detector, not
+    # a budget. A run that reaches it is waiting on something it should not be.
+    #
+    # Per job, not per workflow: `timeout-minutes` is only accepted inside a job,
+    # and at the top level GitHub rejects the whole file with
+    # "Unexpected value 'timeout-minutes'" -- a run that is created and then
+    # fails with no jobs at all, which reads like an infrastructure problem
+    # rather than a syntax one.
+    timeout-minutes: 15
     steps:
       # Pinned to a major version, matching pages.yml. Not a commit SHA: the two
       # workflows would then be pinned at different strictness, and a SHA pin here
