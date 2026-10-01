@@ -66,6 +66,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 from datetime import date, datetime
 from pathlib import Path
@@ -127,8 +128,8 @@ def resolve_vault_root(configured: str | None = None) -> str:
     try:
         selection = vaults.select_vault(parent, name=name or None)
     except vaults.VaultSelectionError as exc:
-        print(f"[vault] {exc}")
-        print(f"[vault] candidates:\n{vaults.format_candidates(vaults.discover_vaults(parent))}")
+        print(f"[vault] {exc}", file=sys.stderr)
+        print(f"[vault] candidates:\n{vaults.format_candidates(vaults.discover_vaults(parent))}", file=sys.stderr)
         return parent
 
     if selection.needs_create:
@@ -136,7 +137,7 @@ def resolve_vault_root(configured: str | None = None) -> str:
         try:
             os.makedirs(os.path.join(selection.vault.path, BRAIN_DIR), exist_ok=True)
         except OSError as exc:  # pragma: no cover - unwritable mount
-            print(f"[vault] could not create {selection.vault.path}: {exc}")
+            print(f"[vault] could not create {selection.vault.path}: {exc}", file=sys.stderr)
             return parent
     return selection.vault.path
 

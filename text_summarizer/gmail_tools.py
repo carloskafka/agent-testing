@@ -32,7 +32,8 @@ def build_gmail_tools() -> list:
     except ImportError:
         print(
             "Gmail MCP env vars set but google-adk[mcp] not installed; "
-            "run: uv sync"
+            "run: uv sync",
+            file=sys.stderr,
         )
         return []
 

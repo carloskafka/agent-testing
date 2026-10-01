@@ -7,6 +7,7 @@ still work.
 from __future__ import annotations
 
 import os
+import sys
 
 _langfuse = None
 
@@ -82,7 +83,7 @@ def tag_trace_identity(callback_context, *_: object) -> None:
 
         span.set_attributes(attributes)
     except Exception as exc:  # pragma: no cover
-        print(f"[observability] trace identity tagging failed: {exc}")
+        print(f"[observability] trace identity tagging failed: {exc}", file=sys.stderr)
 
 
 def tag_current_span(**_: object) -> None:
@@ -103,7 +104,7 @@ def tag_current_span(**_: object) -> None:
             return
         span.set_attribute(_PROMPT_NAME_ATTR, prompt_name())
     except Exception as exc:  # pragma: no cover
-        print(f"[observability] prompt tagging failed: {exc}")
+        print(f"[observability] prompt tagging failed: {exc}", file=sys.stderr)
 
 
 def langfuse_client():
@@ -134,13 +135,13 @@ def report_cache_outcome(*, enabled: bool, hit: bool, elapsed_ms: float) -> None
         ):
             pass
     except Exception as exc:  # pragma: no cover
-        print(f"[observability] cache tagging failed: {exc}")
+        print(f"[observability] cache tagging failed: {exc}", file=sys.stderr)
 
     for name, value in (("cache.hit", 1.0 if hit else 0.0), ("cache.lookup_ms", round(elapsed_ms, 3))):
         try:
             _langfuse.score_current_trace(name=name, value=value, data_type="NUMERIC")
         except Exception as exc:  # pragma: no cover
-            print(f"[observability] score '{name}' failed: {exc}")
+            print(f"[observability] score '{name}' failed: {exc}", file=sys.stderr)
 
 
 def _auth_check_with_timeout(client, timeout: float) -> bool | None:
@@ -173,7 +174,7 @@ def _auth_check_with_timeout(client, timeout: float) -> bool | None:
             future.cancel()
             return None
         except Exception as exc:
-            print(f"[observability] auth check error ({type(exc).__name__}: {exc})")
+            print(f"[observability] auth check error ({type(exc).__name__}: {exc})", file=sys.stderr)
             return False
     finally:
         # wait=False, and never in a `with`: see the docstring.
@@ -191,7 +192,8 @@ def setup_observability() -> None:
     except ImportError:
         print(
             "Langfuse env vars set but packages missing; "
-            'run: uv sync  (needs langfuse + openinference-instrumentation-google-adk)'
+            'run: uv sync  (needs langfuse + openinference-instrumentation-google-adk)',
+            file=sys.stderr,
         )
         return
 
@@ -208,16 +210,21 @@ def setup_observability() -> None:
             print(
                 f"[observability] Langfuse auth check did not respond within "
                 f"{timeout:g}s — instrumenting anyway. If traces do not appear, "
-                "check that the Langfuse API is responsive."
+                "check that the Langfuse API is responsive.",
+                file=sys.stderr,
             )
         GoogleADKInstrumentor().instrument()
     except Exception as exc:
         print(
             f"Langfuse unavailable ({type(exc).__name__}: {exc}) — continuing "
             "without observability. Check LANGFUSE_PUBLIC_KEY / "
-            "LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL in .env"
+            "LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL in .env",
+            file=sys.stderr,
         )
         return
 
     _langfuse = langfuse
-    print(f"Langfuse tracing enabled → {os.environ.get('LANGFUSE_BASE_URL', '')}")
+    print(
+        f"Langfuse tracing enabled → {os.environ.get('LANGFUSE_BASE_URL', '')}",
+        file=sys.stderr,
+    )

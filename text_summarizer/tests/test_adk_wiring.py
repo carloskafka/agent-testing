@@ -13,6 +13,9 @@ ADK facts the whole feature rests on, at zero API cost:
    answer came to be rendered twice.
 3. A ``FunctionTool`` really does receive ``tool_context`` -- which is how
    ``save_summary_to_second_brain`` reads the live model at write time.
+4. A first-party tool wired into ``root_agent.tools`` is really dispatchable: its
+   signature becomes a schema the model can call, the call reaches the function, and
+   the payload comes back on the next model call.
 """
 
 from __future__ import annotations
@@ -501,6 +504,100 @@ def test_tool_written_note_records_the_live_served_model(monkeypatch, tmp_path):
     body = notes[0].read_text(encoding="utf-8")
     assert f'generated_by_model: "{SERVED_MODEL}"' in body
     assert 'generated_in_vault: "ck"' in body
+
+
+class _DigestCallingStubLlm(BaseLlm):
+    """Calls ``read_day_digest``, then answers *from what it returned*.
+
+    The second call reads the ``function_response`` part back off the request rather
+    than returning a canned string, so a payload that never arrived makes the answer
+    wrong instead of merely untested -- which is the failure this whole file exists to
+    catch (gotcha 13: the trace and the last event both report the *correct* text, so
+    an assertion that does not depend on the tool result can pass against a feature
+    wired up to nothing).
+    """
+
+    day: str = "2026-09-30"
+    seen: list = []
+    calls: int = 0
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        self.calls += 1
+        if self.calls == 1:
+            part = types.Part(
+                function_call=types.FunctionCall(
+                    name="read_day_digest", args={"day": self.day}, id="call-1"
+                )
+            )
+        else:
+            payload = {}
+            for content in llm_request.contents:
+                for candidate in content.parts or []:
+                    response = getattr(candidate, "function_response", None)
+                    if response is not None:
+                        payload = response.response
+            type(self).seen = payload.get("notes", []) if isinstance(payload, dict) else []
+            part = types.Part(text=f"- {len(type(self).seen)} notes on {self.day}")
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[part]),
+            finish_reason=types.FinishReason.STOP,
+            model_version=self.model,
+        )
+
+
+def test_the_digest_tool_is_dispatchable_and_its_payload_reaches_the_answer(
+    monkeypatch, tmp_path
+):
+    """Fact 4, for the one first-party tool that is *gated*.
+
+    ``test_digest_tools.py`` proves the gate returns the tool and that the function
+    returns a good payload. Neither says ADK will accept the signature, resolve the
+    call, or hand the result to the next model call -- and the failure if it does not is
+    the quiet one: a tool the model can see and never successfully use.
+
+    The assertion is on the answer's *content*, which cannot be produced unless the
+    payload arrived. A test that merely checked "the tool was called" would pass
+    against a result that was empty.
+    """
+    from text_summarizer import second_brain
+
+    vault = Path(_point_vault_at(monkeypatch, tmp_path, modules=("second_brain",)))
+    brain = vault / second_brain.BRAIN_DIR
+    brain.mkdir(parents=True, exist_ok=True)
+    (brain / "2026-09-30 - dogs.md").write_text(
+        "---\n"
+        "tags:\n  - Dogs\n"
+        "date: 2026-09-30\n"
+        f"{second_brain.GENERATED_BY_MODEL_KEY}: {SERVED_MODEL}\n"
+        f"{second_brain.GENERATED_IN_VAULT_KEY}: ck\n"
+        "---\n\n- Dogs are social animals.\n",
+        encoding="utf-8",
+    )
+
+    agent = LlmAgent(
+        name="text_summarizer",
+        model=_DigestCallingStubLlm(model=SERVED_MODEL, day="2026-09-30"),
+        tools=agent_module.build_digest_tools(),
+    )
+    events = _run(agent, "What did you learn on 2026-09-30?")
+
+    called = [
+        part.function_call.name
+        for event in events
+        for part in (event.content.parts or [] if event.content else [])
+        if getattr(part, "function_call", None) is not None
+    ]
+    assert called == ["read_day_digest"]
+    assert [note["title"] for note in _DigestCallingStubLlm.seen] == ["2026-09-30 - dogs"]
+    # The last assistant text, not the list: the tool call and its response each
+    # contribute an event whose only part carries no text, so `_agent_texts` is three
+    # long with two empty strings. Asserting on "the last text" is normally the wrong
+    # move here (see `_helpers._final_model_text`) -- it is right in this one test
+    # because the property under test is that the payload reached the model at all, and
+    # no earlier text in this turn could depend on it.
+    assert _final_model_text(events) == "- 1 notes on 2026-09-30"
 
 
 @pytest.mark.parametrize("root", ["/", "", ".", "..", "./", "vaults/..", "/vaults/.."])

@@ -31,6 +31,8 @@ agent-testing/
     |-- serve.py                # `adk web` + the vault served read-only at /vault
     |-- vaults.py               # Which vault is active: discovery, selection, import
     |-- second_brain.py         # Vault writes: notes, chat log, index, cache lookup
+    |-- digest.py               # What the agent learned on a day, read off the vault (CLI)
+    |-- digest_tools.py         # read_day_digest: the same reader as a model-callable tool
     |-- eval_exercise.py        # Manual eval-loop helper (MODIFIES agent.py)
     |-- auto_optimize.py        # LLM-driven auto-optimizer (MODIFIES agent.py)
     |-- check_free_models.py    # Lists OpenRouter :free models
@@ -135,6 +137,39 @@ round-trip — never supplied by the model, which paraphrases and would key the
 cache on its own output. Only the first model call of a turn consults it, so the
 note the agent writes mid-turn cannot be replayed over its own answer. See
 [AGENTS.md](https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md#the-vault-cache--one-key-computed-in-code).
+
+## Daily Digest
+
+*"What did the agent learn on Tuesday?"* is the one question here whose answer was
+**already written down** — `save_summary_to_second_brain` persisted the summary, its
+topics and its provenance; `log_conversation` persisted the exchange. So the report
+reads the vault instead of asking the model, which means no quota, no latency, and a
+result that still works when the provider is down. It is deterministic, and it cannot
+hallucinate a fact about the vault because it never leaves it. (The converse is worth
+stating: it reports what was *recorded*, not what was true.)
+
+One reader, two surfaces:
+
+```bash
+cd text_summarizer && uv run python -m text_summarizer.digest [--date YYYY-MM-DD]
+                                                      [--format text|md] [--json]
+                                                      [--include-chat] [--vault PATH]
+```
+
+and `read_day_digest`, which rule 14 puts behind *"what did you learn"* — so asking the
+agent the same question works too.
+
+It reports the day's notes with their topics, hub-index position and the model that
+wrote each one, plus the topics those notes touched. Provenance is reported **only
+where the frontmatter recorded it**: notes written before `generated_by_model` existed
+carry none, and the honest rendering of that is an absent field, never a guess. A day
+with no notes is reported as such rather than as an error, and the model's
+`fingerprint` is dropped from the tool's payload while `--json` keeps it — a script
+grouping a day by what was asked wants it, a context window does not.
+
+`digest.py` imports no model SDK at all, which a test enforces; that is why the tool
+wrapper is a separate file, since `FunctionTool` is itself an ADK import. See
+[AGENTS.md](https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md#the-daily-digest--digestpy-cli--digest_toolspy-agent-tool).
 
 ## Docker Topology
 

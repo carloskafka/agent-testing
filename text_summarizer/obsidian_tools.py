@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -275,7 +276,8 @@ def build_obsidian_tools() -> list:
     except ImportError:
         print(
             "Obsidian MCP env vars set but google-adk[mcp] not installed; "
-            'run: uv sync'
+            "run: uv sync",
+            file=sys.stderr,
         )
         return []
 
@@ -283,7 +285,10 @@ def build_obsidian_tools() -> list:
         connection_params = StreamableHTTPConnectionParams(url=mcp_url)
     else:
         if not os.path.isabs(vault_path):
-            print(f"OBSIDIAN_VAULT_PATH must be absolute, got: {vault_path}")
+            print(
+                f"OBSIDIAN_VAULT_PATH must be absolute, got: {vault_path}",
+                file=sys.stderr,
+            )
             return []
         connection_params = StdioConnectionParams(
             server_params=StdioServerParameters(

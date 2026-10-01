@@ -335,7 +335,7 @@ def test_resolve_vault_root_degrades_instead_of_guessing(monkeypatch, tmp_path, 
     monkeypatch.delenv(VAULT_NAME_ENV, raising=False)
 
     assert second_brain.resolve_vault_root(str(tmp_path)) == str(tmp_path)
-    printed = capsys.readouterr().out
+    printed = capsys.readouterr().err
     assert VAULT_NAME_ENV in printed
     assert "personal" in printed and "work" in printed
 
