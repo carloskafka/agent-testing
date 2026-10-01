@@ -449,3 +449,94 @@ def test_an_absolute_vault_parent_is_created(tmp_path):
     # into the repo checkout just because ./vaults is the default.
     assert not (workdir / "vaults").exists()
 
+
+
+# --- the shared web-tier network ----------------------------------------------
+#
+# docker-compose.yml declares `agent-net` as `external: true`, and compose will not
+# create an external network: it fails with "declared as external, but could not be
+# found". So run.sh has to create it, and only when the tier is actually configured
+# -- an agent with no SearXNG needs no network and should not create one.
+
+
+def _stub_log(tmp_path: pathlib.Path) -> str:
+    """The docker stub's call log.
+
+    run.sh redirects `docker network create` to /dev/null, so the stub's stdout is
+    invisible for that one call. The stub therefore also appends to a file, which is
+    the only place a suppressed call can be observed.
+    """
+    log = tmp_path / "docker-calls.log"
+    return log.read_text() if log.exists() else ""
+
+
+def _network_stub(tmp_path: pathlib.Path, stubbin: pathlib.Path, *, exists: bool) -> None:
+    """A docker stub whose `network inspect` reports the bridge present or absent."""
+    docker = stubbin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{tmp_path / "docker-calls.log"}"\n'
+        'case "$1 $2" in\n'
+        + ('  "network inspect") echo "agent-net"; exit 0 ;;\n' if exists else "  \"network inspect\") exit 1 ;;\n")
+        + "esac\n"
+        'echo "STUB DOCKER: $*"\n'
+    )
+    docker.chmod(0o755)
+
+
+def test_the_shared_network_is_created_when_it_is_missing(tmp_path):
+    """The create only happens when `network inspect` says the network is absent.
+
+    The default stub exits 0 for every call, so `network inspect` "succeeds" and the
+    create is correctly skipped -- which is the idempotent path. This test makes the
+    stub report the network missing, which is the case compose would otherwise fail on.
+    """
+    workdir, stubbin = _sandbox(tmp_path)
+    _network_stub(tmp_path, stubbin, exists=False)
+    (workdir / ".env").write_text("SEARXNG_URL=http://searxng:8080\n")
+
+    result = _run(workdir, stubbin, tmp_path / "home")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    # run.sh sends the create's own output to /dev/null, so the visible evidence is
+    # the script's message plus the stub's call log.
+    assert "Creating the shared 'agent-net' bridge" in result.stdout
+    assert _stub_log(tmp_path).count("network create agent-net") == 1
+    # And the create has to happen BEFORE compose up, or compose fails first.
+    assert _stub_log(tmp_path).index("network create") < _stub_log(tmp_path).index("compose up")
+
+
+def test_an_existing_network_is_not_recreated(tmp_path):
+    """Idempotent: a rerun must not fail or create a second bridge."""
+    workdir, stubbin = _sandbox(tmp_path)
+    _network_stub(tmp_path, stubbin, exists=True)
+    (workdir / ".env").write_text("SEARXNG_URL=http://searxng:8080\n")
+
+    result = _run(workdir, stubbin, tmp_path / "home")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "network create" not in _stub_log(tmp_path)
+    # The inspect still ran: it is what decided there was nothing to do.
+    assert "network inspect" in _stub_log(tmp_path)
+
+
+def test_no_network_is_created_when_the_web_tier_is_unconfigured(tmp_path):
+    """An unconfigured agent must not create a network it will never use."""
+    workdir, stubbin = _sandbox(tmp_path)
+    _network_stub(tmp_path, stubbin, exists=False)
+    (workdir / ".env").write_text("SEARXNG_URL=\n")
+
+    result = _run(workdir, stubbin, tmp_path / "home")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Not even the inspect: the whole block is skipped when the tier is off.
+    assert "network" not in _stub_log(tmp_path)
+    assert "agent-net" not in result.stdout
+
+
+def test_the_web_tier_url_is_reported_when_configured(tmp_path):
+    workdir, stubbin = _sandbox(tmp_path)
+    (workdir / ".env").write_text("SEARXNG_URL=http://searxng:8080\n")
+    result = _run(workdir, stubbin, tmp_path / "home")
+    assert "Web search" in result.stdout
+    assert "http://searxng:8080" in result.stdout

@@ -398,9 +398,26 @@ fi
 
 env_set OBSIDIAN_VAULT_PARENT_HOST "$VAULT_PARENT_HOST"
 
+# The web tier reaches a self-hosted SearXNG over a shared external docker network
+# (see SEARXNG_URL in .env.example). Created here rather than left to compose
+# because it is declared `external: true` in BOTH projects: compose will not create
+# an external network, and its error ("network agent-net declared as external, but
+# could not be found") names the fix rather than doing it. Idempotent, so a rerun
+# costs nothing, and it only runs when the tier is actually configured -- an
+# unconfigured agent needs no network and should not create one.
+if [ -n "$(env_get SEARXNG_URL '')" ]; then
+    if ! docker network inspect agent-net >/dev/null 2>&1; then
+        echo "Creating the shared 'agent-net' bridge for the web tier (SearXNG)"
+        docker network create agent-net >/dev/null
+    fi
+fi
+
 docker compose up -d --build
 
 echo
 echo "Agent web UI  : http://localhost:8001"
 echo "Obsidian vault: ${VAULT_NAME:-<the only vault in>} ${VAULT_PARENT_HOST}"
+if [ -n "$(env_get SEARXNG_URL '')" ]; then
+    echo "Web search    : $(env_get SEARXNG_URL '') (self-hosted SearXNG, separate project)"
+fi
 echo "Onboarding guide: docs/getting-started.md"

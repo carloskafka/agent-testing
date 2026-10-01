@@ -74,7 +74,7 @@ import os
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 __all__ = [
     "MODEL_TOKEN",
@@ -84,9 +84,12 @@ __all__ = [
     "UNKNOWN",
     "VAULT_TOKEN",
     "VAULT_WEB_PREFIX",
+    "WEB_KIND",
+    "WEB_TOKEN",
     "SourceEntry",
     "VaultIdentity",
     "mcp_vault_name_from_events",
+    "normalised_url",
     "note_href",
     "render_sources",
     "resolve_vault_name",
@@ -104,7 +107,14 @@ VAULT_TOKEN = "@@ADK_VAULT@@"
 #: Sentinel the model copies verbatim in place of the real served model.
 MODEL_TOKEN = "@@ADK_MODEL@@"
 
-_TOKEN_RE = re.compile(f"{re.escape(VAULT_TOKEN)}|{re.escape(MODEL_TOKEN)}")
+#: Sentinel standing in for the retrieval provider, for a ``[web]`` line. Same
+#: collision-proof construction as the other two.
+WEB_TOKEN = "@@ADK_WEB@@"
+
+# One alternation over every sentinel. Built from a tuple rather than written out,
+# so adding a token cannot leave a place that still only knows about two.
+_TOKENS = (VAULT_TOKEN, MODEL_TOKEN, WEB_TOKEN)
+_TOKEN_RE = re.compile("|".join(re.escape(token) for token in _TOKENS))
 
 SOURCES_HEADING = "**Sources**"
 
@@ -113,6 +123,15 @@ SOURCE_BULLET = "- "
 
 #: Leading kind marker, kept stable so the block stays machine-greppable.
 SOURCE_KIND = "obsidian"
+
+#: A web page reached through the search tier. The second bracket then carries the
+#: provider rather than a vault name -- slot two means "where this came from", and
+#: both kinds answer that question the same way.
+WEB_KIND = "web"
+
+#: Every kind the grammar recognises. ``_KIND_RE`` is built from this, so a line
+#: the renderer emits is always a line the parser can read back.
+SOURCE_KINDS = (SOURCE_KIND, WEB_KIND)
 
 #: Rendered for provenance that was never recorded. Never a guess.
 UNKNOWN = "unknown"
@@ -136,15 +155,29 @@ _LINKED_WIKILINK_RE = re.compile(
 )
 _BULLET_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
 _REASON_SEP_RE = re.compile(r"^(?::|\||[-—–])[ \t]*")
-_KIND_RE = re.compile(rf"^\[?{re.escape(SOURCE_KIND)}\]?", re.IGNORECASE)
+_KIND_RE = re.compile(
+    rf"^\[?(?:{'|'.join(re.escape(kind) for kind in SOURCE_KINDS)})\]?", re.IGNORECASE
+)
+
+# The web target, in the spelling the renderer emits: an autolink. Chosen over a
+# bare URL and over ``[title](url)`` because it needs no bracket escaping, gives
+# the re-parse one unambiguous delimiter, and survives the dev UI's `marked`
+# sanitizer, whose URL pattern accepts the ``https:`` scheme form.
+_WEB_TARGET_RE = re.compile(r"<((?:https?)://[^>\n]+)>|(https?://[^\s<>]+)")
 
 
 @dataclass(frozen=True)
 class SourceEntry:
-    """One consulted note: the wikilink target plus an optional reason."""
+    """One consulted source: its target plus an optional reason.
+
+    ``note`` is a vault title for an ``obsidian`` entry and a URL for a ``web``
+    one; ``kind`` says which, and both fields are defaulted so every existing
+    construction site and test keeps working unchanged.
+    """
 
     note: str
     reason: str = ""
+    kind: str = SOURCE_KIND
 
 
 @dataclass(frozen=True)
@@ -481,6 +514,31 @@ def served_model_from_events(events) -> str | None:
 # --- parsing -----------------------------------------------------------------
 
 
+def _line_kind(line: str) -> str:
+    """Which kind this line claims to be, defaulting to ``obsidian``.
+
+    Precedence matters, and it is not "URL wins":
+
+    1. an explicit ``[kind]`` tag, so a rendered block re-parses with the kind it
+       was written with;
+    2. a ``[[wikilink]]``, because a wikilink is a vault target *by definition* --
+       a note is titled ``[[https://example.com/p]]`` is a vault note about a URL,
+       and treating it as a web citation would drop it from the block entirely
+       when the URL was not in this turn's permitted set;
+    3. a bare/autolinked URL, so a model that omits the tag still round-trips.
+    """
+    match = re.search(r"^\s*\[*\s*\[([a-z]+)\]", line, re.IGNORECASE)
+    if match:
+        candidate = match.group(1).casefold()
+        if candidate in SOURCE_KINDS:
+            return candidate
+    if _WIKILINK_RE.search(line) or _LINKED_WIKILINK_RE.search(line):
+        return SOURCE_KIND
+    if _WEB_TARGET_RE.search(line):
+        return WEB_KIND
+    return SOURCE_KIND
+
+
 def _parse_source_line(line: str) -> SourceEntry | None:
     """Parse one source line into a :class:`SourceEntry`.
 
@@ -490,30 +548,58 @@ def _parse_source_line(line: str) -> SourceEntry | None:
     same entries -- that is what keeps rendering idempotent. The note is the
     first ``[[wikilink]]``; the reason is whatever follows it.
     """
+    kind = _line_kind(line)
+
     match = _LINKED_WIKILINK_RE.search(line)
     if match:
         # The href is the renderer's own, so it is dropped and the href is
         # recomputed from the vault on the next pass. Keeping it would let a
         # stale path survive a note being renamed.
         note = match.group(1).strip()
-        reason = _REASON_SEP_RE.sub("", line[match.end():].strip()).strip()
-        return SourceEntry(note=note, reason=reason) if note else None
+        reason = _REASON_SEP_RE.sub("", line[match.end() :].strip()).strip()
+        return SourceEntry(note=note, reason=reason, kind=kind) if note else None
 
     match = _WIKILINK_RE.search(line)
-    if not match:
-        return None
-    note = match.group(1).strip()
-    if not note:
-        return None
-    reason = _REASON_SEP_RE.sub("", line[match.end():].strip()).strip()
-    return SourceEntry(note=note, reason=reason)
+    if match:
+        note = match.group(1).strip()
+        if not note:
+            return None
+        reason = _REASON_SEP_RE.sub("", line[match.end() :].strip()).strip()
+        return SourceEntry(note=note, reason=reason, kind=kind)
+
+    # A web source is a URL, and a URL has no [[wikilink]]. Without this branch
+    # _parse_source_line returned None and the entry was dropped *silently* --
+    # the answer would render with no citation and nothing in the trace to say
+    # why. Both spellings are accepted: the autolink the renderer emits, and a
+    # bare URL in case the model writes one.
+    match = _WEB_TARGET_RE.search(line)
+    if match:
+        target = (match.group(1) or match.group(2) or "").strip()
+        if match.group(1):
+            # The angle-bracket form is unambiguous: everything up to `>` is the URL,
+            # spaces included, so it round-trips verbatim.
+            reason = _REASON_SEP_RE.sub("", line[match.end() :].strip()).strip()
+        else:
+            # A bare URL runs into the reason separator with no whitespace between
+            # them ("https://x/p: because"), so `: ` is the only reliable cut. A URL
+            # containing ": " cannot be written bare; the bracket form is the one the
+            # renderer emits and the one that matters for idempotency.
+            head, separator, tail = target.partition(": ")
+            if separator:
+                target, reason = head, tail.strip()
+            else:
+                reason = _REASON_SEP_RE.sub("", line[match.end() :].strip()).strip()
+            target = target.rstrip(":|")
+        if target:
+            return SourceEntry(note=target, reason=reason, kind=WEB_KIND)
+    return None
 
 
 def _starts_source_block(line: str) -> bool:
     """True for a line that opens a Sources block without a heading."""
-    if (_WIKILINK_RE.search(line) or _LINKED_WIKILINK_RE.search(line)) and (
-        _TOKEN_RE.search(line)
-    ):
+    if (
+        _WIKILINK_RE.search(line) or _LINKED_WIKILINK_RE.search(line) or _WEB_TARGET_RE.search(line)
+    ) and _TOKEN_RE.search(line):
         return True
     return bool(_KIND_RE.match(line.strip()))
 
@@ -526,6 +612,7 @@ def _is_block_line(line: str) -> bool:
         bool(_BULLET_RE.match(line))
         or bool(_WIKILINK_RE.search(line))
         or bool(_LINKED_WIKILINK_RE.search(line))
+        or bool(_WEB_TARGET_RE.search(line))
         or bool(_KIND_RE.match(line.strip()))
     )
 
@@ -541,11 +628,66 @@ def _scrub(line: str) -> str:
 # --- rendering ---------------------------------------------------------------
 
 
+def normalised_url(url: str, *, keep_query: bool = True) -> str:
+    """The canonical form of ``url``, or ``""`` when it is not an http(s) URL.
+
+    Scheme and host lowercased, an empty path written as ``/``, a trailing ``/``
+    dropped from a longer path, and the fragment dropped. A query parameter is kept
+    by default: SearXNG's ``url`` and a tracking-free citation can differ by one,
+    so both spellings are accepted (see :func:`_url_permitted`).
+
+    Used on **both** sides of the permission check. Comparing one normalised form
+    against a raw one is how a real citation gets silently dropped, which is
+    exactly the failure this rule exists to make safe.
+    """
+    try:
+        parts = urlsplit((url or "").strip())
+    except ValueError:
+        return ""
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        return ""
+    try:
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return ""
+    if not host:
+        return ""
+    port = parts.port
+    netloc = f"{host}:{port}" if port else host
+    path = parts.path or "/"
+    if len(path) > 1:
+        path = path.rstrip("/")
+    return urlunsplit((scheme, netloc, path, parts.query if keep_query else "", ""))
+
+
+def _url_permitted(url: str, permitted: set[str]) -> bool:
+    """Whether ``url`` is one the search tier returned.
+
+    Compared on the normalised form, and additionally without the query string,
+    because a tracking parameter does not change which page was read -- so
+    ``example.com/p?utm_source=x`` still matches a permitted ``example.com/p``.
+    """
+    candidate = normalised_url(url)
+    if not candidate:
+        return False
+    if candidate in permitted:
+        return True
+    return normalised_url(url, keep_query=False) in permitted
+
+
 def _dedupe(entries: Iterable[SourceEntry]) -> list[SourceEntry]:
-    seen: set[str] = set()
+    """Drop repeats of the same source.
+
+    Keyed on ``(kind, target)``, not the target alone: a URL and a note title can
+    legitimately be the same string, and collapsing them would lose a source. The
+    URL is compared case-insensitively because the host is, but the path may not
+    be -- so the whole target is folded rather than just its scheme.
+    """
+    seen: set[tuple[str, str]] = set()
     out: list[SourceEntry] = []
     for entry in entries:
-        key = entry.note.casefold()
+        key = (entry.kind, entry.note.casefold())
         if key in seen:
             continue
         seen.add(key)
@@ -558,16 +700,36 @@ def _format_block(
     vault: str,
     model: str,
     index: dict[str, str] | None = None,
+    web_provider: str = UNKNOWN,
 ) -> list[str]:
+    """One heading, one bullet per source, one kind tag per line.
+
+    A ``web`` entry is emitted as ``[web][<provider>][<model>]<url>``: slot two
+    carries the provider instead of a vault name, because slot two means "where
+    this came from" and that is the honest answer for a web page.
+
+    Web URLs deliberately do **not** go through ``_href_from_index``/``note_href``.
+    Those derive a vault path from a *title* and are pinned against traversal by
+    four spellings in ``test_serve.py``; a web citation's URL is its own, there is
+    nothing to recompute, and a title-shaped URL would otherwise be turned into a
+    link to a note that does not exist.
+    """
     lines = [SOURCES_HEADING]
     for entry in entries:
-        title = f"[[{entry.note}]]"
-        href = _href_from_index(entry.note, index) if index else None
-        if href:
-            # Backslash-escaped so the title still *displays* as [[Note]] while
-            # being a link; see _LINKED_WIKILINK_RE.
-            title = rf"[\[\[{entry.note}\]\]]({href})"
-        line = f"{SOURCE_BULLET}[{SOURCE_KIND}][{vault}][{model}]{title}"
+        if entry.kind == WEB_KIND:
+            target = f"<{entry.note}>"
+            origin = web_provider
+            kind = WEB_KIND
+        else:
+            target = f"[[{entry.note}]]"
+            href = _href_from_index(entry.note, index) if index else None
+            if href:
+                # Backslash-escaped so the title still *displays* as [[Note]] while
+                # being a link; see _LINKED_WIKILINK_RE.
+                target = rf"[\[\[{entry.note}\]\]]({href})"
+            origin = vault
+            kind = SOURCE_KIND
+        line = f"{SOURCE_BULLET}[{kind}][{origin}][{model}]{target}"
         if entry.reason:
             line += f": {entry.reason}"
         lines.append(line)
@@ -580,6 +742,8 @@ def render_sources(
     vault_name: str | None = None,
     model_name: str | None = None,
     vault_root: str | None = None,
+    web_provider: str | None = None,
+    allowed_web_urls: Iterable[str] | None = None,
 ) -> str:
     """Re-emit the model's Sources block with the real vault and model names.
 
@@ -595,6 +759,15 @@ def render_sources(
     does not is left as a plain ``[[wikilink]]``. Omit it and every title stays
     unlinked, which is the behaviour when the vault is not readable.
 
+    ``web_provider`` names the retrieval tier for a ``[web]`` line, resolved in
+    code like the vault and the model. ``allowed_web_urls`` is the set of URLs the
+    search tier actually returned this turn; a ``[web]`` line citing anything else
+    is dropped. That is the same rule already applied to vault notes -- *"a link
+    is never emitted for a note that is not there, because a dead link asserts the
+    note exists when it does not"* -- and without it this feature would print
+    invented URLs on every hallucinated claim. Pass ``None`` to accept every web
+    line; pass an empty collection to accept none.
+
     Returns the input unchanged (modulo stray sentinel tokens) when it contains
     no Sources block.
     """
@@ -604,6 +777,12 @@ def render_sources(
 
     vault = _sanitize_identifier(vault_name or "") or UNKNOWN
     model = _sanitize_identifier(model_name or "") or UNKNOWN
+    provider = _sanitize_identifier(web_provider or "") or UNKNOWN
+    permitted = (
+        None
+        if allowed_web_urls is None
+        else {normalised_url(url) for url in allowed_web_urls} - {""}
+    )
 
     lines = text.split("\n")
     out: list[str] = []
@@ -635,6 +814,9 @@ def render_sources(
         # No Sources block at all -- just drop any stray sentinel tokens.
         return "\n".join(out)
 
+    if permitted is not None:
+        entries = [e for e in entries if e.kind != WEB_KIND or _url_permitted(e.note, permitted)]
+
     deduped = _dedupe(entries)
     if not deduped:
         # A heading with no usable source line: drop it rather than render an
@@ -643,7 +825,7 @@ def render_sources(
 
     # One walk of the vault for the whole block, not one per source line.
     index = _build_title_index(vault_root) if vault_root else None
-    out[anchor:anchor] = _format_block(deduped, vault, model, index)
+    out[anchor:anchor] = _format_block(deduped, vault, model, index, provider)
     return "\n".join(out)
 
 

@@ -25,6 +25,12 @@ services:
       # vault; required when it holds several. Kept in sync with the agent's
       # SECOND_BRAIN_VAULT by construction -- both read the same variable.
       VAULT_NAME: ${OBSIDIAN_VAULT_NAME:-}
+      # resolve-vault.sh passes this to `obsidian-mcp --port`, so it is the only
+      # way the documented override reaches the server. It has to be named here
+      # explicitly: env_file applies to the agent-testing service only, so this
+      # service never sees .env and every value in it silently fell back to the
+      # script's own 37842 default.
+      OBSIDIAN_MCP_PORT: ${OBSIDIAN_MCP_PORT:-37842}
     volumes:
       # Host directory whose children are Obsidian vaults (auto-created as
       # "agent-vault" if empty). Override with OBSIDIAN_VAULT_PARENT_HOST in .env.
@@ -43,7 +49,15 @@ services:
       - .env
     environment:
       LANGFUSE_BASE_URL: http://host.docker.internal:3099
-      OBSIDIAN_MCP_URL: http://127.0.0.1:37842/mcp
+      # Named for the agreed convention with the SearXNG compose project rather
+      # than by IP, so moving either project cannot silently point at the wrong
+      # host. Leave blank to run without the web tier; build_web_search_tools()
+      # returns [] when it is unset.
+      SEARXNG_URL: ${SEARXNG_URL:-}
+      # Derived from the same variable the sidecar listens on, so the two can never
+      # drift: moving OBSIDIAN_MCP_PORT moves the server and this address together.
+      # Both containers share a network namespace, hence 127.0.0.1.
+      OBSIDIAN_MCP_URL: http://127.0.0.1:${OBSIDIAN_MCP_PORT:-37842}/mcp
       # The vault's PARENT is mounted, not the vault itself, so the real vault
       # directory name survives in the path. resolve_vault_root() picks the active
       # vault out of it, which makes the name that renders in every **Sources** line
@@ -52,7 +66,28 @@ services:
       # OBSIDIAN_VAULT_NAME in .env to choose; run.sh can prompt for it.
       SECOND_BRAIN_VAULT: /vaults
       OBSIDIAN_VAULT_NAME: ${OBSIDIAN_VAULT_NAME:-}
+    networks:
+      # Default, plus the external bridge shared with the SearXNG project so the web
+      # tier can reach it as a service name. Declared external because this repo does
+      # not own it -- `run.sh` creates it idempotently before `docker compose up`.
+      # The obsidian-mcp sidecar is unaffected: it uses
+      # `network_mode: service:agent-testing` and inherits this namespace, which is
+      # also why a `networks:` key on *it* would be rejected by compose.
+      - default
+      - agent-net
     volumes:
       - ${OBSIDIAN_VAULT_PARENT_HOST:-./vaults}:/vaults
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+networks:
+  # Shared with the self-hosted SearXNG project (a SEPARATE compose project, not in
+  # this repository) so the web tier reaches it as a service name rather than
+  # through a published host port. Declared external because this repo does not own
+  # it: compose will not create an external network, and it fails with "declared as
+  # external, but could not be found" rather than creating one. run.sh creates it
+  # idempotently when SEARXNG_URL is configured; an unconfigured agent leaves it
+  # alone and needs no network at all.
+  agent-net:
+    external: true
+    name: agent-net
