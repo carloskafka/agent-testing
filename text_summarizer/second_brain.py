@@ -40,16 +40,40 @@ lands in the topics. Two consequences are designed for rather than discovered:
   the note reader -- interprets, so their values are quoted (:func:`_yaml_str`).
   Unquoted interpolation meant a title containing a newline could close the
   ``---`` block and add keys of its own.
+
+Durability
+----------
+A vault write is a read-modify-write on files that several sessions share, so the
+filesystem work is designed rather than left to ``open(path, "w")``:
+
+* :func:`_write` writes a temp file in the target's own directory, fsyncs it and
+  ``os.replace``s it onto the target, so a crash or a concurrent writer can never
+  leave a half-written note for the next reader -- including ``obsidian-mcp``,
+  which indexes the same directory and would happily cache the truncated version;
+* :func:`_append_once` is the one place an index entry is added, and it holds a
+  lock across its read-modify-write, because reading the index, deciding and
+  writing it back is only correct if nobody else is in the middle of the same
+  three steps. The chat log needs no lock (see :func:`_append_chat_entry`);
+* :func:`find_cached_summary` reads a bounded prefix of each note rather than all
+  of it, which is the only per-turn cost on the path of every single turn.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
+import stat
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
+
+try:  # POSIX only. The atomic write below is not; the lock is.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 from . import vaults
 from .sources import (
@@ -65,6 +89,12 @@ CHAT_LOG_DIR = "Chat Log"
 
 GENERATED_BY_MODEL_KEY = "generated_by_model"
 GENERATED_IN_VAULT_KEY = "generated_in_vault"
+
+#: Seeds the hub note on its first entry. A constant rather than a literal at each
+#: call site, because the two callers of ``_append_once`` must agree on what an
+#: empty index becomes -- and a second, slightly different header is a note that
+#: gets two ``#`` headings.
+INDEX_HEADER = f"# {INDEX_NAME}\n\nNone yet.\n"
 
 
 def resolve_vault_root(configured: str | None = None) -> str:
@@ -114,31 +144,24 @@ def resolve_vault_root(configured: str | None = None) -> str:
 VAULT_ROOT = resolve_vault_root()
 
 
-#: Leading phrases that introduce the text to summarise rather than being part of
-#: it. Stripped before fingerprinting, and before the relative-time scan so the two
-#: examine the same words. Order matters: the longer forms come first, since
-#: ``"summarize "`` would otherwise match the start of ``"summarize the following: "``.
-_SUMMARIZE_PREFIXES = (
-    "summarize the following: ",
-    "please summarize: ",
-    "can you summarize: ",
-    "summarize: ",
-    "summarize ",
-)
-
-
-def _strip_summarize_prefix(normalized: str) -> str:
-    """Remove one leading summarise-introducing phrase from ``normalized`` text."""
-    for prefix in _SUMMARIZE_PREFIXES:
-        if normalized.startswith(prefix):
-            return normalized[len(prefix) :]
-    return normalized
-
-
-#: Words naming a time relative to now. This exists because a relative time
-#: reference is *not* part of the text being summarised: "summarize today news"
-#: is the same request every day and a different answer, so keying it only on the
-#: text made the cache serve the first day's note forever.
+#: Words that make a prompt's answer change with the calendar. Matched on word
+#: boundaries against the normalised text, case-insensitively.
+#:
+#: This exists because a relative time reference is *not* part of the text being
+#: summarised. ``"summarize today news"`` normalises to a byte-identical string on
+#: Monday and on Tuesday, so before this the fingerprint was identical too, and
+#: ``cache_hit_before_model`` replayed Monday's note on Tuesday without the model
+#: ever running. Reproduced: four spellings of it all produced
+#: ``221894b63e0fd298``, so Tuesday and Wednesday were both served Monday's note.
+#:
+#: The cost is that a prompt which merely *mentions* a relative time stops being
+#: cached across days -- e.g. "summarize the article about yesterday's floods"
+#: writes a fresh note each day. That is the safe direction: a stale answer is
+#: wrong, a redundant note is merely untidy.
+#:
+#: Deliberately conservative. An unlisted word (``now``, a bare weekday, a date
+#: range) is missed and the prompt stays cacheable across days, which is the
+#: pre-existing behaviour rather than a new failure.
 _TIME_WORDS = frozenset(
     {
         "today",
@@ -224,6 +247,27 @@ def cache_key_text_for(source_text: str, *, today: str | None = None) -> str:
         return source_text or ""
     stamp = today or date.today().isoformat()
     return f"{source_text or ''} [as of {stamp}]"
+
+
+#: Leading phrases that introduce the text to summarise rather than being part of
+#: it. Stripped before fingerprinting, and before the relative-time scan so the two
+#: examine the same words. Order matters: the longer forms come first, since
+#: ``"summarize "`` would otherwise match the start of ``"summarize the following: "``.
+_SUMMARIZE_PREFIXES = (
+    "summarize the following: ",
+    "please summarize: ",
+    "can you summarize: ",
+    "summarize: ",
+    "summarize ",
+)
+
+
+def _strip_summarize_prefix(normalized: str) -> str:
+    """Remove one leading summarise-introducing phrase from ``normalized`` text."""
+    for prefix in _SUMMARIZE_PREFIXES:
+        if normalized.startswith(prefix):
+            return normalized[len(prefix) :]
+    return normalized
 
 
 def source_fingerprint(text: str) -> str:
@@ -335,11 +379,253 @@ def _read(path: str) -> str:
         return ""
 
 
+def _read_prefix(path: str, limit: int) -> str:
+    """Read at most ``limit`` *bytes* of a text file, tolerating a partial tail.
+
+    Binary because the bound is a byte bound, and ``errors="replace"`` because
+    the read can stop mid-character: a UTF-8 sequence straddling ``limit`` would
+    otherwise raise and take the surrounding turn down with it. Both match what
+    ``sources._frontmatter_aliases`` does for the same reason.
+
+    A missing file reads as ``""`` rather than raising, for the same reason
+    :func:`_read` does: the callers scan directories and a file may vanish
+    between the listing and the read.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _target_mode(path: str) -> int:
+    """The permission bits the file being replaced should keep.
+
+    :func:`_write` stages through ``tempfile.mkstemp``, which creates at 0600,
+    while a plain ``open(path, "w")`` would have produced the umask default --
+    usually 0644. Left alone that is a real regression in this deployment: the
+    container writes as one user and the host's Obsidian reads as another, so
+    every note the agent saved would become unreadable. An existing target's own
+    mode wins, so a note someone deliberately tightened is not loosened by being
+    rewritten.
+    """
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return 0o644
+
+
 def _write(path: str, content: str) -> None:
+    """Write ``content`` to ``path`` so no reader can observe a partial file.
+
+    ``open(path, "w")`` truncates first and writes second, so a crash -- or a
+    second writer -- between the two leaves a note missing its tail. That is not
+    hypothetical here: ``obsidian-mcp`` watches this same directory and would
+    index the truncated version, and the user would read it in Obsidian.
+
+    The sequence is: write a **temp file in the target's own directory**, fsync
+    it, then ``os.replace`` it onto the target. ``rename`` within a filesystem is
+    atomic on POSIX, so a reader sees either the previous file or the new one,
+    never a splice of the two.
+
+    **Why the temp file is a sibling of the target**, which is the only place
+    that works:
+
+    * ``os.replace`` is atomic *within a filesystem*. A temp file in ``TMPDIR``
+      could be a different one, where the rename degrades to a non-atomic copy
+      and the guarantee silently disappears.
+    * :func:`_assert_in_vault` is the single guard for every write this module
+      makes, and a temp file beside the target is inside the vault by the same
+      argument that put the target there. A temp file in ``/tmp`` would be a
+      write outside the vault that the guard never sees.
+    * It is dot-prefixed so a leftover from a hard kill is not something
+      Obsidian offers to open, and it does not end in ``.md``, so the note walks
+      that resolve wikilinks skip it too.
+
+    The ``fsync`` is what makes this survive power loss rather than merely a
+    dying process: without it the rename can reach the disk before the data does,
+    which trades a truncated note for an empty one. Fsyncing the *directory* as
+    well would additionally make the rename itself durable; that is not done
+    because the vault is a bind-mounted host directory whose fsync behaviour is
+    the host's to decide, and the failure being guarded here is the process
+    dying mid-write, which the file fsync already covers.
+    """
     _assert_in_vault(path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(content)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temp_path = tempfile.mkstemp(dir=directory, prefix=f".{os.path.basename(path)}.")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, _target_mode(path))
+        os.replace(temp_path, path)
+    except BaseException:
+        # Including KeyboardInterrupt/SystemExit: the point of the staged write is
+        # that the directory is never left holding a half-written note, and a
+        # ctrl-C mid-write is the same event as a crash. Cleanup is suppressed so
+        # a failure to unlink cannot mask the exception that is propagating.
+        with contextlib.suppress(OSError):
+            os.unlink(temp_path)
+        raise
+
+
+@contextlib.contextmanager
+def _exclusive(path: str):
+    """Hold an exclusive lock on ``path`` for the duration of the block.
+
+    **The lock is a sidecar** (``path + ".lock"``), not ``path`` itself, and the
+    reason is :func:`_write`: the target is *replaced* by a rename, so its inode
+    changes on every write. A lock held on the target's inode is then held on an
+    inode no reader will ever open again -- it excludes nothing, and the second
+    writer sails straight past it. A sidecar is never replaced, so its identity is
+    stable and the lock means what it says.
+
+    ``flock`` rather than an ``O_EXCL`` lockfile or ``lockf`` because it is
+    released by the kernel when the descriptor closes, including when the process
+    dies -- a writer that crashes mid-update cannot wedge the vault with a lock
+    nobody holds. The sidecar file itself is left behind (it is empty and is not
+    a note) because removing it is a race of its own: a writer that opened it
+    moments before the unlink holds a lock on an unlinked inode, and the next
+    writer creates a fresh one and locks that instead.
+
+    Windows has no ``fcntl``. The atomic write above is portable and keeps
+    working there; this raises instead of silently degrading, because
+    unsynchronised is the exact defect this exists to remove.
+    """
+    if fcntl is None:  # pragma: no cover - Windows
+        raise RuntimeError(
+            "cross-process locking is unavailable on this platform; the vault "
+            "index cannot be updated without losing concurrent writes"
+        )
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(f"{path}.lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _append_once(path: str, line: str, *, header: str) -> bool:
+    """Append ``line`` to a shared index file exactly once, under a lock.
+
+    The read-decide-write sequence is only correct if no one else is between the
+    same three steps. Two tools add lines to ``Second Brain Index.md`` -- saving a
+    summary and logging a conversation -- and two sessions doing either at the
+    same time used to lose one entry outright: both read the old body, both
+    appended their own line, and the second write discarded the first. The lock
+    spans the whole sequence, which is why it cannot be narrowed to the write.
+
+    ``header`` seeds a file that is still empty, so the first append produces a
+    titled document rather than a bare bullet list. ``line`` is matched against
+    the current body, which is what makes a repeated save idempotent.
+
+    Returns whether ``line`` was added, and writes nothing when it was not -- an
+    unchanged file keeps its mtime, so ``obsidian-mcp`` is not woken to reindex a
+    note that did not change.
+
+    This module's one writer for "add a line to a shared file". A second copy of
+    this block is how the two entry points drifted into losing each other's
+    writes in the first place.
+
+    Unlike :func:`_append_chat_entry` this does not assert containment, because
+    it is a general text-file helper and the target is asserted by the
+    :func:`_write` it ends in. The sidecar does predate that assert, so a caller
+    that passed a path outside the vault would leave an empty ``.lock`` behind
+    before the write refused; the two callers here pass ``VAULT_ROOT``-derived
+    paths and nothing else.
+    """
+    with _exclusive(path):
+        current = _read(path)
+        updated = current if current.strip() else header
+        added = line not in updated
+        if added:
+            updated = updated.rstrip() + "\n" + line
+        if updated != current:
+            _write(path, updated)
+    return added
+
+
+#: Bytes of the end of a chat log read to decide how the next entry is separated.
+#: The whole separator question is "how did the previous entry end", so nothing
+#: more than the tail is ever needed.
+_CHAT_LOG_TAIL_BYTES = 4 * 1024
+
+
+def _read_tail(path: str, limit: int) -> str:
+    """Read at most the last ``limit`` bytes of a text file, or ``""`` if absent.
+
+    ``errors="replace"`` for the same reason as :func:`_read_prefix`: the window
+    can start mid-character. It costs nothing here, because the only questions
+    asked of the result are about whitespace and newlines.
+    """
+    try:
+        with open(path, "rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            handle.seek(max(0, size - limit))
+            return handle.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _append_chat_entry(path: str, day: str, entry: str) -> None:
+    """Append one exchange to a day's chat log, creating the note if it is new.
+
+    A plain ``O_APPEND`` write, and that is the point of keeping it separate
+    from :func:`_append_once`: the chat log is append-only by construction, so
+    there is nothing to read back and nothing to merge, and ``O_APPEND`` makes
+    the seek-to-end and the write a single atomic step. Two sessions logging at
+    the same moment therefore cannot interleave half an exchange between them --
+    the index has no such guarantee, which is why it needs the lock and this does
+    not.
+
+    **The bytes are exactly what the read-rstrip-rewrite produced**, which took
+    more than "add a newline" to guarantee. That version ended every file with
+    exactly the newline run its last entry had, and the next entry was then
+    separated by re-establishing ``\\n\\n``. A plain append can only add bytes, so
+    the run has to be *known* to add the right number:
+
+    * a new (or whitespace-only) note becomes ``# Chat Log -- <day>`` + blank
+      line + entry, discarding the whitespace exactly as the rewrite did;
+    * a note ending in a single newline -- every note this writer produces, and
+      the overwhelmingly common case -- takes the pure append of one newline;
+    * anything else means the previous entry ended in a longer run (an empty or
+      whitespace-only reply leaves ``**Agent:**`` followed by three newlines), and
+      the run has to be collapsed, which an append cannot do. That case falls back
+      to the atomic rewrite. It is rare, and it is still atomic.
+
+**The lock covers the create-or-append *decision*, which is the one thing
+    ``O_APPEND`` does not make safe.** This looked safe without it and was not:
+    measured, eight processes logging the first exchange of a fresh day left
+    2--5 of the 8 entries on disk, because all eight read the same empty tail,
+    all eight concluded "create", and each then *replaced* the file with only its
+    own entry. Last writer wins, so the file is well-formed and silently short --
+    which is precisely the data loss this rework set out to remove, reintroduced
+    through the create branch. The bytes of an append are still indivisible
+    without a lock, so what the lock buys is only that the branch is taken once.
+
+    Asserts containment itself, because it does not go through :func:`_write`
+    (append mode is the point of the common case) and :func:`_assert_in_vault`
+    being the guard for every write is worth more than routing everything through
+    the one helper.
+    """
+    _assert_in_vault(path)
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with _exclusive(path):
+        tail = _read_tail(path, _CHAT_LOG_TAIL_BYTES)
+        if not tail.strip():
+            _write(path, f"# Chat Log -- {day}\n\n{entry}")
+        elif tail.endswith("\n") and not tail.endswith("\n\n"):
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(f"\n{entry}")
+        else:
+            _write(path, _read(path).rstrip() + "\n\n" + entry)
 
 
 def _link_line(note_title: str) -> str:
@@ -538,12 +824,7 @@ def save_summary_to_second_brain(
 
     _write(note_path, body)
 
-    index_body = _read(index_path)
-    if not index_body.strip():
-        index_body = f"# {INDEX_NAME}\n\nNone yet.\n"
-    if _link_line(note_title) not in index_body:
-        index_body = index_body.rstrip() + "\n" + _link_line(note_title)
-    _write(index_path, index_body)
+    _append_once(index_path, _link_line(note_title), header=INDEX_HEADER)
 
     created_topics = []
     for topic in topic_names:
@@ -599,8 +880,16 @@ def _split_frontmatter(text: str) -> tuple[str, str]:
         return "", text
     for index in range(1, len(lines)):
         if lines[index].strip() == "---":
-            return "".join(lines[1:index]), "".join(lines[index + 1:])
+            return "".join(lines[1:index]), "".join(lines[index + 1 :])
     return "", text
+
+
+#: Bytes of a note read to find its ``source_fingerprint``. The key is in the
+#: first few hundred bytes of a note this module wrote, so 8 KiB leaves a
+#: hand-written frontmatter ample room while capping what one pathological note
+#: can cost the scan. Same bound, and the same reason, as
+#: ``sources._FRONTMATTER_PREFIX_BYTES``.
+_FINGERPRINT_PREFIX_BYTES = 8 * 1024
 
 
 def find_cached_summary(source_text: str) -> str | None:
@@ -619,9 +908,22 @@ def find_cached_summary(source_text: str) -> str | None:
     the tail of its own frontmatter. That is the same injection as the write side,
     read back.
 
-    Known cost: O(n) reads over the whole Second Brain directory on every model
-    call. Measured at well under a millisecond for a few dozen notes, so it is not
-    worth an index file until a vault is large enough for that to show up.
+    **Only a bounded prefix of each note is read** for the search, so the scan
+    cannot be made expensive by note size. The prefix is enough to hold every
+    frontmatter this module writes, and the fingerprint line is inside it, so the
+    match is exactly the one a full read would find. A note whose *body* carries a
+    ``source_fingerprint:`` line is not a cache hit -- the body is not frontmatter
+    and never was.
+
+    The matching note is then read in full to return the summary, because the
+    body is what gets replayed to the user and it is not bounded. That is one
+    read of one file per hit, and a hit ends the turn, so it does not sit on the
+    path of every turn the way the scan does.
+
+    Known cost: still O(n) in the number of notes on the first model call of every
+    turn, now O(n) in *prefixes* rather than in note sizes. Measured at well under
+    a millisecond for a few dozen notes, so it is not worth an index file until a
+    vault is large enough for that to show up.
     """
     digest = source_fingerprint(source_text)
     brain_dir = os.path.join(VAULT_ROOT, BRAIN_DIR)
@@ -631,12 +933,14 @@ def find_cached_summary(source_text: str) -> str | None:
     for name in os.listdir(brain_dir):
         if not name.endswith(".md"):
             continue
-        frontmatter, body = _split_frontmatter(_read(os.path.join(brain_dir, name)))
+        path = os.path.join(brain_dir, name)
+        frontmatter, _ = _split_frontmatter(_read_prefix(path, _FINGERPRINT_PREFIX_BYTES))
         m = re.search(frontmatter_spec, frontmatter)
         if m and m.group(1) == digest:
             # Both ends: the regex this replaced ended its match with ``\s*``, so the
             # caller saw the body without the blank line the writer puts after the
             # closing fence.
+            _, body = _split_frontmatter(_read(path))
             return body.split("## Related", 1)[0].strip()
     return None
 
@@ -649,6 +953,12 @@ def log_conversation(user_message: str, agent_response: str) -> str:
     Reuses save_summary_to_second_brain's topic convention so new day notes are
     discoverable too.
 
+    Two files, two different mechanisms, on purpose. The day's note is a plain
+    append (:func:`_append_chat_entry`), because it is append-only and a
+    concurrent append cannot interleave. The hub index needs
+    :func:`_append_once`, because adding a line to it is a read-modify-write and
+    two of those racing lose one of the two entries.
+
     Args:
         user_message: What the user said.
         agent_response: What the agent replied (markdown, bullets included).
@@ -659,18 +969,9 @@ def log_conversation(user_message: str, agent_response: str) -> str:
     index_path = os.path.join(VAULT_ROOT, f"{INDEX_NAME}.md")
 
     entry_title = f"{today} - chat log"
-    body = _read(chat_path)
-    if not body.strip():
-        body = f"# Chat Log -- {today}\n\n"
-    body = body.rstrip() + "\n\n"
-    body += f"## {now}\n\n**User:**\n\n{user_message.strip()}\n\n**Agent:**\n\n{agent_response.strip()}\n"
-    _write(chat_path, body)
+    entry = f"## {now}\n\n**User:**\n\n{user_message.strip()}\n\n**Agent:**\n\n{agent_response.strip()}\n"
+    _append_chat_entry(chat_path, today, entry)
 
-    index_body = _read(index_path)
-    if not index_body.strip():
-        index_body = f"# {INDEX_NAME}\n\nNone yet.\n"
-    if _link_line(entry_title) not in index_body:
-        index_body = index_body.rstrip() + "\n" + _link_line(entry_title)
-    _write(index_path, index_body)
+    _append_once(index_path, _link_line(entry_title), header=INDEX_HEADER)
 
     return f"Logged conversation to {chat_path}\nUpdated index: {index_path}"
