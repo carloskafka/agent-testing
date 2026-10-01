@@ -773,31 +773,39 @@ run leaves the previously published site up, which looks like success.
     stops at the next candidate terminator instead of at end-of-string). Measured after:
     0.03s, 0.03s, 0.02s. "Bounded, no backtracking risk" in a docstring is a claim
     someone has to *measure* before writing it.
-14. **The digest has never answered a live model turn, and rule 14 has never been
-    evaluated.** The reader and the tool are both proven offline — 14 tests on the
-    reader, 17 on the tool, and `test_adk_wiring` drives a real `InMemoryRunner` so ADK
-    is shown to accept the signature, dispatch the call and hand the payload to the next
-    model call. What that cannot cover is the part a stub decides for it: **whether the
-    model reaches for `read_day_digest` at all** when asked "what did you learn on
-    Tuesday?", and whether it then reports what came back instead of narrating. Rule 14
-    is prose in the instruction, and prose in the instruction is exactly the thing this
-    project has measured going the wrong way before (known gaps 4 and 5).
-    Two things to check when a live run is available, both cheap:
+14. ~~**The digest has never answered a live model turn, and rule 14 has never been
+    evaluated.**~~ **Done — measured on a real turn; both checks pass.** The offline
+    suite (14 tests on the reader, 17 on the tool, plus a real `InMemoryRunner`) could
+    only prove the wiring, never the part a stub decides for it: whether the model
+    *reaches for* the tool, and whether it then reports or narrates. Asked
+    `What did you learn on 2026-09-30?` (a day with 17 notes) through the same HTTP API
+    the browser uses:
+
+    - **The tool is called.** `read_day_digest` with `{"day": "2026-09-30"}`, and the
+      payload came back as designed: `note_count=17` (the *true* total), `topics=25` with
+      `truncated` reporting the 11 withheld, and **no** `fingerprint` key. The model did
+      *not* call `current_datetime` first — correct, since rule 14 only requires the clock
+      to resolve "today"/"yesterday"/"this week", and an explicit ISO date does not need it.
+    - **The answer matches the vault.** Every group the agent named maps to real notes in
+      the CLI's reading of the same day: AI/business-outcomes → the AI-trends note, Apollo
+      + Voyager → the Apollo note, bonobos/cats/dogs → the primates and cats notes, and
+      LinkedIn/C&A/Decathlon/Mercado Livre → the inbox note. No invented note and no
+      topic the vault does not carry. It *reported* rather than reciting the conversation.
+
+    Both surfaces read the same files, so any future disagreement is the model rather
+    than the reader — which is what keeps this cheap to re-check:
 
     ```bash
-    # 1. does the tool get called at all?  the tool_use in the trace's event list
-    # 2. does the answer match the notes?  compare the reply against the CLI's own
-    #    reading of the same day -- they read the same files, so any disagreement is
-    #    the model, not the reader
-    uv run python -m text_summarizer.digest --date <that day>
+    docker compose exec agent-testing sh -lc \
+      'cd /workspace/text_summarizer && .venv/bin/python -m text_summarizer.digest --date <day>'
     ```
 
-    The ambiguity caveat from the vault section applies here too: on a mount holding
-    several vaults with no `OBSIDIAN_VAULT_NAME`, `resolve_vault_root` returns the
-    *parent*, and the digest's `vault.name` is then its basename — a plausible-looking
-    wrong name. Pre-existing across every vault-reading path, not introduced by the
-    digest, and worth fixing where `resolve_vault_root` degrades rather than in the
-    reader.
+    **Still open:** the ambiguity caveat from the vault section applies here too. On a
+    mount holding several vaults with no `OBSIDIAN_VAULT_NAME`, `resolve_vault_root`
+    returns the *parent*, and the digest's `vault.name` is then its basename — a
+    plausible-looking wrong name. Pre-existing across every vault-reading path, not
+    introduced by the digest, and worth fixing where `resolve_vault_root` degrades
+    rather than in the reader.
 
 ## Environment variables (see `.env.example`)
 
@@ -840,9 +848,11 @@ Tracked, not yet fixed. Ordered by how much they mislead.
 5. **The harness rewards verbatim copying.** ROUGE-1, `source_overlap`, and instruction rule 3 ("closely mirroring the key terms, phrasing, and sentence structures") all push the same direction. The agent is optimized toward extractive copying.
 6. ~~**No `userId` / `sessionId` on traces.**~~ **Done** — `before_agent_callback=tag_trace_identity` sets `langfuse.trace.name`, `user.id` and `session.id` on the open `agent_run` span; Langfuse folds them onto the trace and every observation row. Name is overridable via `LANGFUSE_TRACE_NAME`. See "Trace identity".
 7. **The free OpenRouter fallback is only as reliable as its free tier.** With the schema bug fixed (see "Tool-schema sanitisation") the fallback now reaches the model, but `google/gemma-4-26b-a4b-it:free` returns HTTP 429 (`temporarily rate-limited upstream`, `limit_source: upstream_provider_shared_pool`) often enough that a Gemini quota error is as likely to end in a rate-limit error as in a served turn. `FallbackModel` cannot distinguish "this model is throttled" from "this model is broken" and retries the whole chain identically. If fallback reliability matters, the fix is a paid key on OpenRouter (`OPENROUTER_API_KEY`) rather than more `:free` aliases.
-8. **Untrusted LLM output used as file paths and YAML** — `title` and `topics` go straight into `os.path.join(VAULT_ROOT, ...)` and the frontmatter block (`second_brain.py`). Sanitize with `_slug()` and quote YAML values.
+8. ~~**Untrusted LLM output used as file paths and YAML.**~~ **Done, and this entry was wrong about the state of the code.** `second_brain` has had `_safe_name` (an ASCII-only slugger) and `_yaml_str` (quoting *and* newline escaping) for some time; `_slug` survives only as an alias, precisely so there is one slugger rather than two of differing strength. `_assert_in_vault` is a second line of defence at `_write` — the single place a path becomes a syscall — and it raises rather than warns, because the only safe response to a write that would land outside the vault is not to perform it.
+
+    Verified against hostile input rather than by reading, because a security claim in a doc is worth nothing unless it was measured: `'../../../etc/passwd'` → `etc-passwd`; `'..\\..\\windows\\system32'` → `windows-system32`; a title containing `"\n---\ntitle: injected"` collapses to a flat name *and* `_yaml_str` returns `'"evil\\n---\\ntitle: pwned"'`, so it cannot close the frontmatter block. The Unicode separator `'／etc／passwd'` (U+FF0F) becomes `etc-passwd` too — the ASCII-only character class removes lookalikes and RTL overrides by construction, so there is no separator variant left to enumerate.
 9. ~~**Non-atomic writes.**~~ **Done** — `second_brain._write` stages through `tempfile.mkstemp` in the target's own directory, fsyncs, then `os.replace`s; the chat log appends with `O_APPEND` under a sidecar `flock`; the index takes the same lock. Measured with 8 processes released by a barrier: **8/8 entries land** (main loses 5–6 of 8). Two details that are not obvious and were both found by measurement, not reading — see "Writes that survive a crash and a second writer" below.
 10. ~~**`find_cached_summary` is O(n) full-file reads.**~~ **Partly done** — the scan now reads a bounded 8 KiB prefix per note (`_FINGERPRINT_PREFIX_BYTES`) instead of the whole file, so its cost is bounded by note *count* rather than note *size*. Still O(n) in the count: the fingerprint → path index that would make it O(1) is **not** built, deliberately — writing it introduces a second thing to keep consistent with the notes, and at the vault sizes reached so far the scan measures well under a millisecond.
-11. **The vault cache is now exercised end to end, on built code.** `docker compose build` and `up -d --build` both work on this host as of 2026-09-26 (the "two daemons, neither socket serving these containers" problem is gone), and the rebuilt containers resolved the real vault to `/vaults/ck` on both sides. Measured on a real prompt: first ask 23.5s / 11 events, the same prompt in two further new sessions 0.04s / 2 events each with `vault_cache_hit=True`, `cache.hit=1` and no `quality.*` scores. Two bugs were found only by doing this and are now pinned by tests — see "The vault cache" above. Note the containers still stop on their own here; `docker start agent-testing obsidian-mcp` brings them back.
+11. **The vault cache is now exercised end to end, on built code.** `docker compose build` and `up -d --build` both work on this host as of 2026-09-26 (the "two daemons, neither socket serving these containers" problem is gone), and the rebuilt containers resolved the real vault to `/vaults/ck` on both sides. Measured on a real prompt: first ask 23.5s / 11 events, the same prompt in two further new sessions 0.04s / 2 events each with `vault_cache_hit=True`, `cache.hit=1` and no `quality.*` scores. Two bugs were found only by doing this and are now pinned by tests — see "The vault cache" above. Re-confirmed 2026-10-01: a full `up -d --build` followed by ~10 live turns across the API, and both containers **stayed up** for the whole session — the earlier "they stop on their own" note no longer reproduces, so treat a stopped container as something to investigate rather than expected.
 12. **The `**Sources**` rewrite is skipped on streamed chunks.** `render_sources_after_model` returns early for a `partial` response, because a chunk is not the whole answer and a sentinel can straddle two chunks — so a turn served with `StreamingMode.SSE` would show the raw `@@ADK_VAULT@@` / `@@ADK_MODEL@@`. Inert as deployed: the dev UI posts `streaming: false` (`google/adk/cli/api_server.py` defaults it to false and the bundled UI sends `streaming:!1`), and `run.sh` passes no streaming flag. If streaming is ever turned on, this needs buffering or a per-chunk token-safe substitution.
 13. **The duplication that gotcha 16 fixes was never visible in the code or in Langfuse** — only in the dev UI, and only because two events carried the same text. The same blind spot applies to anything else asserted on "the last event" or on a trace's output, both of which report the *correct* text. When a UI complaint cannot be reproduced from a trace, read the session's raw events (`sqlite3 .adk/session.db 'select event_data from events'`, or the `events` table through the session service) before concluding the trace is right.
