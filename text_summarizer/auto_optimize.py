@@ -32,6 +32,54 @@ EVAL_FILE = AGENT_DIR / "tests" / "eval" / "simple_test.test.json"
 CONFIG_FILE = AGENT_DIR / "tests" / "eval" / "test_config.json"
 HISTORY_FILE = AGENT_DIR / "optimization_history.json"
 
+#: Instruction rules this loop must not let a rewrite delete.
+#:
+#: The reason the guard exists is that the loop's only decision is ROUGE-1 word
+#: overlap (``response_match_score``), and ROUGE-1 *rises* when the instructions
+#: get shorter and more generic -- which is exactly what "remove the rules that
+#: make this agent different" produces. Rules 7-9 are long. So a rewrite can
+#: delete them, score better, and be KEPT, while the agent quietly stops writing
+#: to the second brain, stops citing the vault, and loses the clock and the Gmail
+#: and web paths. ``tests/eval/test_config.json`` grades 8 and 9 as
+#: ``tool_trajectory_avg_score`` at threshold 1.0 -- but ROUGE-1 cannot see that
+#: loss, so nothing in the loop's own arithmetic would refuse the rewrite, and the
+#: second eval that would catch it is the one whose score the loop already
+#: prefers.
+#:
+#: 7  the ``**Sources**`` block and retrieve-before-summarize
+#: 8  ALWAYS persist the summary        (graded: tool_trajectory_avg_score)
+#: 9  ALWAYS log the conversation       (graded: tool_trajectory_avg_score)
+#: 11 the Gmail tools
+#: 12 know the date before answering
+#: 13 web search as a last resort
+#: 14 answer "what did you learn" from the vault, and cite it
+#:
+#: Rule 10 is deliberately absent: its closing sentence ("saved to the second
+#: brain as ...") is in every golden answer, so ROUGE-1 does see its loss. Rule 14
+#: is present precisely because nothing observes it -- the digest answers it
+#: governs are not in the eval set at all, so a rewrite dropping it would silently
+#: un-cite every digest turn, which is a bug this repo had once already.
+REQUIRED_RULES = (7, 8, 9, 11, 12, 13, 14)
+
+
+def missing_required_rules(instructions):
+    """The ``REQUIRED_RULES`` numbers that ``instructions`` does not define.
+
+    Returns the numbers, ascending, so a caller can name them. A rule counts as
+    present when the instructions open a line with that number and a period
+    (``^7. ``), which is how every rule in the block is written. Renumbering the
+    block therefore reads as "all the rules are missing", which is the safe
+    direction to fail: a guard that cannot find rule 8 must not let the rewrite
+    through.
+    """
+    if not instructions:
+        return list(REQUIRED_RULES)
+    return [
+        number
+        for number in REQUIRED_RULES
+        if not re.search(rf"^{number}\. ", instructions, re.MULTILINE)
+    ]
+
 
 def run_eval():
     """Run adk eval and return the response_match_score."""
@@ -215,6 +263,32 @@ def main():
             )
         except Exception as e:
             print(f"  ERROR calling optimizer: {e}")
+            break
+
+        # Refuse a rewrite that deleted a rule the loop's own metric cannot see,
+        # BEFORE writing it. See REQUIRED_RULES: ROUGE-1 rewards the trim that
+        # breaks persistence and citation, so the loop would otherwise keep it.
+        #
+        # Checked before `set_instructions` rather than written-then-reverted,
+        # because the revert is a second write: a process killed between the two
+        # leaves agent.py holding instructions that break the agent, which is the
+        # one state nothing in this file can then detect. Validating first means
+        # agent.py is never in that state at all.
+        dropped = missing_required_rules(new_instructions)
+        if dropped:
+            print(
+                "  REJECTED: the rewrite dropped instruction rule(s) "
+                f"{', '.join(str(n) for n in dropped)}. Not applying it."
+            )
+            print(
+                "  The score would probably have gone UP -- that is the trap: "
+                "ROUGE-1 rises as the instructions get shorter and more generic, "
+                "and these are the rules that make this agent different. Rewrite "
+                "around them instead of deleting them."
+            )
+            save_history(
+                i + 1, current_instructions, new_instructions, current_score, None, kept=False
+            )
             break
 
         # Apply new instructions

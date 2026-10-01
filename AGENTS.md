@@ -663,7 +663,7 @@ run leaves the previously published site up, which looks like success.
 
 1. **`eval_exercise.py` and `auto_optimize.py` MUTATE `agent.py`.** Both locate the main agent's instructions via regex `instruction="""..."""` and rewrite them in place (`set_instructions`). If you restructure `agent.py` (rename the agent, change quoting, split instructions into a variable), these scripts will silently fail or corrupt the file. Keep `instruction="""..."""` intact unless you also update those scripts.
 2. **Eval scripts run `eval` with `cwd` = repo root.** Both invoke `python -m google.adk.cli eval ...` from the repo root, passing the agent name `text_summarizer` and paths relative to it. Run them from the repo root (or from `text_summarizer/` where the script itself manages `cwd`).
-3. **`auto_optimize.py` REVERTS to the best-known instructions** when a rewrite doesn't improve the score, and appends a record to `optimization_history.json`. The final `agent.py` state reflects the best run, always.
+3. **`auto_optimize.py` REVERTS to the best-known instructions** when a rewrite doesn't improve the score, and appends a record to `optimization_history.json`. The final `agent.py` state reflects the best run, always. It also **refuses a rewrite that deletes an instruction rule at all**, before writing it — see below, because the loop's own metric would have kept that rewrite.
 4. **`response_match_score` is ROUGE-1 word overlap, not output quality.** Higher scores come from *matching the expected words*, not from being objectively better. The README documents experiments where "better" edits *lowered* the score. Don't use it to judge semantic quality.
 5. **The two eval criteria do very different jobs — don't treat them as interchangeable.**
    - `tool_trajectory_avg_score` is the **hard gate** for rules 8–9. The golden answers declare `tool_uses: [save_summary_to_second_brain, log_conversation]`, and `test_config.json` sets `matchType: "IN_ORDER"` + `ignoreArgs: true` so the retrieval calls (`search_text`, `note_read`, `vault_info`) may interleave but the two mandatory calls must appear, in order. A run where the agent skips persistence scores **0.00**.
@@ -842,6 +842,19 @@ run leaves the previously published site up, which looks like success.
 ## Evaluating your changes
 
 The intended workflow is: **edit instructions in `agent.py` → run eval → compare score → keep or revert**. Make one change at a time so you can attribute score deltas. Always re-check `git status`/`git diff` after running the eval scripts, since they edit `agent.py` and `optimization_history.json` for you.
+
+### The optimizer deletes the rules that make the agent work
+
+`auto_optimize.py` decides on `response_match_score`, which is ROUGE-1 word overlap — and **ROUGE-1 rises when the instructions get shorter and more generic**. "Remove the rules that make this agent different" therefore looks like an *improvement*, and rules 7-9 are the longest ones in the block. So a rewrite can delete the persistence rules and the Sources template, score better, and be kept, while the agent quietly stops writing to the vault, stops citing it, and loses the clock, Gmail and web paths. `tool_trajectory_avg_score` grades rules 8 and 9 at threshold 1.0, but ROUGE-1 cannot see a tool call at all, and the second eval that *would* catch it is the one whose score the loop already prefers.
+
+`auto_optimize.missing_required_rules` refuses any rewrite missing one of `REQUIRED_RULES = (7, 8, 9, 11, 12, 13, 14)`, and the check runs **before `set_instructions`** rather than write-then-revert. That ordering is deliberate: the revert is a second write, and a process killed between the two leaves `agent.py` holding instructions that break the agent — the one state nothing in the file can then detect. Validating first means the file is never in it.
+
+Two details that are decisions rather than omissions:
+
+- **Rule 14 is in the set** because nothing observes it. The digest answers it governs are not in the eval set, so dropping it moves no score in either direction — and its symptom is a bug this repo had already shipped and fixed: every digest answer came back uncited (see the digest section, and the session recorded there). A guard omitting 14 would let the optimizer quietly restore it.
+- **Rule 10 is deliberately absent.** Its closing sentence ("Saved to the second brain as…") is in every golden answer, so ROUGE-1 does see its loss. Requiring it would reject rewrites for no gain.
+
+**The guard was tested as a function and that was not enough.** `missing_required_rules` had 15 tests, all green, and setting `dropped = []` at its call site left the whole suite at 804/804 — because the function is untouched by wiring it away. `test_a_rule_dropping_rewrite_is_never_written_to_agent_py` drives `main()` with every side effect stubbed and asserts the file on disk is byte-identical, which is the outcome that actually matters; gotcha 1's warning is that this file *is* the graded path. Its counterpart `test_a_compliant_rewrite_is_still_applied` exists because a guard that refuses everything is otherwise indistinguishable from a working one.
 
 ## Known gaps (as of 2026-09-26)
 
