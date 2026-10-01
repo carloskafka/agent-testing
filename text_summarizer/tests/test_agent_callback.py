@@ -88,8 +88,8 @@ def test_fresh_generation_returns_an_altered_response(monkeypatch):
         "- [obsidian][ck][gemini-3.5-flash-lite][[Dogs Overview]]: related" in text
     )
     assert VAULT_TOKEN not in text and MODEL_TOKEN not in text
-    # The rest of the answer is untouched.
-    assert text.startswith(BULLETS)
+    # The rest of the answer is untouched, behind the name stamp.
+    assert text.startswith("**Text Summarizer Agent**\n\n" + BULLETS)
     assert 'Saved to the second brain as "Dogs Summary".' in text
 
 
@@ -144,7 +144,14 @@ def test_missing_model_provenance_renders_as_unknown(monkeypatch):
     assert "- [obsidian][ck][unknown][[Dogs Overview]]: related" in text
 
 
-def test_response_without_a_sources_block_is_left_alone(monkeypatch):
+def test_response_without_a_sources_block_still_gets_the_name(monkeypatch):
+    """No Sources block means the renderer has nothing to substitute -- but the
+    stamp is unconditional, so the callback still returns a response.
+
+    It used to assert the opposite (``is None``), which was true before the name
+    existed and is exactly the kind of test that hides a behaviour change: the
+    stamp is not conditioned on there being a Sources block.
+    """
     monkeypatch.setenv("VAULT_NAME", "ck")
     events = [
         _event(
@@ -152,7 +159,12 @@ def test_response_without_a_sources_block_is_left_alone(monkeypatch):
             model_version="gemini-3.5-flash-lite",
         ),
     ]
-    assert _render(_context(events), f"{BULLETS}\n\nSaved to the second brain.") is None
+    response = _render(_context(events), f"{BULLETS}\n\nSaved to the second brain.")
+    assert response is not None
+    # The bullets are untouched apart from the stamp at the head.
+    assert response.content.parts[0].text == (
+        f"**Text Summarizer Agent**\n\n{BULLETS}\n\nSaved to the second brain."
+    )
 
 
 def test_empty_response_is_left_alone(monkeypatch):

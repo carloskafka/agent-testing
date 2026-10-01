@@ -216,7 +216,12 @@ def test_note_provenance_from_a_live_session(monkeypatch):
 
 
 def test_cache_hit_replays_the_stored_note_verbatim(monkeypatch, tmp_path):
-    """A fingerprint match short-circuits the model and the callback."""
+    """A fingerprint match short-circuits the model and the callback.
+
+    "Verbatim" is about the *note*: what comes back is the stored text with the
+    name stamped on the emitted copy. The stamp is never written to disk, so a
+    replay stays byte-identical on disk and this test also asserts that.
+    """
     from text_summarizer.second_brain import source_fingerprint
 
     vault = _point_vault_at(monkeypatch, tmp_path)
@@ -244,8 +249,13 @@ def test_cache_hit_replays_the_stored_note_verbatim(monkeypatch, tmp_path):
     )
     events = _run(agent, prompt)
     final = _final_model_text(events)
-    assert final.strip() == stored
+    # The name is stamped on the emitted copy, so it is present here...
+    assert final.strip() == f"**Text Summarizer Agent**\n\n{stored}"
     assert SOURCES_HEADING not in final
+    # ...and absent from the note, which is what keeps a replay byte-identical
+    # on disk and keeps the stamp out of every note ever written.
+    with open(os.path.join(brain, "2026-09-25 - known.md"), encoding="utf-8") as fh:
+        assert "Text Summarizer Agent" not in fh.read()
     # The renderer is registered but never reached: the short-circuit in
     # before_model_callback returns before the model is called, so no
     # after_model_callback fires. A stored note is never re-shaped.

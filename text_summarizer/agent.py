@@ -100,6 +100,98 @@ def get_model():
 model = get_model()
 
 
+#: The agent's own name. Single source of truth for both ``LlmAgent(name=...)``
+#: and the label stamped at the head of every answer (:func:`bot_name`), so the two
+#: cannot drift apart. Gotcha 1 is unaffected: the instruction-rewriting scripts
+#: locate the ``instruction="""..."""`` block, never ``name=``.
+AGENT_NAME = "text_summarizer"
+
+#: Overrides the derived display label. Unset derives it from :data:`AGENT_NAME`;
+#: set to a value uses that value verbatim; set to *empty* turns the stamp off,
+#: which is the control an eval comparison needs — the same way
+#: ``CACHE_ENABLED=false`` is the control for the cache.
+BOT_NAME_ENV = "BOT_NAME"
+
+
+def bot_name() -> str:
+    """The label stamped at the head of an answer. ``""`` means the stamp is off.
+
+    Three states, and the difference between the first two is the whole point:
+
+    * **unset** — derived from :data:`AGENT_NAME`, so ``text_summarizer`` is
+      presented as ``Text Summarizer Agent``. Human-readable, and still one source
+      of truth: rename the agent and the label follows with no second edit.
+    * **set to a value** — used verbatim, for a product name such as
+      ``Second Brain``.
+    * **set to empty** (``BOT_NAME=``) — off.
+
+    Rendered in code, never asked of the model, for the same reason the
+    ``**Sources**** block is: a prompt rule would cost output tokens on every turn,
+    could be dropped or misspelled, and would sit inside ``summary_content`` — so
+    the vault note would carry the stamp too.
+    """
+    raw = os.environ.get(BOT_NAME_ENV)
+    if raw is not None:
+        return raw.strip()
+    words = AGENT_NAME.replace("_", " ").replace("-", " ").split()
+    if not words:
+        return ""
+    return f"{' '.join(word.capitalize() for word in words)} Agent"
+
+
+def bot_name_line(name: str | None = None) -> str:
+    """The stamp as it appears in the text: ``**Text Summarizer Agent**``.
+
+    Empty when the feature is off, which every caller treats as "do nothing".
+    """
+    label = bot_name() if name is None else name
+    return f"**{label}**" if label else ""
+
+
+def prepend_bot_name(text: str, name: str | None = None) -> str:
+    """Put the name line at the top of ``text``, idempotently.
+
+    Idempotent because a second stamp is a visible duplicate of exactly the kind
+    gotcha 16 is about — a name printed twice at the head of one answer — and
+    because the same text can legitimately pass through here twice. Returns
+    ``text`` unchanged when the feature is off, when it is blank, or when the
+    stamp is already there.
+
+    Leading newlines are dropped from the body so the stamp cannot end up separated
+    from the summary by an arbitrary gap.
+    """
+    line = bot_name_line(name)
+    body = (text or "").lstrip("\n")
+    if not line or not body.strip():
+        return text or ""
+    if body.startswith(line):
+        return text
+    return f"{line}\n\n{body}"
+
+
+def strip_bot_name(text: str, name: str | None = None) -> str:
+    """Remove the stamp so the metrics see the summary and nothing else.
+
+    A presentation artefact must not move a score, which is the same reasoning
+    behind :func:`sources.summary_only` stripping the ``**Sources**`` block.
+    ``quality.bullet_count`` is indifferent either way (its regex is
+    ``(?m)^\\s*-\\s+``, and a bold name is not a bullet), but
+    ``source_overlap``/``fidelity`` compare the response against the *user's* words
+    — and ``text_summarizer`` is not one of them, so an unstripped stamp is a small
+    permanent downward bias on every scored turn. Stripping also keeps
+    ``response_match_score`` comparable across the instruction edits the eval loop
+    makes, which is the only reason that number exists (gotcha 4).
+
+    Only a *leading* stamp is removed, and only the one this module writes, so a
+    bold word the model happened to start its answer with is left alone.
+    """
+    line = bot_name_line(name)
+    body = (text or "").lstrip("\n")
+    if not line or not body.startswith(line):
+        return text or ""
+    return body[len(line) :].lstrip("\n")
+
+
 def _last_user_text(llm_request) -> str:
     """Extract the text of the most recent user message from the LLM request."""
     contents = llm_request.contents or []
@@ -210,8 +302,12 @@ def cache_hit_before_model(callback_context, llm_request):
 
     if not cached:
         return None
+    # The name is stamped on the emitted copy, never written into the note, so a
+    # replay stays byte-identical on disk. A hit short-circuits before the model
+    # runs, so no after_model_callback fires and this is the only place the stamp
+    # can be added on this path.
     return LlmResponse(
-        content=Content(role="model", parts=[Part(text=cached)]),
+        content=Content(role="model", parts=[Part(text=prepend_bot_name(cached))]),
         turn_complete=True,
     )
 
@@ -292,9 +388,24 @@ def _llm_response_text(llm_response) -> str:
 
 
 def render_sources_after_model(callback_context, llm_response):
-    """Substitute the real vault and served model into the response's Sources block.
+    """Shape the answer the user sees: the ``**Sources**`` block, then the name.
 
-    Wired as an ``after_model_callback``: an ``LlmResponse`` returned from there
+    **Both steps live in one callback**, and that is forced by ADK, not by taste.
+    ``after_model_callback`` accepts a list, and the list stops at the first
+    callback that returns a response: ``_run_callbacks(..., _stop_on_truthy, ...)``
+    in ``google/adk/utils/_callback_pipeline.py:94-101``, called from
+    ``google/adk/flows/llm_flows/base_llm_flow.py:330-336``, with
+    ``_stop_on_truthy`` being ``bool(result)`` (``_callback_pipeline.py:116``).
+    Adding the name as a third list entry would therefore have been *silently
+    skipped on exactly the turns that carry a Sources block* -- the renderer
+    answers those, and the chain stops there. It would have looked correct on
+    every uncited answer, which is the hardest kind of bug to notice.
+
+    Order matters within the step: the Sources block is re-emitted in place, and
+    the name goes above it, so the block stays last (instruction rule 7 puts the
+    source lines at the very end of the answer).
+
+    Wired as an ``after_model_callback``: an ``LlmResponse`` returned from here
     **replaces** the model's own response (``_handle_after_model_callback`` ->
     ``_finalize_model_response_event``), so the answer exists once, on the event
     the model produced.
@@ -312,10 +423,10 @@ def render_sources_after_model(callback_context, llm_response):
     callback later reads, so ``response_match_score`` is computed on the response
     the user actually sees rather than on the model's raw draft.
 
-    Returns ``None`` -- leaving the response untouched -- when there is nothing
-    to substitute, which is the case for every model call that is not the final
-    answer: a tool-calling response has no text, and text without a Sources block
-    renders to itself.
+    Returns ``None`` -- leaving the response untouched -- in the cases where there
+    is nothing to do or nothing safe to do: a streamed chunk, a response with no
+    text (every tool-calling response), a response that *also* asks for a tool, and
+    text that neither step changed.
     """
     if getattr(llm_response, "partial", False):
         # A streamed chunk is not the whole answer, and a sentinel token can
@@ -327,17 +438,61 @@ def render_sources_after_model(callback_context, llm_response):
     if not text.strip():
         return None
 
+    if _has_function_call(llm_response):
+        # Not the final answer: the model is on its way to a tool, and this text is
+        # an interim line the dev UI renders in its own bubble. Stamping it would
+        # print the name twice in one turn — the duplication gotcha 16 exists to
+        # prevent — and rewriting the content at all risks the function call (see
+        # ``_response_with_text``).
+        return None
+
     try:
         rendered = _render_sources_text(callback_context, llm_response, text)
+        stamped = prepend_bot_name(rendered)
     except Exception as exc:  # pragma: no cover - never break the turn
         print(f"[sources] render failed: {exc}")
         return None
 
-    if rendered == text:
+    if stamped == text:
         return None
-    return llm_response.model_copy(
-        update={"content": Content(role="model", parts=[Part(text=rendered)])}
-    )
+    return _response_with_text(llm_response, stamped)
+
+
+def _has_function_call(llm_response) -> bool:
+    """True when this response asks for a tool, i.e. it is not the final answer."""
+    parts = getattr(getattr(llm_response, "content", None), "parts", None) or []
+    return any(getattr(part, "function_call", None) is not None for part in parts)
+
+
+def _response_with_text(llm_response, text: str):
+    """A copy of ``llm_response`` whose text is ``text`` and whose other parts survive.
+
+    ``_finalize_model_response_event`` replaces the event's ``content`` with
+    whatever the callback hands back (``google/adk/flows/llm_flows/base_llm_flow.py``,
+    lines 125-142: ``updates`` carries every non-``None`` field, and ``content`` is
+    one of them). Returning a fresh single-part ``Content`` -- as the renderer used
+    to -- therefore *deletes* any ``function_call`` part riding on the same
+    response, and the flow never dispatches the tool
+    (``base_llm_flow.py:858`` branches on ``get_function_calls()``). The agent
+    would then stop calling tools for that turn with nothing in the trace to say
+    why.
+
+    So the text part is substituted **in place** and only *further* text parts are
+    dropped; ``function_call`` and ``inline_data`` parts are carried over untouched.
+    Correctness then does not rest on the caller's guard.
+    """
+    original = getattr(llm_response, "content", None)
+    kept = []
+    placed = False
+    for part in list(getattr(original, "parts", None) or []):
+        if getattr(part, "text", None) is None:
+            kept.append(part)
+        elif not placed:
+            kept.append(part.model_copy(update={"text": text}))
+            placed = True
+    if not placed:
+        kept.insert(0, Part(text=text))
+    return llm_response.model_copy(update={"content": Content(role="model", parts=kept)})
 
 
 def _render_sources_text(callback_context, llm_response, text: str) -> str:
@@ -419,7 +574,10 @@ def _report_scores_after_agent(callback_context) -> None:
         return None
 
     user_text = _last_session_user_text(callback_context)
-    model_text = _last_session_model_text(callback_context)
+    # The name is a presentation artefact, not part of the summary, so it is
+    # stripped before anything is scored -- the same reasoning as summary_only()
+    # removing the Sources block. See strip_bot_name.
+    model_text = strip_bot_name(_last_session_model_text(callback_context))
     for name, value in _score_generation(user_text, model_text).items():
         try:
             client.create_score(
@@ -482,7 +640,9 @@ def _last_session_model_text(callback_context) -> str:
 
 
 root_agent = LlmAgent(
-    name="text_summarizer",
+    # AGENT_NAME, not a literal: bot_name() derives the displayed label from it, so
+    # renaming the agent renames the label too and the two cannot drift apart.
+    name=AGENT_NAME,
     model=model,
     description="A text summarization agent that converts long text into concise bullet-point summaries, stores them in an Obsidian vault (second brain), and can read the user's Gmail inbox.",
     before_model_callback=cache_hit_before_model,

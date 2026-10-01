@@ -67,6 +67,7 @@ agent-testing/
         |-- test_sources.py                # **Sources** renderer unit tests
         |-- test_serve.py                  # The /vault route: serving, and traversal guards
         |-- test_agent_callback.py         # before/after agent callbacks (rewrite, cache hit/miss, key)
+        |-- test_bot_name.py               # The **Name** stamp: derivation, idempotence, and the metrics control
         |-- test_clock_and_cache_dates.py # current_datetime, and the day-scoped cache key
         |-- test_adk_wiring.py             # In-process ADK run with a stub Llm (no API cost)
         |-- test_obsidian_tool_schema.py   # MCP JSON-Schema sanitiser (the fallback-path 400)
@@ -100,7 +101,12 @@ Import chain (all through `text_summarizer/__init__.py`):
 - Both paths return a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors.
 - Models referenced are the free-tier aliases used by this project; don't "fix" the names to older released models.
 
-The LlmAgent has: name `text_summarizer`, the model above, a description, bullet-point `instruction` rules, and `tools` = `build_clock_tools()` + `build_obsidian_tools()` + `build_gmail_tools()` + `build_web_search_tools()`. The clock is the one **ungated** toolset — it always returns its tool, because a missing clock is a silently wrong answer rather than a missing capability; the other three return `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second rewrites the response's `**Sources**` block with the real vault name and the real served model (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
+The LlmAgent has: name `AGENT_NAME` (`text_summarizer`, also the source of the displayed label — see below), the model above, a description, bullet-point `instruction` rules, and `tools` = `build_clock_tools()` + `build_obsidian_tools()` + `build_gmail_tools()` + `build_web_search_tools()`. The clock is the one **ungated** toolset — it always returns its tool, because a missing clock is a silently wrong answer rather than a missing capability; the other three return `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second shapes the answer itself: it rewrites the response's `**Sources**` block with the real vault name and the real served model, then stamps the bot name in bold at the head (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
+
+- **One callback shapes the answer, and ADK is why.** `after_model_callback=[tag_current_span, render_sources_after_model]` — one list, and the list **stops at the first callback that returns a response**: `_run_callbacks(..., _stop_on_truthy, ...)` in `google/adk/utils/_callback_pipeline.py:94-101`, called from `google/adk/flows/llm_flows/base_llm_flow.py:330-336`, with `_stop_on_truthy` being `bool(result)` (`_callback_pipeline.py:116`). Adding the name stamp as a *third* entry would therefore have been silently skipped on exactly the turns that carry a Sources block — the renderer answers those and the chain stops — while looking perfectly correct on every uncited answer. Both steps are therefore one function returning one `LlmResponse`.
+- **The rewrite happens in `after_model_callback`, and it has to.** An `LlmResponse` returned from there *replaces* the model's own response, so the answer lives on one event. Content returned from `after_agent_callback` does **not** replace it — ADK builds an extra `Event` for whatever comes back (`BaseAgent._handle_after_agent_callback`) and yields it after the flow is done. That is gotcha 16; it is what made the answer appear twice.
+- **`_response_with_text` exists because a single-part `Content` silently eats tool calls.** `_finalize_model_response_event` replaces the event's `content` with whatever the callback returns (`base_llm_flow.py:125-142`, every non-`None` field in `updates`), so returning a fresh one-part `Content` *deletes* any `function_call` part riding on the same response and the flow never dispatches the tool (`base_llm_flow.py:858` branches on `get_function_calls()`). The agent would stop calling tools for that turn with nothing in the trace to say why. So the text part is substituted **in place** and only *further* text parts are dropped; `function_call` and `inline_data` survive. The `_has_function_call` guard means the common case never gets here, so correctness does not rest on the guard.
+- **Cache hits re-shape nothing on disk.** A hit short-circuits inside `before_model_callback` (`cache_hit_before_model`), which returns before the model is called, so no `after_model_callback` fires at all and the only place the stamp can be added on that path is `prepend_bot_name(cached)`. The stored note is byte-identical, and the stamp never reaches any note ever written. `report_scores_after_agent` scores nothing on a hit either, as before.
 
 ### `**Sources**` provenance — `sources.py` + `agent.py`
 
@@ -257,6 +263,25 @@ Three properties of that design are load-bearing, and all three are pinned by `t
 `current_datetime` reports the ISO date, time, weekday and timezone. The model has no clock of its own: a system prompt cannot carry a date because it is fixed when the prompt is written while the server keeps running, so "today's news" meant whatever the training cutoff suggested — and a Gemini or OpenRouter fallback has no clock to fall back on either. Instruction rule 12 requires calling it before any time-sensitive answer.
 
 It is the **complement** of the cache fix, not the fix: with the cache replaying yesterday's note the model never gets a turn in which to call anything. Ungated, unlike every other toolset, because a missing clock is a *silently wrong answer* rather than a missing capability, and it needs no key, network or configuration. An unrecognised IANA zone falls back to local and **says so in the returned `timezone` field** rather than silently reasoning about the wrong day.
+
+### The name stamp — `agent.bot_name`
+
+Every answer opens with a bold label, `**Text Summarizer Agent**` by default. Rendered in code, never asked of the model, for the same reason the `**Sources**` block is: a prompt rule would cost output tokens on every turn, could be dropped or misspelled, and would sit inside `summary_content` — so the note written to the vault would carry it too.
+
+`AGENT_NAME` is the single source of truth for both `LlmAgent(name=...)` and the label, so renaming the agent renames the label with no second edit. Three states, and the difference between the first two is the whole point:
+
+| `BOT_NAME` | Result |
+|---|---|
+| **unset** (line commented out) | derived from `AGENT_NAME` → `Text Summarizer Agent` |
+| **set to a value** | used verbatim, e.g. `Second Brain` |
+| **set to empty** (`BOT_NAME=`) | stamp **off** — the control to run against when measuring what it changes |
+
+That asymmetry is deliberate and easy to get backwards: *unset* derives the label, *present-but-empty* disables the stamp. It mirrors `CACHE_ENABLED=false` as a control for a feature that is otherwise always on.
+
+Two details that are load-bearing:
+
+- **`strip_bot_name` runs before anything is scored.** A presentation artefact must not move a score — the same reasoning as `sources.summary_only` removing the Sources block. `quality.bullet_count` is indifferent either way (its regex is `(?m)^\s*-\s+`, and a bold name is not a bullet), but `source_overlap`/`fidelity` compare the response against the *user's* words, and `text_summarizer` is not one of them — so an unstripped stamp is a small permanent downward bias on **every scored turn**, which is exactly the kind of drift that makes `response_match_score` useless for the instruction edits it exists to measure (gotcha 4). Only a *leading* stamp is removed, and only the one this module writes, so a bold word the model happened to open with is left alone.
+- **`prepend_bot_name` is idempotent**, because a name printed twice at the head of one answer is precisely the duplication gotcha 16 exists to prevent, and because the same text can legitimately pass through twice (a cache hit replays, and the callback does not run on that path, but the guard is what makes the two independent).
 
 ### Langfuse scoring — `agent.py` + `eval_scoring.py`
 
@@ -678,6 +703,7 @@ run leaves the previously published site up, which looks like success.
 | `LANGFUSE_TRACE_NAME` | Trace name reported on every run. Defaults to `text_summarizer`; blank/whitespace falls back to the default. |
 | `LANGFUSE_AUTH_CHECK_TIMEOUT` | Seconds to wait for Langfuse's blocking `auth_check()` before instrumenting anyway. Default `5`. Prevents a slow Langfuse from silently disabling all tracing. |
 | `CACHE_ENABLED` | `false` bypasses the vault cache and tags traces `cache-disabled`. **Set `false` for `adk eval`.** |
+| `BOT_NAME` | Label stamped in bold at the head of every answer. **Unset** derives it from the agent's name (`Text Summarizer Agent`); a value pins it; **set to empty** turns the stamp off — the control for measuring what it changes. Note the asymmetry: unset derives, empty disables. |
 
 ## Evaluating your changes
 

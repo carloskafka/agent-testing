@@ -111,8 +111,28 @@ def rouge1_fmeasure(model_text: str, golden: str) -> float | None:
 
 
 def response_match_for_agent(user_text: str, model_text: str) -> float | None:
-    """Full pipeline: match prompt to eval case, then compute ROUGE-1."""
+    """Full pipeline: match prompt to eval case, then compute ROUGE-1.
+
+    The name stamp and the ``**Sources**`` block are presentation, not summary, so
+    both are removed before scoring. The goldens contain neither — they are the
+    bullets plus the "Saved to the second brain" line — and ROUGE-1 is word overlap,
+    so leaving them in would penalise a *perfect* answer for the presentation:
+
+        without stripping -> rouge_1_f1 = 1.00
+        with the stamp    -> rouge_1_f1 = 0.94
+
+    0.94 still clears the 0.5 threshold, so this would not fail a run — it would
+    quietly shift the baseline every instruction edit is measured against, which is
+    worse, because the number is only meaningful relative to the run before it
+    (gotcha 4). Same reasoning as `sources.summary_only` and `agent.strip_bot_name`.
+    """
     golden = response_match_score(user_text)
     if golden is None:
         return None
-    return rouge1_fmeasure(model_text, golden)
+    # Imported here rather than at module scope: this module is imported by the
+    # scoring callback, and agent imports eval_scoring, so a top-level import
+    # would be circular.
+    from .agent import strip_bot_name
+    from .sources import summary_only
+
+    return rouge1_fmeasure(strip_bot_name(summary_only(model_text or "")), golden)

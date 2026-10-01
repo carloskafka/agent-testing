@@ -243,6 +243,42 @@ def test_the_pipeline_returns_none_for_an_unknown_prompt():
     assert response_match_for_agent("never seen this prompt", "- a") is None
 
 
+def test_the_name_stamp_does_not_count_against_response_match_score():
+    """Presentation must not move the number the eval loop exists to measure.
+
+    The goldens are the bullets plus the "Saved to the second brain" line. ROUGE-1
+    is word overlap, so a stamp in the model's output that is absent from the golden
+    costs precision: measured at 1.00 without the strip and 0.94 with it, on an
+    otherwise *exact* match. That still clears the 0.5 threshold, so no run would
+    fail -- it would just move the baseline every instruction edit is compared
+    against, which is the failure mode gotcha 4 warns about.
+    """
+    prompt = _prompt_starting_with(WORKING_DOGS_PREFIX)
+    golden = response_match_score(prompt)
+    assert golden is not None
+
+    bare = response_match_for_agent(prompt, golden)
+    stamped = response_match_for_agent(prompt, f"**Text Summarizer Agent**\n\n{golden}")
+    # Not 1.0 even for the bare golden: ROUGE-1 is word overlap against a golden
+    # the model never matches exactly. What matters is that the stamp changes
+    # nothing -- an exact-equality comparison against the un-stamped score.
+    assert stamped == pytest.approx(bare, abs=1e-9)
+
+
+def test_the_sources_block_does_not_count_against_response_match_score():
+    """Same reasoning for the Sources block, which is also absent from the goldens."""
+    prompt = _prompt_starting_with(WORKING_DOGS_PREFIX)
+    golden = response_match_score(prompt)
+    assert golden is not None
+    with_sources = golden + (
+        "\n\n**Sources**\n"
+        "- [obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - dogs]]: related\n"
+    )
+    assert response_match_for_agent(prompt, with_sources) == pytest.approx(
+        response_match_for_agent(prompt, golden), abs=1e-9
+    )
+
+
 def test_the_real_eval_set_on_disk_is_loadable():
     """The shipped eval set must actually parse, or every score silently vanishes."""
     load_eval_cases.cache_clear()
