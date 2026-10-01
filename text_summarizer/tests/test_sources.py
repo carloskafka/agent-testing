@@ -255,7 +255,7 @@ def test_strip_sources_block_lets_metrics_ignore_source_lines():
     """Source lines must not be counted as summary bullets.
 
     This matters more now that source lines *are* bullets: without the strip,
-    every cited note would inflate ``quality.bullet_count``.
+    every cited note would inflate the bullet count (and so ``quality.bullet_score``).
     """
     rendered = (
         f"{BULLETS}\n\n{SOURCES_HEADING}\n"

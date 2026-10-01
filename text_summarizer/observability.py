@@ -144,6 +144,29 @@ def report_cache_outcome(*, enabled: bool, hit: bool, elapsed_ms: float) -> None
             print(f"[observability] score '{name}' failed: {exc}", file=sys.stderr)
 
 
+def report_metadata(metadata: dict) -> None:
+    """Attach metadata to the current trace. Never raises.
+
+    The home for numbers that are real measurements but are **not scores** --
+    Langfuse charts scores on 0..1, and an unbounded value beside them flattens
+    every series sharing the axis. The raw bullet count is the current case.
+
+    Separate from :func:`report_cache_outcome` only in *when* it runs: the cache
+    outcome is known before the model call, this is known after the turn.
+    Observability must never break the agent, so every failure is a line on
+    stderr and nothing more.
+    """
+    if _langfuse is None or not metadata:
+        return
+    try:
+        from langfuse import propagate_attributes
+
+        with propagate_attributes(metadata=metadata):
+            pass
+    except Exception as exc:  # pragma: no cover
+        print(f"[observability] metadata {sorted(metadata)} failed: {exc}", file=sys.stderr)
+
+
 def _auth_check_with_timeout(client, timeout: float) -> bool | None:
     """Run ``client.auth_check()`` under a timeout.
 
