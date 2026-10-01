@@ -43,6 +43,7 @@ agent-testing/
 `-- text_summarizer/            # The ADK agent package (Python)
     |-- __init__.py             # Entrypoint: loads .env, inits observability, exposes root_agent
     |-- agent.py                # The LlmAgent definition: model DI + instructions + Langfuse scoring callback
+    |-- clock.py                # current_datetime: the model has no clock of its own
     |-- eval_scoring.py         # ROUGE-1 (response_match_score) matching eval-set golden answers
     |-- obsidian_tools.py       # Optional MCP tools for an Obsidian vault
     |-- gmail_tools.py          # Optional MCP tools for read-only Gmail access
@@ -65,6 +66,7 @@ agent-testing/
         |-- test_sources.py                # **Sources** renderer unit tests
         |-- test_serve.py                  # The /vault route: serving, and traversal guards
         |-- test_agent_callback.py         # before/after agent callbacks (rewrite, cache hit/miss, key)
+        |-- test_clock_and_cache_dates.py # current_datetime, and the day-scoped cache key
         |-- test_adk_wiring.py             # In-process ADK run with a stub Llm (no API cost)
         |-- test_obsidian_tool_schema.py   # MCP JSON-Schema sanitiser (the fallback-path 400)
         |-- test_prompt_name_span.py       # after_model_callback: Langfuse prompt-name tagging
@@ -94,7 +96,7 @@ Import chain (all through `text_summarizer/__init__.py`):
 - Both paths return a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors.
 - Models referenced are the free-tier aliases used by this project; don't "fix" the names to older released models.
 
-The LlmAgent has: name `text_summarizer`, the model above, a description, bullet-point `instruction` rules, and `tools` = `build_obsidian_tools()` + `build_gmail_tools()` — each returns `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second rewrites the response's `**Sources**` block with the real vault name and the real served model (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
+The LlmAgent has: name `text_summarizer`, the model above, a description, bullet-point `instruction` rules, and `tools` = `build_clock_tools()` + `build_obsidian_tools()` + `build_gmail_tools()`. The clock is the one **ungated** toolset — it always returns its tool, because a missing clock is a silently wrong answer rather than a missing capability; the other two return `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second rewrites the response's `**Sources**` block with the real vault name and the real served model (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
 
 ### `**Sources**` provenance — `sources.py` + `agent.py`
 
@@ -231,9 +233,23 @@ The cache exists so a repeated request is answered from the vault with **zero mo
 
 A hit therefore also skips `log_conversation`: the replay happens before any tool runs, so the exchange is not recorded twice. That is what keeps `CACHE_ENABLED=false` meaningful for `adk eval`.
 
+**A relative time is not part of the text, so the key is pinned to the day** (`second_brain.cache_key_text_for`). `"summarize today news"` is the *same request* every day and a *different answer* every day, and the fingerprint is deliberately calendar-blind, so the key was byte-identical across days: four spellings all hashed to `221894b63e0fd298`, `cache_hit_before_model` replayed the first day's note on every later day, and the model never ran at all. `cache_key_text_for` appends today's ISO date **only** when `has_relative_time` finds a time word, so a same-day repeat still hits while a next-day repeat misses. Both sides route through it — the write (`cache_key_text`) and the lookup (`agent.cache_hit_before_model`) — because if either stopped, the two keys would disagree and the cache would silently never hit again.
+
+Three properties of that design are load-bearing, and all three are pinned by `test_clock_and_cache_dates.py`:
+
+- **A prompt with no relative time is byte-identical to before.** `cache_key_text_for` returns its input untouched, so **no existing note is orphaned** — the fingerprint every note already carries still matches. Widening this to a non-empty vocabulary is therefore not free: a word wrongly added to `_TIME_WORDS` re-keys every note whose prompt contains it.
+- **The scan sees the same words the fingerprint does.** Both strip a leading `summarize:`-style prefix first. Without that, `"Now summarize the cats."` matched on its sentence-initial `now` and became day-scoped for no reason; that exact string is in `test_adk_wiring`, which is how it was found.
+- **Matching is on whole words** (`[^a-z0-9]+` split, `_TIME_WORDS` membership), so `latest` qualifies and `greatest` does not. Multi-word entries match as adjacent unigrams, keeping one matching path instead of a second phrase matcher.
+
 **Pre-existing notes are not reachable by the cache and that is correct.** Notes written before this change carry a fingerprint of the model's paraphrase, which the lookup never computed, so they were already unreachable — they simply looked like misses. They are never rewritten or back-filled; re-asking the question writes a fresh, correctly keyed note.
 
 `test_adk_wiring.py` pins all of it: the write key equals the lookup key, a second identical turn costs zero model calls, the follow-up call in a turn is not short-circuited, and a later turn in the same session is not mistakenly treated as a cache opportunity.
+
+### The clock — `clock.py`
+
+`current_datetime` reports the ISO date, time, weekday and timezone. The model has no clock of its own: a system prompt cannot carry a date because it is fixed when the prompt is written while the server keeps running, so "today's news" meant whatever the training cutoff suggested — and a Gemini or OpenRouter fallback has no clock to fall back on either. Instruction rule 12 requires calling it before any time-sensitive answer.
+
+It is the **complement** of the cache fix, not the fix: with the cache replaying yesterday's note the model never gets a turn in which to call anything. Ungated, unlike every other toolset, because a missing clock is a *silently wrong answer* rather than a missing capability, and it needs no key, network or configuration. An unrecognised IANA zone falls back to local and **says so in the returned `timezone` field** rather than silently reasoning about the wrong day.
 
 ### Langfuse scoring — `agent.py` + `eval_scoring.py`
 
@@ -534,6 +550,31 @@ run leaves the previously published site up, which looks like success.
     note below on why the sidecar must go with it). Second, a *live* verification means a real
     turn after the rebuild — reading the event list out of `.adk/session.db` is how you see
     whether the answer is one event or two, and neither the trace nor the UI tells you.
+
+18. **The cache key is pinned to the day when the prompt names a relative time, and
+    both sides must do it.** `second_brain.source_fingerprint` is deliberately
+    calendar-blind — it hashes exactly the text it is given. That was correct until a
+    prompt whose *text never changes* had a *different correct answer every day*:
+    `"summarize today news"` fingerprinted to `221894b63e0fd298` on every day, so
+    `cache_hit_before_model` replayed the first day's note forever and the model never
+    ran at all. `cache_key_text_for` appends today's date **only** when
+    `has_relative_time` finds a time word.
+
+    The rule to keep: `cache_key_text_for` is the **only** entry point for turning a live
+    user message into a key, and both the write (`cache_key_text`) and the lookup
+    (`agent.cache_hit_before_model`) go through it. If either stopped, the two keys would
+    disagree and the cache would silently never hit again — which looks exactly like a
+    miss, so it costs a full turn per repeat and reports nothing.
+
+    **Widening `_TIME_WORDS` is not a free edit.** A prompt with no relative time must stay
+    byte-identical to before, or every note already in the vault is orphaned by a re-key.
+    A word added to the vocabulary re-keys every note whose prompt contains it — including
+    words that merely *mention* time (`news`, `current`, `recent`). `test_clock_and_cache_dates.py`
+    pins both halves: the relative-time prompts key per day, and the plain ones do not move.
+
+    Related: the clock tool does **not** fix this on its own. With the cache serving a hit,
+    the model never gets a turn in which to call `current_datetime` at all. The two changes
+    are complements, and the cache one is the deeper defect.
 
 ## Environment variables (see `.env.example`)
 
