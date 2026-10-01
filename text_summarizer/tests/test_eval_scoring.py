@@ -7,8 +7,8 @@ nothing here executed it, so a drift between the two scorers -- or a silent
 degradation when ``google-adk[eval]`` is missing -- would have shown up as a
 plausible-looking number and nothing else.
 
-PLAN.md §2.2 lists the whole module as "real behaviour with no test". The
-properties pinned below are the ones that would fail *silently*:
+This module was, until this file existed, real behaviour with no test at all.
+The properties pinned below are the ones that would fail *silently*:
 
 * the prompt lookup normalises like the eval loop does, so a live prompt matches
   its golden answer despite whitespace and case;

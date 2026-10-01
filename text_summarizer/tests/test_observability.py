@@ -2,8 +2,8 @@
 
 ``test_trace_identity.py`` covers ``tag_trace_identity`` and
 ``test_prompt_name_span.py`` covers ``tag_current_span``, both against a real SDK
-tracer provider. This file covers the rest of the module -- the parts PLAN.md §2.2
-lists as "real behaviour with no test", and one of them is a *documented
+tracer provider. This file covers the rest of the module -- the parts that were
+real behaviour with no test at all, and one of them is a *documented
 feature*: ``report_cache_outcome`` is the only way a cache hit is visible in
 Langfuse at all.
 
