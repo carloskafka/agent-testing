@@ -821,8 +821,9 @@ td code { white-space: nowrap; }
     <h2 id="h-overview" class="visually-hidden">Overview</h2>
     <p class="lede">
       A text-summarization agent built on Google's <b>Agent Development Kit</b>,
-      with an evaluation loop, an Obsidian <em>second brain</em>, and optional
-      read-only Gmail access.
+      with an evaluation loop, an Obsidian <em>second brain</em> that answers
+      "what did I learn on Tuesday?", clickable provenance on every answer, and
+      optional read-only Gmail and web access.
     </p>
 
     <ul class="chips">
@@ -830,6 +831,8 @@ td code { white-space: nowrap; }
       <li class="chip">Google ADK</li>
       <li class="chip chip--accent">ROUGE-1 self-scoring</li>
       <li class="chip chip--accent">Obsidian</li>
+      <li class="chip chip--accent">Daily digest</li>
+      <li class="chip">Web search</li>
     </ul>
 
     <div class="btn-row">
@@ -844,6 +847,24 @@ td code { white-space: nowrap; }
       answered <b>from the vault with no model call at all</b> — measured at
       23.5&nbsp;s for the first ask and 0.04&nbsp;s for the repeat.
     </p>
+    <p>
+      Every answer ends with a <b>Sources</b> block, and each cited note is a link
+      that opens the actual file. The block is written in code, after the model
+      answers: the model is asked only for the <em>shape</em> of a source line, and
+      the vault name, the served model and the <code>/vault/…</code> href are all
+      substituted afterwards. A note title that does not resolve to a real file is
+      dropped rather than linked, because a link asserts the note exists.
+    </p>
+    <p>
+      Ask <b>"What did you learn on Tuesday?"</b> and it reads a day out of the vault
+      instead of the conversation — so it covers notes written in sessions you never
+      saw, and it costs no model call. That reader is also a command:
+    </p>
+    <pre><code>cd text_summarizer &amp;&amp; uv run python -m text_summarizer.digest --date 2026-09-30</code></pre>
+    <p class="muted">
+      <code>--json</code> pipes cleanly into <code>jq</code>: every diagnostic goes to
+      stderr, so stdout is nothing but the document.
+    </p>
 
     <h3>Why it is built this way</h3>
     <p>
@@ -851,6 +872,16 @@ td code { white-space: nowrap; }
       agent's instructions in <code>agent.py</code>, run ADK evals, and watch
       <code>response_match_score</code> move. That is the actual point of the repo —
       everything else exists to make the loop measurable.
+    </p>
+    <p>
+      Two criteria, doing different jobs. <code>tool_trajectory_avg_score</code> is
+      the hard gate: it is 1.0 or nothing, and it fails the moment the agent stops
+      writing to the vault. <code>response_match_score</code> is ROUGE-1 word overlap
+      — a way to catch wording regressions, <b>not</b> a measure of whether an answer
+      got better. The auto-optimizer decides on the second one, which means a
+      rewrite that deletes the persistence rules would score
+      <em>higher</em> and get kept, so the loop refuses any rewrite that drops a
+      rule before writing it.
     </p>
 
     <!-- End to end ------------------------------------------------------------>
@@ -1085,6 +1116,28 @@ breeds, varying in size, color, and temperament.</code></pre>
             </dd>
           </div>
           <div class="var">
+            <dt><code>SEARXNG_URL</code><br><code>WEB_SEARCH_ENABLED</code></dt>
+            <dd>
+              A self-hosted SearXNG, giving the agent a third retrieval tier behind
+              the vault. Set the host to <b>your SearXNG container's service name</b>
+              on the shared <code>agent-net</code> bridge — find it with
+              <code>docker network inspect agent-net</code>.
+              <code>WEB_SEARCH_ENABLED=false</code> turns the tools off while leaving
+              the URL alone, which is what <code>adk eval</code> wants: live results
+              change daily and would make the score measure the day rather than your
+              edit.
+            </dd>
+          </div>
+          <div class="var">
+            <dt><code>BOT_NAME</code></dt>
+            <dd>
+              The bold label stamped at the head of every answer. Unset derives it
+              from the agent's name; a value pins it; <b>set it to empty to turn the
+              stamp off</b>, which is the control for measuring what it changes. The
+              label is never persisted into your notes.
+            </dd>
+          </div>
+          <div class="var">
             <dt><code>LANGFUSE_PUBLIC_KEY</code><br><code>LANGFUSE_SECRET_KEY</code><br><code>LANGFUSE_BASE_URL</code></dt>
             <dd>
               A trace per turn: latency, cache hit/miss, quality scores.
@@ -1132,13 +1185,19 @@ breeds, varying in size, color, and temperament.</code></pre>
           </tr>
           <tr>
             <td><b>Langfuse</b></td>
-            <td>A trace per turn: latency, cache hit/miss, quality scores</td>
+            <td>A trace per turn: latency, cache hit/miss, and three quality
+              scores on a 0–1 scale</td>
             <td><code>LANGFUSE_*</code></td>
           </tr>
           <tr>
             <td><b>Gmail</b></td>
             <td>Read-only inbox tools</td>
             <td><code>GOOGLE_CLIENT_ID</code>,<br><code>GOOGLE_CLIENT_SECRET</code>,<br><code>GOOGLE_REFRESH_TOKEN</code></td>
+          </tr>
+          <tr>
+            <td><b>SearXNG</b></td>
+            <td>Web search and a guarded page fetch, behind the vault</td>
+            <td><code>SEARXNG_URL</code></td>
           </tr>
           <tr>
             <td><b>Obsidian</b></td>
@@ -1179,7 +1238,11 @@ breeds, varying in size, color, and temperament.</code></pre>
         Every note records a fingerprint of the request, and a repeat of that request
         is answered from the vault with <b>no model call</b>. Both sides compute the
         key in code from the same field, because a model-supplied key is paraphrased
-        per run and would never match.
+        per run and would never match. A prompt naming a relative time is keyed
+        <b>per day</b>: "summarize today's news" is the same sentence every morning
+        and a different answer every morning, so folding them together would replay
+        the first day's answer forever. A prompt with no relative time is
+        byte-identical to before, so nothing already in your vault is orphaned.
       </p>
     </div>
 
@@ -1188,7 +1251,11 @@ breeds, varying in size, color, and temperament.</code></pre>
       <p class="card__body">
         Each note records the model that served the turn and the vault it landed in,
         read from the live invocation rather than passed in by the model. Unresolvable
-        provenance is omitted rather than guessed.
+        provenance is omitted rather than guessed. Titles resolve against filenames
+        <em>and</em> frontmatter aliases, so the readable name the agent cites and
+        the name on disk are different strings and both still link. A note that
+        cannot be found stays a plain <code>[[wikilink]]</code> — no dead link is
+        ever emitted.
       </p>
     </div>
 
@@ -1268,7 +1335,49 @@ breeds, varying in size, color, and temperament.</code></pre>
       <p class="card__title">Eval scores look great but nothing is being tested</p>
       <p class="card__body">
         Run evals with <code>CACHE_ENABLED=false</code>. Otherwise the agent replays
-        a cached note and the loop measures nothing.
+        a cached note and the loop measures nothing. <code>WEB_SEARCH_ENABLED=false</code>
+        for the same reason: live results change daily.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title"><code>cannot reach the configured SearXNG instance</code></p>
+      <p class="card__body">
+        The host in <code>SEARXNG_URL</code> has to be your SearXNG container's
+        <b>service name</b> on <code>agent-net</code>, not a hostname you invented —
+        run <code>docker network inspect agent-net</code> and copy what it lists. A
+        self-hosted instance sits on a private Docker address, which is expected and
+        allowed here; only link-local, the cloud-metadata range, is refused.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">The web tier looks configured but nothing changes</p>
+      <p class="card__body">
+        This is the <b>silent</b> failure. A search or fetch that errors is returned
+        to the model as data rather than raised, so the agent falls back to its own
+        knowledge, the answer still looks fine, and the trace shows a healthy turn.
+        Check the two calls really happened — <code>web_search</code> and
+        <code>web_fetch</code> in the session's event list — rather than trusting the
+        answer.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">An answer has no Sources block</p>
+      <p class="card__body">
+        The block is written in code from source lines the model emitted, so a turn
+        that found nothing has nothing to render. If the answer clearly came from
+        your vault, the likely cause is a stale container:
+        <code>docker compose up -d --build</code>, and confirm the deployed copy
+        matches your tree. Gotcha 17 in <code>AGENTS.md</code> is this exact trap.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">A turn ends with no answer at all</p>
+      <p class="card__body">
+        Usually the free fallback models: Gemini rate-limits, and the OpenRouter
+        <code>:free</code> tier often does too, so the turn dies mid-way. Read the
+        container log — <code>docker compose logs agent-testing</code> — and look for
+        <code>failed with status 429</code>. A paid OpenRouter key is the fix; no
+        amount of prompt editing is.
       </p>
     </div>
   </section>
