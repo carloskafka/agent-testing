@@ -68,6 +68,11 @@ agent-testing/
         |-- test_serve.py                  # The /vault route: serving, and traversal guards
         |-- test_agent_callback.py         # before/after agent callbacks (rewrite, cache hit/miss, key)
         |-- test_bot_name.py               # The **Name** stamp: derivation, idempotence, and the metrics control
+        |-- test_gmail_oauth.py            # The one-time refresh-token mint, and its failure modes
+        |-- test_model_selection.py        # Model choice: aliases, the ":free" filter, the fallback chain
+        |-- test_obsidian_toolset.py       # Toolset gating and the schema sanitiser, per connection
+        |-- test_scoring.py                # The quality.* heuristics, computed directly
+        |-- test_second_brain_tools.py     # save/log/find as the *model* calls them (arg shapes)
         |-- test_clock_and_cache_dates.py # current_datetime, and the day-scoped cache key
         |-- test_adk_wiring.py             # In-process ADK run with a stub Llm (no API cost)
         |-- test_obsidian_tool_schema.py   # MCP JSON-Schema sanitiser (the fallback-path 400)
