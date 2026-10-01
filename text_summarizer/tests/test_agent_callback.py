@@ -245,17 +245,41 @@ def test_scoring_is_skipped_on_a_cache_hit(monkeypatch):
 
 
 def test_quality_scores_ignore_source_lines(monkeypatch):
-    """Source lines are not summary bullets, so bullet_count stays accurate."""
+    """Source lines are not summary bullets, so the count stays accurate."""
     client = _Client()
     monkeypatch.setattr(agent_module, "langfuse_client", lambda: client)
     monkeypatch.setattr(agent_module, "_current_trace_id", lambda: "0" * 32)
     monkeypatch.setenv("VAULT_NAME", "ck")
     events = [_event(_model_text("Dogs Overview"), model_version="m1")]
     agent_module.report_scores_after_agent(_context(events))
-    # Two summary bullets, so the raw count is 2 -- not 3, even though every
-    # source line is a bullet of its own.
-    assert client.scores["quality.bullet_count"] == 2
-    assert "quality.fidelity" in client.scores
+    # Two summary bullets, so the count is 2 -- not 3, even though every source
+    # line is a bullet of its own. 0.6 is two bullets' distance from the ideal 4.
+    assert client.scores["quality.bullet_score"] == 0.6
+    assert "quality.format_and_recall" in client.scores
+
+
+def test_the_raw_bullet_count_is_metadata_and_not_a_score(monkeypatch):
+    """The count goes where an unbounded number belongs, and nowhere else.
+
+    It used to be posted as the score ``quality.bullet_count``, so a 9-bullet
+    answer put a 9.0 in the same dashboard as two series capped at 1.0 and made
+    both of them unreadable. Metadata keeps the number findable without putting
+    it on an axis it cannot share -- and the negative assertion is the load-
+    bearing half, because putting the count back on the score axis is exactly
+    the regression, and it would not fail any other test here.
+    """
+    client = _Client()
+    metadata = {}
+    monkeypatch.setattr(agent_module, "langfuse_client", lambda: client)
+    monkeypatch.setattr(agent_module, "_current_trace_id", lambda: "0" * 32)
+    monkeypatch.setattr(agent_module, "report_metadata", lambda m: metadata.update(m))
+    events = [_event(_model_text("Dogs Overview"), model_version="m1")]
+    agent_module.report_scores_after_agent(_context(events))
+
+    assert metadata["bullet_count"] == "2"
+    assert not [n for n in client.scores if "bullet_count" in n], (
+        "the count is back on the score axis: " + ", ".join(sorted(client.scores))
+    )
 
 
 def test_a_broken_renderer_leaves_the_response_untouched(monkeypatch):

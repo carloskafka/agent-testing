@@ -290,8 +290,11 @@ duplicates; and re-rendering an already-rendered block reproduces it byte for by
 - Every turn records a `cache-hit` / `cache-miss` / `cache-disabled` tag plus
   `cache.outcome` / `cache.lookup_ms` metadata and scores, so cached vs live
   traces can be told apart.
-- `quality.bullet_count`, `quality.source_overlap`, `quality.fidelity` are
-  deterministic heuristics computed per call.
+- `quality.bullet_score`, `quality.lexical_recall`, `quality.format_and_recall`
+  are deterministic heuristics computed per call, and all three sit on a 0..1
+  scale so they can share one dashboard. The raw bullet count is **not** a score
+  (it is unbounded) and is recorded as trace metadata instead. None of them
+  checks faithfulness: `lexical_recall` is word overlap, stopwords included.
 - `CACHE_ENABLED=false` bypasses the vault cache (required for `adk eval`).
 
 ## Vault Selection

@@ -17,6 +17,7 @@ from .gmail_tools import build_gmail_tools
 from .observability import (
     langfuse_client,
     report_cache_outcome,
+    report_metadata,
     tag_current_span,
     tag_trace_identity,
 )
@@ -176,13 +177,13 @@ def strip_bot_name(text: str, name: str | None = None) -> str:
 
     A presentation artefact must not move a score, which is the same reasoning
     behind :func:`sources.summary_only` stripping the ``**Sources**`` block.
-    ``quality.bullet_count`` is indifferent either way (its regex is
+    ``quality.bullet_score`` is indifferent either way (its regex is
     ``(?m)^\\s*-\\s+``, and a bold name is not a bullet), but
-    ``source_overlap``/``fidelity`` compare the response against the *user's* words
-    — and ``text_summarizer`` is not one of them, so an unstripped stamp is a small
-    permanent downward bias on every scored turn. Stripping also keeps
-    ``response_match_score`` comparable across the instruction edits the eval loop
-    makes, which is the only reason that number exists (gotcha 4).
+    ``lexical_recall``/``format_and_recall`` compare the response against the
+    *user's* words — and ``text_summarizer`` is not one of them, so an unstripped
+    stamp is a small permanent downward bias on every scored turn. Stripping also
+    keeps ``response_match_score`` comparable across the instruction edits the
+    eval loop makes, which is the only reason that number exists (gotcha 4).
 
     Only a *leading* stamp is removed, and only the one this module writes, so a
     bold word the model happened to start its answer with is left alone.
@@ -323,33 +324,55 @@ def _mark_cache(callback_context, *, enabled: bool, hit: bool, elapsed_ms: float
     report_cache_outcome(enabled=enabled, hit=hit, elapsed_ms=elapsed_ms)
 
 
+def _bullet_count(text: str) -> int:
+    """Number of ``- `` bullets in a summary, with the Sources block removed.
+
+    Kept separate because the *count* is a real thing to record and is **not a
+    score**: it is an unbounded integer, and a Langfuse score charted against
+    0..1 siblings is unreadable. It is reported as trace metadata instead
+    (see ``_report_scores_after_agent``), and this is the single definition both
+    that and the score below agree on.
+    """
+    return len(re.findall(r"(?m)^\s*-\s+", summary_only(text or "")))
+
+
 def _score_generation(user_text: str = "", model_text: str = "") -> dict:
     """Compute cheap, deterministic quality metrics for the agent response.
 
-    Returns a name->score map that is pushed to Langfuse per call:
-      - bullet_count: number of '-' bullet points (0..1 normalized, ideal 3-5)
-      - source_overlap: fraction of source words present in the summary
-      - fidelity: capped bullets + overlap combined 0..1
+    Returns a name->score map pushed to Langfuse per call. **Every value is in
+    0..1**, because these land in one dashboard and a 0..20 member makes the rest
+    of it unreadable:
+
+      - ``bullet_score``: how close the bullet count is to the ideal 3-5 band
+        (1.0 inside it, decaying 0.2 per bullet either side of 4);
+      - ``lexical_recall``: fraction of the *source's* words the summary reuses;
+      - ``format_and_recall``: the mean of the two above.
+
+    The raw bullet count is deliberately **not** in here; see :func:`_bullet_count`.
+
+    Two of these names changed, because the old ones said something the values do
+    not. ``source_overlap`` measured recall against the source, and ``fidelity``
+    was the mean of a formatting heuristic and that recall -- neither word was
+    groundedness, and a chart labelled *fidelity* invites the reader to believe a
+    hallucination check ran here. None did. ``format_and_recall`` says what it is
+    actually made of.
 
     ``model_text`` is passed through ``summary_only()`` first so the Sources
     block is not mistaken for summary bullets.
     """
-    model_text = summary_only(model_text or "")
-    bullets = re.findall(r"(?m)^\s*-\s+", model_text or "")
-    n = len(bullets)
+    n = _bullet_count(model_text)
     bullet_score = 1.0 if 3 <= n <= 5 else max(0.0, 1.0 - abs(n - 4) * 0.2)
 
     source_words = set(re.findall(r"\b\w+\b", (user_text or "").lower()))
-    model_words = set(re.findall(r"\b\w+\b", (model_text or "").lower()))
+    model_words = set(re.findall(r"\b\w+\b", summary_only(model_text or "").lower()))
     overlap = 0.0
     if source_words and model_words:
         overlap = len(source_words & model_words) / len(source_words)
 
-    fidelity = min(1.0, (bullet_score + overlap) / 2)
     return {
-        "bullet_count": round(n, 3),
-        "source_overlap": round(overlap, 3),
-        "fidelity": round(fidelity, 3),
+        "bullet_score": round(bullet_score, 3),
+        "lexical_recall": round(overlap, 3),
+        "format_and_recall": round(min(1.0, (bullet_score + overlap) / 2), 3),
     }
 
 
@@ -590,6 +613,11 @@ def _report_scores_after_agent(callback_context) -> None:
             )
         except Exception as exc:  # pragma: no cover - observability must never break the agent
             print(f"[observability] score '{name}' failed: {exc}", file=sys.stderr)
+
+    # The bullet *count* is a real measurement but not a score: it is unbounded,
+    # so charting it beside the 0..1 scores would flatten them. Metadata is the
+    # right home -- findable when you want the exact number, never averaged.
+    report_metadata({"bullet_count": str(_bullet_count(model_text))})
 
     rouge1 = response_match_for_agent(user_text, model_text)
     if rouge1 is not None:

@@ -405,7 +405,7 @@ def test_a_cache_hit_carries_the_name_and_leaves_the_note_untouched(monkeypatch,
 def test_the_metrics_never_see_the_name(monkeypatch):
     """A presentation artefact must not move a score.
 
-    ``source_overlap``/``fidelity`` compare the response against the *user's*
+    ``lexical_recall``/``format_and_recall`` compare the response against the *user's*
     words; ``Text Summarizer Agent`` is not one of them, so an unstripped stamp
     is a small permanent downward bias. ``response_match_score`` is the same
     argument: it is the number the eval loop compares instruction edits on.

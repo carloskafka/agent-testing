@@ -255,7 +255,7 @@ def test_a_non_http_web_line_is_dropped_even_if_listed():
 
 
 def test_summary_only_removes_web_lines():
-    """Otherwise web citations inflate ``quality.bullet_count``."""
+    """Otherwise web citations inflate the bullet count (and so ``quality.bullet_score``)."""
     raw = "\n".join(
         [
             "- Dogs are domesticated mammals.",

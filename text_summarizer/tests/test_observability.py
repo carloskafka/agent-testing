@@ -20,6 +20,9 @@ environment -- and the answer in every case has to be "return quietly".
 
 from __future__ import annotations
 
+import contextlib
+
+import langfuse
 import pytest
 from text_summarizer import observability
 from text_summarizer.observability import (
@@ -29,6 +32,7 @@ from text_summarizer.observability import (
     langfuse_client,
     prompt_name,
     report_cache_outcome,
+    report_metadata,
     setup_observability,
     trace_name,
 )
@@ -64,6 +68,11 @@ class RecordingClient:
 
 
 # --- the two name helpers -----------------------------------------------------
+
+
+def _nullcontext():
+    """``propagate_attributes`` is used as a context manager; this stands in for it."""
+    return contextlib.nullcontext()
 
 
 def test_the_default_names_are_the_agent_name():
@@ -135,6 +144,58 @@ def test_a_raising_client_does_not_break_the_turn(monkeypatch, capsys):
     monkeypatch.setattr(observability, "_langfuse", Broken())
     report_cache_outcome(enabled=True, hit=True, elapsed_ms=1.0)
     assert "score 'cache.hit' failed" in capsys.readouterr().err
+
+
+# --- trace metadata: measurements that are not scores --------------------------
+
+
+def test_no_client_means_metadata_is_a_noop_too():
+    """Same posture as the cache path: unconfigured must not raise.
+
+    Reached on every turn of a deployment with no Langfuse keys, which is the
+    default this project ships with, so "it raises when unconfigured" would be a
+    crash in the scoring callback rather than a missing chart.
+    """
+    report_metadata({"bullet_count": "4"})
+
+
+def test_an_empty_mapping_is_not_sent(monkeypatch):
+    """A no-op call should do nothing at all, not an empty round trip.
+
+    Cheap, but ``propagate_attributes`` is entered on the scoring path and an
+    empty metadata dict is a caller bug worth not papering over in the trace.
+    """
+    calls = []
+
+    def record(**kwargs):
+        calls.append(kwargs)
+        return _nullcontext()
+
+    monkeypatch.setattr(observability, "_langfuse", object())
+    monkeypatch.setattr(langfuse, "propagate_attributes", record)
+
+    report_metadata({})
+    assert calls == []
+    report_metadata({"bullet_count": "4"})
+    assert calls == [{"metadata": {"bullet_count": "4"}}]
+
+
+def test_a_raising_propagate_does_not_break_the_turn(monkeypatch, capsys):
+    """Observability must never take down a turn that already produced an answer.
+
+    This runs in the scoring callback, i.e. *after* the summary is written and
+    the note is saved. An exception here would surface as a failed request over a
+    turn that succeeded, which is the worst possible place to lose an error.
+    """
+
+    def boom(**_kwargs):
+        raise RuntimeError("langfuse is down")
+
+    monkeypatch.setattr(observability, "_langfuse", object())
+    monkeypatch.setattr(langfuse, "propagate_attributes", boom)
+
+    report_metadata({"bullet_count": "4"})
+    assert "metadata ['bullet_count'] failed" in capsys.readouterr().err
 
 
 # --- the auth check timeout ---------------------------------------------------
