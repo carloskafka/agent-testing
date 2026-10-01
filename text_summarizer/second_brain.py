@@ -114,19 +114,126 @@ def resolve_vault_root(configured: str | None = None) -> str:
 VAULT_ROOT = resolve_vault_root()
 
 
-def source_fingerprint(text: str) -> str:
-    """Deterministic, whitespace/prefix-insensitive fingerprint of user source text."""
-    normalized = " ".join((text or "").strip().lower().split())
-    for prefix in (
-        "summarize: ",
-        "summarize the following: ",
-        "please summarize: ",
-        "can you summarize: ",
-        "summarize ",
-    ):
+#: Leading phrases that introduce the text to summarise rather than being part of
+#: it. Stripped before fingerprinting, and before the relative-time scan so the two
+#: examine the same words. Order matters: the longer forms come first, since
+#: ``"summarize "`` would otherwise match the start of ``"summarize the following: "``.
+_SUMMARIZE_PREFIXES = (
+    "summarize the following: ",
+    "please summarize: ",
+    "can you summarize: ",
+    "summarize: ",
+    "summarize ",
+)
+
+
+def _strip_summarize_prefix(normalized: str) -> str:
+    """Remove one leading summarise-introducing phrase from ``normalized`` text."""
+    for prefix in _SUMMARIZE_PREFIXES:
         if normalized.startswith(prefix):
-            normalized = normalized[len(prefix):]
-            break
+            return normalized[len(prefix) :]
+    return normalized
+
+
+#: Words naming a time relative to now. This exists because a relative time
+#: reference is *not* part of the text being summarised: "summarize today news"
+#: is the same request every day and a different answer, so keying it only on the
+#: text made the cache serve the first day's note forever.
+_TIME_WORDS = frozenset(
+    {
+        "today",
+        "tomorrow",
+        "yesterday",
+        "tonight",
+        "overnight",
+        "this week",
+        "this month",
+        "this year",
+        "past week",
+        "past month",
+        "past year",
+        "last week",
+        "last month",
+        "last night",
+        "last year",
+        "latest",
+        "recent",
+        "recently",
+        "breaking",
+        "current",
+        "currently",
+        "right now",
+        "at the moment",
+        "news",
+        "headlines",
+    }
+)
+
+#: Units the time-word match runs on: letters and digits only, so hyphens and
+#: punctuation separate and ``"todays"`` does not match ``"today"``.
+_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def has_relative_time(text: str) -> bool:
+    """True when ``text`` names a time relative to now.
+
+    Matches whole words against :data:`_TIME_WORDS`, so ``"latest"`` qualifies and
+    ``"greatest"`` does not. Multi-word entries are matched as adjacent unigrams
+    (``this week`` = ``this`` + ``week``), which keeps one matching path instead of
+    a separate phrase matcher.
+
+    Only words in the part of the message *after* any ``summarize:``-style prefix
+    are considered -- which is what :func:`source_fingerprint` normalises away
+    before hashing, so the two must look at the same words. Without that,
+    ``"Now summarize the cats."`` matched on its sentence-initial ``"now"`` and the
+    prompt became day-scoped for no reason; that exact string is in
+    ``test_adk_wiring``, which is how it was found.
+    """
+    words = _WORD_SPLIT_RE.split(
+        _strip_summarize_prefix(" ".join((text or "").strip().lower().split()))
+    )
+    words = [w for w in words if w]
+    if not words:
+        return False
+
+    single = {w for w in _TIME_WORDS if " " not in w}
+    phrases = [p.split() for p in _TIME_WORDS if " " in p]
+
+    for index, word in enumerate(words):
+        if word in single:
+            return True
+        for phrase in phrases:
+            span = len(phrase)
+            if words[index : index + span] == phrase:
+                return True
+    return False
+
+
+def cache_key_text_for(source_text: str, *, today: str | None = None) -> str:
+    """The text the cache key is computed from, with relative times pinned to a day.
+
+    Returns ``source_text`` unchanged unless it names a relative time, in which case
+    today's date is appended. ``"summarize today news"`` therefore keys differently
+    on each day while a same-day repeat still hits the cache, and a prompt with no
+    relative time stays byte-identical to before -- so every note already in the
+    vault keeps matching its own fingerprint and nothing is orphaned.
+
+    ``today`` is injectable for the tests; it is ISO-8601, as ``date.today()`` is.
+    """
+    if not has_relative_time(source_text):
+        return source_text or ""
+    stamp = today or date.today().isoformat()
+    return f"{source_text or ''} [as of {stamp}]"
+
+
+def source_fingerprint(text: str) -> str:
+    """Deterministic, whitespace/prefix-insensitive fingerprint of user source text.
+
+    Deliberately unaware of the calendar: it fingerprints exactly the text it is
+    given. Callers that hold a live user message go through
+    :func:`cache_key_text_for` first, so both the write and the lookup agree.
+    """
+    normalized = _strip_summarize_prefix(" ".join((text or "").strip().lower().split()))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -311,8 +418,15 @@ def cache_key_text(tool_context=None, fallback: str = "") -> str:
     used, which keeps a plain function call working at the cost of a possible
     miss. A miss is the safe direction: it re-runs the model, whereas a wrong hit
     would replay an unrelated note.
+
+    The raw message is then passed through :func:`cache_key_text_for`, which pins a
+    prompt naming a *relative* time to the day it was asked. Without it,
+    ``"summarize today news"`` fingerprinted identically on every day and the
+    lookup served the first day's note forever. Both sides must go through here --
+    the write below and the read in ``agent.cache_hit_before_model`` -- or they
+    disagree and the cache silently never hits again.
     """
-    return user_text_from_context(tool_context) or (fallback or "")
+    return cache_key_text_for(user_text_from_context(tool_context) or (fallback or ""))
 
 
 def note_provenance(tool_context=None) -> dict[str, str]:

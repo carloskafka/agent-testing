@@ -9,6 +9,7 @@ from google.adk.tools import FunctionTool
 from google.genai.types import Content, Part
 from opentelemetry import trace as otel_trace
 
+from .clock import build_clock_tools
 from .eval_scoring import response_match_for_agent
 from .gmail_tools import build_gmail_tools
 from .observability import (
@@ -20,6 +21,7 @@ from .observability import (
 from .obsidian_tools import build_obsidian_tools
 from .second_brain import (
     VAULT_ROOT,
+    cache_key_text_for,
     find_cached_summary,
     log_conversation,
     save_summary_to_second_brain,
@@ -197,7 +199,11 @@ def cache_hit_before_model(callback_context, llm_request):
         return None
 
     started = time.perf_counter()
-    cached = find_cached_summary(user_text)
+    # Pinned to the day, so a prompt naming a relative time ("today", "latest") does
+    # not replay yesterday's note. Must be the same helper the write side uses --
+    # second_brain.cache_key_text applies it -- or the two keys disagree and the
+    # cache never hits again.
+    cached = find_cached_summary(cache_key_text_for(user_text))
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     _mark_cache(callback_context, enabled=True, hit=bool(cached), elapsed_ms=elapsed_ms)
 
@@ -474,10 +480,12 @@ Rules:
 8. ALWAYS persist the summary: after producing the summary, call save_summary_to_second_brain with a short descriptive title, the bullet-point content, and a comma-separated list of the 2-5 main topics it covers. This keeps the vault graph connected and enables zero-cost dedup on repeated requests. Pass ONLY those three arguments - do not repeat the user's text back in any argument; the tool records the request itself for deduplication, and echoing the text back wastes a large number of output tokens on every call.
 9. ALWAYS log the conversation: after producing and persisting your final answer, call log_conversation with the user's exact message and your final answer, so every exchange is recorded in the vault's chat log for later recall.
 10. Mention in your final answer that the summary was saved to the second brain and its title.
-11. When the user asks about their emails, use the Gmail tools: gmail_search or gmail_get_latest_messages to find relevant messages, then gmail_read or gmail_get_thread to read full contents. Summarize what you find as bullet points using the rules above. Never invent email content - only report what the tools actually return.""",
+11. When the user asks about their emails, use the Gmail tools: gmail_search or gmail_get_latest_messages to find relevant messages, then gmail_read or gmail_get_thread to read full contents. Summarize what you find as bullet points using the rules above. Never invent email content - only report what the tools actually return.
+12. KNOW THE DATE BEFORE YOU ANSWER: you have no clock of your own, so any question involving today, yesterday, this week, latest, current, or a date range requires calling current_datetime FIRST and using the date it returns. Never guess the date, and never rely on your training data for anything time-sensitive.""",
     tools=[
         FunctionTool(save_summary_to_second_brain),
         FunctionTool(log_conversation),
+        *build_clock_tools(),
         *build_obsidian_tools(),
         *build_gmail_tools(),
     ],
