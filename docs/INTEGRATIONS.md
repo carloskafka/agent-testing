@@ -151,7 +151,10 @@ subprocess:
 | `web_fetch` | Fetch and sanitise one page's text |
 
 ```env
-SEARXNG_URL=http://searxng:8080
+# The host must be the SERVICE NAME of your SearXNG container on agent-net --
+# check `docker network inspect agent-net`. This repo's own SearXNG is
+# `searxng-core`; a wrong name does not fail loudly, it just stops being a tier.
+SEARXNG_URL=http://searxng-core:8080
 ```
 
 Unset means **no web tools at all** and the agent is unchanged — a summarizer that

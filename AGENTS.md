@@ -422,7 +422,11 @@ A third retrieval tier, so the agent answers from **vault → web → its own kn
 
 Deliberately **not** a third MCP server. The two existing MCP toolsets wrap servers we do not own; this is two HTTP GETs against a URL *we* configure, so there is no subprocess, no session pool, and no schema union for `sanitize_tool_schema` to repair. It copies their *gating* discipline instead — including returning errors as **data**, never raising, so the model can fall through to its own knowledge instead of the turn dying.
 
-SearXNG is a **separate compose project**, reached over a shared external docker network (`agent-net`) as a service name rather than a published port, so nothing is exposed on the LAN for the agent's sake. `run.sh` creates that network idempotently, and only when `SEARXNG_URL` is set. `WEB_SEARCH_ENABLED=false` removes the tools while leaving the URL alone — which is what eval runs want, because live results change daily and would make `response_match_score` measure the day rather than the instruction edit (same reasoning as `CACHE_ENABLED`).
+SearXNG is a **separate compose project**, reached over a shared external docker network (`agent-net`) as a service name rather than a published port, so nothing is exposed on the LAN for the agent's sake.
+
+**The hostname in the docs was wrong, and the failure it causes is silent.** `.env.example` and `docs/INTEGRATIONS.md` said `http://searxng:8080`; the service on `agent-net` is `searxng-core`, so that name does not resolve — `Name or service not known`. What makes this worth recording rather than just fixing is the consequence: `web_search` returns every failure as **data**, never an exception, so the model reads the error and falls through to its own knowledge. The tools stay in the list, the agent answers, nothing is logged as broken, and the web tier is simply not a tier. Verified both ways from inside the agent container: `searxng-core:8080` returns HTTP 200 with 10 results, `searxng:8080` does not resolve. Read the host off `docker network inspect agent-net` rather than copying a name from any document, including this one.
+
+`run.sh` creates that network idempotently, and only when `SEARXNG_URL` is set. `WEB_SEARCH_ENABLED=false` removes the tools while leaving the URL alone — which is what eval runs want, because live results change daily and would make `response_match_score` measure the day rather than the instruction edit (same reasoning as `CACHE_ENABLED`).
 
 **Web pages are untrusted input, unlike the user's text, the vault or their mail.** Anyone can publish a page that ranks for a query, and its text lands verbatim in the model's context. Three independent defences, all required:
 
@@ -825,7 +829,7 @@ run leaves the previously published site up, which looks like success.
 | `OBSIDIAN_VAULT_PATH` | Optional MCP over stdio (set EXACTLY ONE of the two) |
 | `OBSIDIAN_MCP_URL` | Optional MCP over HTTP, e.g. `http://127.0.0.1:37842/mcp` |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN` | Optional read-only Gmail MCP. All three must be set; mint the refresh token once with `text_summarizer/gmail_oauth.py` |
-| `SEARXNG_URL` | Optional web-search tier. Unset means no web tools. Under Docker the agent reaches a self-hosted SearXNG (a **separate** compose project) as `http://searxng:8080` over the shared `agent-net` bridge |
+| `SEARXNG_URL` | Optional web-search tier. Unset means no web tools. Under Docker the agent reaches a self-hosted SearXNG (a **separate** compose project) as a service name over the shared `agent-net` bridge — here `http://searxng-core:8080`, and **the host must be your SearXNG container's service name**. See below. |
 | `WEB_SEARCH_ENABLED` | `false` removes the web tools while leaving `SEARXNG_URL` in place. Eval runs want this: live results change daily, so they would make `response_match_score` measure the day |
 | `SECOND_BRAIN_VAULT` | Absolute path of the directory holding the vault(s) for direct writes; defaults to `/vault`. Under Docker point this at the vault's **parent** (`/vaults`) so the real name survives — see "Which vault is active" |
 | `OBSIDIAN_VAULT_NAME` | Picks the active vault by directory name when the parent holds several. Never guessed. `./run.sh` can prompt for it and writes it to `.env` |
@@ -838,6 +842,57 @@ run leaves the previously published site up, which looks like success.
 | `LANGFUSE_AUTH_CHECK_TIMEOUT` | Seconds to wait for Langfuse's blocking `auth_check()` before instrumenting anyway. Default `5`. Prevents a slow Langfuse from silently disabling all tracing. |
 | `CACHE_ENABLED` | `false` bypasses the vault cache and tags traces `cache-disabled`. **Set `false` for `adk eval`.** |
 | `BOT_NAME` | Label stamped in bold at the head of every answer. **Unset** derives it from the agent's name (`Text Summarizer Agent`); a value pins it; **set to empty** turns the stamp off — the control for measuring what it changes. Note the asymmetry: unset derives, empty disables. |
+
+## MVP status
+
+The work is tracked as independent, individually mergeable slices, each of which
+depends on nothing and can be reverted alone. Status verified against `main` by
+checking for the artefact each one is supposed to produce -- not by reading a
+claim, which is how the "documentation is wrong" problem starts.
+
+| MVP | Slice | Tier | Status | Evidence |
+|---|---|---|---|---|
+| 1 | The Gate — CI on every push | A | shipped | `.github/workflows` gates ruff + mypy + pytest |
+| 2 | Documentation Truth | A | shipped | #23 |
+| 3 | Doc-Drift Ratchet — makes 2 permanent | A | **remaining** | no `tests/test_doc_drift.py` |
+| 4 | `tools/` pipeline tests | A | shipped | #20 |
+| 5 | Untrusted input as paths and YAML | B | shipped | `_safe_name`, `_yaml_str`, `_assert_in_vault` |
+| 6 | Shell and bootstrap | B | shipped | `vaults.py`, `run.sh` menu |
+| 7 | Durable writes | B | shipped | #21 |
+| 8 | The untested half | C | shipped | #19 |
+| 9 | `doctor` — is this deployment wired up? | C | **remaining** | no `doctor.py` |
+| 10 | Turn metrics — cache lookup as its own span | C | **remaining** | cost visible only as a score, never in the waterfall |
+| 11 | Degradation banner | C | **remaining** | three silent failure modes, no signal |
+| 12 | Cache index — O(1) fingerprint lookup | C | deferred | a stale index is a silent wrong answer; the bounded scan measures <1 ms |
+| 13 | Streaming guard | C | **remaining** | `partial` guard present, no streaming test |
+| 14 | Vault semantic retrieval | C | **remaining** | `search_semantic` is advertised by the server and absent from our allow-list |
+| 15 | Digest mode | C | shipped | #22 |
+| 16 | Metric truth — scores that say what they measure | D | shipped | #25 |
+| 17 | One turn-text function | D | **remaining** | the question is answered four times, in two shapes |
+| 18 | Ports and factories | D | **remaining** | callbacks testable without ADK and `SimpleNamespace` |
+| 19 | `Settings` object | D | **remaining** | five modules each read the environment |
+
+**Tier A** changes no behaviour and can land in any order. **Tier B** closes live
+defects. **Tier C** is new capability, purely additive. **Tier D** is refactoring:
+the payoff is testability, not behaviour, and it goes last.
+
+Three live defects are not in the catalogue because they were found after it was
+written, and each is its own PR:
+
+* **the documented SearXNG host does not resolve** — `searxng:8080` vs the real
+  service name `searxng-core`. Silent, because `web_search` returns errors as
+  data, so the tier degrades to the model's own knowledge with nothing logged.
+* **the SSRF guard refuses the configured SearXNG itself** — `check_url` vets the
+  operator-configured search host with the same rule as an attacker-supplied URL,
+  so a self-hosted instance on a Docker bridge (`172.30.0.2`) is rejected as
+  "non-public". The guard belongs on `web_fetch`, where the URL comes from a
+  search result, not on the one URL the operator chose.
+* **the fallback path still dies on the union-typed parameter** — on the *third*
+  upstream reached. `sanitize_tool_schema` adds `items` to array branches, which
+  fixed the Google AI Studio `any_of[0].items` rejection, but leaves the `type`
+  union itself intact, and OpenRouter's `ModelRun` provider answers
+  `more than one JSON reading of the same emitted value`. Measured, not inferred;
+  see the section on tool-schema sanitisation.
 
 ## Evaluating your changes
 
