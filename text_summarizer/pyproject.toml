@@ -6,6 +6,12 @@ requires-python = ">=3.11"
 dependencies = [
     "google-adk[mcp,extensions,eval]",
     "google-api-python-client>=2.200.0",
+    # Declared, not incidental. web_search.py imports it directly, and it was
+    # previously only present transitively (via the MCP and instrumentation
+    # packages) -- so a future dependency change would have silently broken every
+    # web tool with a ModuleNotFoundError-as-data and no failing test. That is
+    # exactly gotcha 6's failure mode.
+    "httpx>=0.27",
     "langfuse",
     "openinference-instrumentation-google-adk",
     "python-dotenv",
