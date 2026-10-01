@@ -1,8 +1,13 @@
 # Integrations
 
-The agent can read your Gmail inbox and use an Obsidian vault as a second brain.
-Both are optional and controlled purely by environment variables — with none of
-them set the agent still works as a plain text summarizer.
+The agent can read your Gmail inbox, use an Obsidian vault as a second brain, and —
+when the vault has nothing — search the web through a self-hosted SearXNG. All three
+are optional and controlled purely by environment variables: with none of them set the
+agent still works as a plain text summarizer.
+
+The three tiers are consulted in order — **vault → web → the model's own knowledge** —
+and the agent is told to reach for a later one only after the earlier ones come up
+empty.
 
 ## Gmail (Read-Only)
 
@@ -134,3 +139,46 @@ obsidian-mcp: Set OBSIDIAN_VAULT_NAME in .env to the one to use, then re-run.
 
 A single vault needs no configuration at all, which is why this only shows up
 once a second vault exists.
+
+## Web Search (self-hosted SearXNG)
+
+The third tier. Two first-party tools over a plain HTTP API — no MCP server, no
+subprocess:
+
+| Tool | Purpose |
+|---|---|
+| `web_search` | Query SearXNG; returns titles, URLs and short snippets |
+| `web_fetch` | Fetch and sanitise one page's text |
+
+```env
+SEARXNG_URL=http://searxng:8080
+```
+
+Unset means **no web tools at all** and the agent is unchanged — a summarizer that
+cannot search does not merely get worse at searching, it stops offering to.
+`WEB_SEARCH_ENABLED=false` removes the tools while leaving `SEARXNG_URL` alone, which
+is the control to use when measuring.
+
+Under Docker, SearXNG runs as a **separate compose project** reached over a shared
+external docker network (`agent-net`) by service name rather than a published port, so
+nothing is exposed on the LAN for the agent's sake. `run.sh` creates that network
+idempotently, and only when `SEARXNG_URL` is set.
+
+### Retrieved pages are treated as untrusted
+
+Anyone can publish a page that ranks for a query, and its text reaches the model
+verbatim. Three defences, all required — see
+[the web tier](ARCHITECTURE.md#the-web-tier) for why each one exists and what it
+costs to remove:
+
+- the HTTP client dials the **address that was vetted**, not the hostname, so a host
+  cannot be re-pointed at an internal address between check and connect (DNS
+  rebinding);
+- retrieved text is wrapped in an `<untrusted_content>` marker that a page **cannot
+  close from inside**, including via an HTML-entity-encoded closing tag;
+- snippets are framed too — they are the page author's own meta description, and the
+  most poisonable input the agent sees.
+
+A failed search returns an error **as data**, so the model can fall through to the
+vault or its own knowledge rather than the turn dying.
+

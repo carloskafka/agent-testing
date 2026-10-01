@@ -51,6 +51,19 @@ CACHE_ENABLED=false uv run adk eval text_summarizer \
 Without `CACHE_ENABLED=false`, a second run hits the vault cache, skips the model
 *and* the tool calls, and reports a high score while testing nothing.
 
+If the web tier is configured, add `WEB_SEARCH_ENABLED=false` too. Live search results
+change daily, so leaving it on makes `response_match_score` measure *the day* rather
+than your instruction edit — and an eval set whose golden answers were written on one
+day's news is not reproducible on the next. The tools are removed without touching
+`SEARXNG_URL`, so this is a per-run override, not a config change.
+
+The shipped set has **four cases**: three prose-only, plus one
+(`vault_sources_block`) whose golden answer contains a `**Sources**` block. That last
+one bakes in this deployment's identifiers (`ck`, `gemini-3.5-flash-lite`), so
+changing `VAULT_NAME`, `MODEL_PROVIDER` or the served backend lowers the score **for
+that case only** — its floor is ~0.70 without the block, still above the threshold.
+The other three cite nothing and are unaffected.
+
 ## Interpreting Results
 
 ```
@@ -71,6 +84,13 @@ response, so you can see exactly what went wrong.
 ## Hands-On: Learning the Evaluation Loop
 
 Learn by doing: **edit instructions → run eval → compare scores → learn**.
+
+> The transcripts below are a **historical record**, kept because the lesson is the
+> point: a change that reads like an improvement can *lower* a score that measures
+> word overlap. The agent's instructions have changed substantially since (they are
+> now 14 rules covering vault retrieval, persistence, Gmail, the clock, the web tier
+> and the digest), so re-running these will not reproduce these exact numbers. Run
+> your own baseline first and compare deltas against *that*.
 
 ### Quick Start
 
@@ -211,13 +231,13 @@ automatically improve the agent's instructions through the eval loop.
 
 ```bash
 # Uses the same MODEL_PROVIDER as agent.py
-model_provider=gemini python text_summarizer/auto_optimize.py
+MODEL_PROVIDER=gemini python text_summarizer/auto_optimize.py
 
 # With options
-model_provider=gemini python text_summarizer/auto_optimize.py --max-iterations 5 --patience 3
+MODEL_PROVIDER=gemini python text_summarizer/auto_optimize.py --max-iterations 5 --patience 3
 
 # Force a specific optimizer model
-model_provider=gemini python text_summarizer/auto_optimize.py --optimizer-model gemini-3.5-flash-lite
+MODEL_PROVIDER=gemini python text_summarizer/auto_optimize.py --optimizer-model gemini-3.5-flash-lite
 ```
 
 ### Example Run

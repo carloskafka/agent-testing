@@ -1,7 +1,13 @@
 # Testing in the ADK Web UI
 
-Once the agent is running at http://127.0.0.1:8000, try these prompts to see how
-the agent performs.
+Once the agent is running, try these prompts to see how the agent performs. The URL
+depends on how you started it — the Docker UI (`./run.sh`) publishes
+<http://localhost:8001>, while a local no-Docker run (`uv run adk web text_summarizer`)
+uses ADK's default <http://127.0.0.1:8000>.
+
+**Read the expected outputs below with the name stamp in mind.** Every answer opens
+with `**Text Summarizer Agent**`, which is rendered in code and is not part of the
+summary. `BOT_NAME=` (empty) turns it off.
 
 ## Good Examples (Expected Behavior)
 
@@ -16,11 +22,17 @@ Summarize: Dogs are domesticated mammals known for their loyalty and companionsh
 **Expected output:**
 
 ```
+**Text Summarizer Agent**
+
 - Dogs are domesticated mammals valued for loyalty and companionship.
 - They come in many breeds with varying size, color, and temperament.
 - Dogs have been bred for hunting, herding, guarding, and companionship.
 - They are social animals that thrive on human and canine interaction.
 ```
+
+A `**Sources**` block may follow, naming any vault notes the agent found relevant.
+Its absence is not a failure — the model is told to list nothing rather than invent a
+citation.
 
 **Example 2: Technical text**
 
@@ -65,6 +77,42 @@ What do I already know about deployment pipelines? Cite the notes.
 
 Retrieval rather than summarisation. The `**Sources**` block should name real
 notes; if it renders `unknown` for the vault, retrieval is not wired up.
+
+**Example 6: Asking what the agent learned (needs a vault with notes)**
+
+```
+What did you learn on Tuesday?
+```
+
+This one is worth checking carefully, because it is the only prompt where the agent
+should answer **without a model call**: `read_day_digest` reads the vault directly,
+so the answer must match what the CLI reports for the same day.
+
+```bash
+cd text_summarizer && uv run python -m text_summarizer.digest --date 2026-09-30
+```
+
+Both read the same files, so:
+
+- **the tool is never called** → rule 14 did not land. This is a prompt problem, in `agent.py`.
+- **the tool is called but the answer disagrees with the CLI** → the model narrated
+  instead of reporting.
+- **the agent answers from its own conversation** → the wrong tier was used; it should
+  read the vault, which also covers notes written in sessions you never saw.
+
+A day with no notes is a real answer, and the agent should say so in one sentence
+rather than filling the gap from its own knowledge.
+
+**Example 7: Web search (needs `SEARXNG_URL`)**
+
+```
+What is the current stable release of Python? Check the web.
+```
+
+The agent is told to search only as a **last resort**, so ask for something the vault
+cannot answer. Expect `web_search` then `web_fetch`, and a `[web]` source line naming
+the URL. A cited URL the search never returned is discarded, so a citation that
+survives is one the tools actually produced.
 
 ## Bad Examples (What NOT to Input)
 
@@ -115,6 +163,15 @@ designed to summarize provided text, not answer questions from its training data
 
 While the agent can handle long text, very long inputs without clear structure may
 produce summaries that miss key points or become too generic.
+
+**Bad 6: Asking it to enrich a summary with a web search**
+
+```
+Summarize this text and go online to add more detail.
+```
+
+The agent is explicitly told never to search to enrich text you gave it — the text
+and the vault are the source there. Expect it to decline the search and summarise.
 
 ## Edge Cases (Interesting to Test)
 

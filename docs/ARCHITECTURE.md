@@ -109,12 +109,44 @@ Import chain (all through `text_summarizer/__init__.py`):
    runner with OpenInference + Langfuse. Otherwise a no-op.
 3. `root_agent` — the exported ADK `LlmAgent`.
 
-The agent's tools = `build_obsidian_tools()` + `build_gmail_tools()` (each returns
-`[]` when unconfigured) plus two `FunctionTool`s:
-`save_summary_to_second_brain` and `log_conversation`.
+The agent's tools are assembled from five builders plus two always-present
+`FunctionTool`s:
+
+```python
+tools=[
+    FunctionTool(save_summary_to_second_brain),
+    FunctionTool(log_conversation),
+    *build_clock_tools(),
+    *build_obsidian_tools(),
+    *build_gmail_tools(),
+    *build_web_search_tools(),
+    *build_digest_tools(),
+]
+```
+
+Every builder returns `[]` when its integration is unconfigured, so the tool set is
+additive — an unconfigured deployment gets a smaller agent, never a broken one. The
+exception is `build_clock_tools()`, which is **ungated**: a missing clock is a
+silently *wrong* answer ("today's news" meaning whatever the training cutoff
+suggested), not a missing capability.
+
+| Tool | Source | Gate |
+|---|---|---|
+| `save_summary_to_second_brain`, `log_conversation` | always present | — |
+| `current_datetime` | `clock.py` | none (ungated, on purpose) |
+| vault search / read | `obsidian_tools.py` (MCP) | `OBSIDIAN_VAULT_PATH` **or** `OBSIDIAN_MCP_URL` |
+| `gmail_*` | `gmail_tools.py` (MCP) | all three `GOOGLE_*` vars |
+| `web_search`, `web_fetch` | `web_search.py` (first-party) | `SEARXNG_URL` |
+| `read_day_digest` | `digest_tools.py` (first-party) | the resolved vault root is a directory |
+
+The last two gates are asymmetric on purpose. The digest tool returns "no notes" and
+nothing else when the vault is missing, which is a worse thing to offer than no tool;
+a clock that is merely slow to answer is fine, a clock that is absent is not.
 
 Key callbacks:
 
+- `before_agent_callback=tag_trace_identity` — names the Langfuse trace and attaches
+  `userId` / `sessionId` while the span is still open.
 - `before_model_callback=cache_hit_before_model` — replays a stored summary from
   the vault (zero LLM calls) when the exact text was summarized before.
 - `after_model_callback=[tag_current_span, render_sources_after_model]` — reports
@@ -123,6 +155,96 @@ Key callbacks:
 - `after_agent_callback=report_scores_after_agent` — pushes `quality.*` and
   `response_match_score` scores to Langfuse. Returns `None` on purpose.
 
+The two entries in the `after_model_callback` **list** are one step, not two, and
+that is load-bearing. ADK's `_run_callbacks` stops at the first callback returning a
+response, so appending the name stamp as a third entry would have been *silently
+skipped* on exactly the turns that carry a `**Sources**` block — the renderer
+answers those and the chain stops — while looking correct on every uncited answer.
+Both steps are therefore one function returning one `LlmResponse`.
+
+## The Name Stamp
+
+Every fresh answer opens with a bold label — `**Text Summarizer Agent**` by default:
+
+```
+**Text Summarizer Agent**
+
+- Dogs are domesticated mammals valued for loyalty and companionship.
+```
+
+Rendered in code, never asked of the model, for the same reason the `**Sources**`
+block is: an instruction rule would cost output tokens on every turn, could be
+dropped or misspelled, and would sit inside `summary_content` — so the note
+written to the vault would carry it too.
+
+`BOT_NAME` has three states, and the difference between the first two is the point:
+
+| `BOT_NAME` | Result |
+|---|---|
+| **unset** (line commented out) | derived from `AGENT_NAME` → `Text Summarizer Agent` |
+| **set to a value** | used verbatim |
+| **set to empty** (`BOT_NAME=`) | stamp **off** — the control for measuring what it changes |
+
+*Unset* derives the label; *present-but-empty* disables the stamp. That asymmetry is
+easy to get backwards, and it is deliberate: it mirrors `CACHE_ENABLED=false` as a
+control for a feature that is otherwise always on. `AGENT_NAME` is the single source
+of truth for both `LlmAgent(name=...)` and the label, so renaming the agent renames
+the label with no second edit.
+
+Two details are load-bearing. The stamp is stripped **before anything is scored** —
+a presentation artefact must not move a score, and `text_summarizer` is not one of
+the user's words, so an unstripped stamp is a small permanent downward bias on every
+scored turn. And it is only ever removed as a *leading* stamp, only the one this
+code writes, so a bold word the model happened to open with is left alone.
+
+## The Web Tier
+
+A third retrieval tier, so the agent answers from **vault → web → its own knowledge**.
+Two first-party `FunctionTool`s, `web_search` and `web_fetch`, over a self-hosted
+SearXNG. Gated on `SEARXNG_URL`; unset means no web tools and the agent is
+byte-for-byte unchanged.
+
+Deliberately **not** a third MCP server. The two existing MCP toolsets wrap servers
+we do not own; this is two HTTP GETs against a URL *we* configure, so there is no
+subprocess and no session pool. It copies their gating discipline instead — including
+returning errors as **data** rather than raising, so a failed search lets the model
+fall through to its own knowledge instead of the turn dying.
+
+**Web pages are untrusted input**, unlike the user's text, the vault or their mail —
+anyone can publish a page that ranks for a query, and its text lands verbatim in the
+model's context. Three independent defences, all required:
+
+- **The connection is pinned to the address that was vetted.** `check_url` resolves
+  the host, vets every address, and hands the approved list back; the HTTP client
+  then dials *that literal address* while carrying `Host` + `sni_hostname` so TLS
+  still validates against the real name. Without the pin the guard is vacuous: the
+  client re-resolves the hostname at connect time, so a host vetted as a public
+  address can be re-pointed at the instance-metadata endpoint in between. That is
+  DNS rebinding, and checking every address from one lookup does not stop it — that
+  defeats a *mixed* answer, not one that *changes*.
+- **The `<untrusted_content>` framing cannot be closed from inside.** The wrapper is
+  the only thing marking retrieved text as data, so any closing tag appearing in the
+  page text is neutralised. The subtle route was an **entity-encoded**
+  `&lt;/untrusted_content&gt;`: it contains no `<`, so every tag-stripping regex
+  passes it through, and the HTML-unescape that follows manufactures a real closing
+  tag. Sanitising the boundary, not just the payload, is the general lesson.
+- **Search snippets are framed too.** A snippet is the page author's own meta
+  description — the most poisonable channel, and it arrives without a fetch.
+
+A `[web]` source line renders in the same canonical block as `[obsidian]`, with the
+*provider* in the slot where a vault name would go (`[web][searxng][<model>]<url>`):
+slot two means "where this came from", which is the honest answer for a web page. A
+`[web]` line citing a URL the search never returned is **dropped** — the rule the
+vault already applies to note titles. That allow-list is recorded by the tool at the
+moment it returns the URLs, because reconstructing it later by scanning session
+events does not work: `session.events` is unpopulated under `adk web`'s database
+session service, so every `[web]` citation was silently dropped in the one deployment
+that matters, while unit tests that supplied events by hand passed.
+
+`WEB_SEARCH_ENABLED=false` removes the tools while leaving `SEARXNG_URL` alone —
+which is what eval runs want, since live results change daily and would make
+`response_match_score` measure the day rather than the instruction edit.
+
 ## `**Sources**` Provenance
 
 Every fresh, uncached response ends with a block like:
@@ -130,7 +252,13 @@ Every fresh, uncached response ends with a block like:
 ```
 **Sources**
 - [obsidian][ck][gemini-3.5-flash-lite][[2026-09-25 - dogs-summary]](/vault/Second%20Brain/2026-09-25%20-%20dogs-summary.md): why it is relevant
+- [web][searxng][gemini-3.5-flash-lite]<https://example.com/p>: why it is relevant
 ```
+
+Slot two means "where this came from" — a vault name for a note, the retrieval
+provider for a page. Exactly one canonical block is always emitted, whatever heading
+the model happened to write, so a model that ignores the format still cannot produce
+duplicates; and re-rendering an already-rendered block reproduces it byte for byte.
 
 - The model is never asked for its own name. Rule 7 emits sentinel tokens
   `@@ADK_VAULT@@` / `@@ADK_MODEL@@` that `sources.render_sources` replaces in

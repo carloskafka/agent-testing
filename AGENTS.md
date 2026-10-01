@@ -550,7 +550,7 @@ cd text_summarizer
 python eval_exercise.py
 
 # Auto-optimize instructions (LLM-driven loop)
-model_provider=gemini python text_summarizer/auto_optimize.py \
+MODEL_PROVIDER=gemini python text_summarizer/auto_optimize.py \
   --max-iterations 5 --patience 3
 ```
 

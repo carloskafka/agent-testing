@@ -1,6 +1,6 @@
 # Getting Started
 
-A **text summarization agent** built with Google's [Agent Development Kit](https://google.github.io/adk-docs/) (ADK), with an evaluation loop, an Obsidian "second brain", and optional read-only Gmail access.
+A **text summarization agent** built with Google's [Agent Development Kit](https://google.github.io/adk-docs/) (ADK), with an evaluation loop, an Obsidian "second brain", optional read-only Gmail access, an optional web-search tier, and a daily digest you can read without spending a token.
 
 Everything is optional except one model key. The interesting part of this repo is the **evaluation loop**: you edit the agent's instructions in `agent.py`, run ADK evals, and watch `response_match_score` (ROUGE-1 word overlap) change.
 
@@ -16,6 +16,7 @@ Everything is optional except one model key. The interesting part of this repo i
 | Langfuse | traces every turn: latency, cache hit/miss, quality scores | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` |
 | Gmail | read-only inbox tools | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
 | Obsidian | retrieval tools over your vault | set automatically by `run.sh` |
+| Web search | falls back to SearXNG when the vault has nothing | `SEARXNG_URL` |
 
 `.env` holds real keys and is git-ignored. Never commit it.
 
@@ -53,6 +54,30 @@ Every turn is summarised into your vault as a linked note and appended to that
 day's chat log. **Ask the same thing again and it is answered from the vault with
 no model call at all** — see [the vault cache](ARCHITECTURE.md#vault-cache).
 
+Every answer opens with a bold `**Text Summarizer Agent**` label. Rename it with
+`BOT_NAME=...`, or set `BOT_NAME=` (empty) to turn the stamp off entirely.
+
+## 4. Read a day back, without asking the agent
+
+"What did the agent learn on Tuesday?" is the one question here whose answer was
+**already written down** — so it is answered by reading the vault, not by spending a
+model call. You can do it without the browser at all:
+
+```bash
+cd text_summarizer && uv run python -m text_summarizer.digest
+cd text_summarizer && uv run python -m text_summarizer.digest --date 2026-09-30 --json
+```
+
+You can also just ask the agent, which does the same thing through a tool:
+
+```
+What did you learn on Tuesday?
+```
+
+Both read the same files, so any disagreement between them is the model, not the
+reader — which makes this a cheap way to check the agent is reporting rather than
+reciting. Details in [the daily digest](ARCHITECTURE.md#daily-digest).
+
 ---
 
 ## The vault, in one paragraph
@@ -75,7 +100,7 @@ what happens with several vaults and why it refuses to guess, are in
 | [TESTING.md](TESTING.md) | Prompt examples for the web UI (good / bad / edge cases) |
 | [MODELS.md](MODELS.md) | Switching between Gemini and free OpenRouter models |
 | [INTEGRATIONS.md](INTEGRATIONS.md) | Read-only Gmail access and the Obsidian second brain |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | How a turn flows, provenance, vault selection, the cache, Docker topology |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How a turn flows, provenance, the web tier, vault selection, the cache, the digest, Docker topology |
 
 `AGENTS.md` is the deep end: it records *why* each design decision was made and
 which traps are easy to fall into again. Read it before changing anything in
@@ -90,4 +115,7 @@ which traps are easy to fall into again. Read it before changing anything in
 | `'/x' is not a directory under '/vaults'` | `OBSIDIAN_VAULT_NAME` has a typo; the error lists the valid names |
 | `obsidian-mcp` restarting | the MCP server exits rather than serve a wrong vault — read its error, it names the candidates |
 | No Gmail tools in the UI | all three `GOOGLE_*` vars must be set; see [Gmail setup](INTEGRATIONS.md#gmail-read-only) |
+| No web tools in the UI | `SEARXNG_URL` must be set (and `WEB_SEARCH_ENABLED` not `false`) |
+| Answer has no `**Sources**` block | normal when nothing in the vault is relevant — the model lists nothing rather than inventing a citation |
+| Answer dated wrongly on a "today" question | the agent has no clock; it must call `current_datetime` first. A wrong date is a prompt problem, not a cache problem |
 | Eval scores look great but nothing is being tested | run evals with `CACHE_ENABLED=false` — see [AGENTS.md gotcha 10](../AGENTS.md) |
