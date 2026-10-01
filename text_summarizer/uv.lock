@@ -5850,6 +5850,7 @@ source = { editable = "." }
 dependencies = [
     { name = "google-adk", extra = ["eval", "extensions", "mcp"] },
     { name = "google-api-python-client" },
+    { name = "httpx" },
     { name = "langfuse" },
     { name = "openinference-instrumentation-google-adk" },
     { name = "python-dotenv" },
@@ -5867,6 +5868,7 @@ dev = [
 requires-dist = [
     { name = "google-adk", extras = ["mcp", "extensions", "eval"] },
     { name = "google-api-python-client", specifier = ">=2.200.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "langfuse" },
     { name = "openinference-instrumentation-google-adk" },
     { name = "python-dotenv" },

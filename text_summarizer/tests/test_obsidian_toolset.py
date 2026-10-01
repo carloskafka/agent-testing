@@ -134,7 +134,7 @@ def test_a_missing_mcp_package_degrades_to_no_tools(obsidian_env, capsys):
     obsidian_env.setitem(sys.modules, "mcp", None)
 
     assert obsidian_tools.build_obsidian_tools() == []
-    assert "uv sync" in capsys.readouterr().out
+    assert "uv sync" in capsys.readouterr().err
 
 
 def test_a_missing_adk_mcp_module_degrades_to_no_tools(obsidian_env):
@@ -196,7 +196,7 @@ def test_a_relative_vault_path_is_refused_with_a_message(obsidian_env, capsys):
     obsidian_env.setenv("OBSIDIAN_VAULT_PATH", "relative/path/to/vault")
 
     assert obsidian_tools.build_obsidian_tools() == []
-    assert "must be absolute" in capsys.readouterr().out
+    assert "must be absolute" in capsys.readouterr().err
 
 
 def test_the_url_wins_when_both_transports_are_configured(obsidian_env, tmp_path):

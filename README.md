@@ -116,7 +116,31 @@ cd text_summarizer
 uv run adk run text_summarizer "Summarize: Your long text here..."
 ```
 
-### 5. Run Evaluations
+### 5. Report a Day's Digest (no model call)
+
+Everything the agent summarised is already on disk, so a daily report reads the vault
+directly — no turn, no quota, and it works even when the model provider is down:
+
+```bash
+cd text_summarizer
+uv run python -m text_summarizer.digest                    # today, human-readable
+uv run python -m text_summarizer.digest --date 2026-09-30  # a named day
+uv run python -m text_summarizer.digest --json | jq '.notes[].title'
+```
+
+Inside the container:
+
+```bash
+docker compose exec agent-testing sh -lc \
+  'cd /workspace/text_summarizer && .venv/bin/python -m text_summarizer.digest'
+```
+
+It lists the day's notes with their topics, index position and the model that wrote
+each one, plus the topics those notes touched. A day with no notes is reported as such
+rather than as an error. The agent can also answer this itself — ask *"what did you
+learn on Tuesday?"* and it calls `read_day_digest`, which is the same reader.
+
+### 6. Run Evaluations
 
 ```bash
 CACHE_ENABLED=false uv run adk eval text_summarizer \

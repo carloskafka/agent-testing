@@ -44,6 +44,8 @@ agent-testing/
     |-- __init__.py             # Entrypoint: loads .env, inits observability, exposes root_agent
     |-- agent.py                # The LlmAgent definition: model DI + instructions + Langfuse scoring callback
     |-- clock.py                # current_datetime: the model has no clock of its own
+    |-- digest.py               # What the agent learned on a day, read off the vault (CLI)
+    |-- digest_tools.py         # read_day_digest: the same reader, as a model-callable tool
     |-- eval_scoring.py         # ROUGE-1 (response_match_score) matching eval-set golden answers
     |-- web_search.py           # Optional third retrieval tier: SearXNG search + guarded page fetch
     |-- obsidian_tools.py       # Optional MCP tools for an Obsidian vault
@@ -80,6 +82,8 @@ agent-testing/
         |-- test_web_search.py             # SSRF guards, bounded sanitiser, injection framing
         |-- test_web_wiring.py             # The web tier reaching the answer only the permitted way
         |-- test_sources_web.py            # The [web] line in the Sources block, and its allow-list
+        |-- test_digest.py                # The vault reader: provenance, damage, determinism, no-quota
+        |-- test_digest_tools.py          # read_day_digest: gating, date validation, bounds, stdout purity
         |-- test_prompt_name_span.py       # after_model_callback: Langfuse prompt-name tagging
         |-- test_trace_identity.py         # before_agent_callback: trace name + userId/sessionId
         |-- test_vaults.py                 # Vault selection + resolve-vault.sh parity
@@ -108,7 +112,7 @@ Import chain (all through `text_summarizer/__init__.py`):
 - Both paths return a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors.
 - Models referenced are the free-tier aliases used by this project; don't "fix" the names to older released models.
 
-The LlmAgent has: name `AGENT_NAME` (`text_summarizer`, also the source of the displayed label — see below), the model above, a description, bullet-point `instruction` rules, and `tools` = `build_clock_tools()` + `build_obsidian_tools()` + `build_gmail_tools()` + `build_web_search_tools()`. The clock is the one **ungated** toolset — it always returns its tool, because a missing clock is a silently wrong answer rather than a missing capability; the other three return `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second shapes the answer itself: it rewrites the response's `**Sources**` block with the real vault name and the real served model, then stamps the bot name in bold at the head (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
+The LlmAgent has: name `AGENT_NAME` (`text_summarizer`, also the source of the displayed label — see below), the model above, a description, bullet-point `instruction` rules, and `tools` = `build_clock_tools()` + `build_obsidian_tools()` + `build_gmail_tools()` + `build_web_search_tools()` + `build_digest_tools()`. The clock is the one **ungated** toolset — it always returns its tool, because a missing clock is a silently wrong answer rather than a missing capability; the other four return `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second shapes the answer itself: it rewrites the response's `**Sources**` block with the real vault name and the real served model, then stamps the bot name in bold at the head (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
 
 - **One callback shapes the answer, and ADK is why.** `after_model_callback=[tag_current_span, render_sources_after_model]` — one list, and the list **stops at the first callback that returns a response**: `_run_callbacks(..., _stop_on_truthy, ...)` in `google/adk/utils/_callback_pipeline.py:94-101`, called from `google/adk/flows/llm_flows/base_llm_flow.py:330-336`, with `_stop_on_truthy` being `bool(result)` (`_callback_pipeline.py:116`). Adding the name stamp as a *third* entry would therefore have been silently skipped on exactly the turns that carry a Sources block — the renderer answers those and the chain stops — while looking perfectly correct on every uncited answer. Both steps are therefore one function returning one `LlmResponse`.
 - **The rewrite happens in `after_model_callback`, and it has to.** An `LlmResponse` returned from there *replaces* the model's own response, so the answer lives on one event. Content returned from `after_agent_callback` does **not** replace it — ADK builds an extra `Event` for whatever comes back (`BaseAgent._handle_after_agent_callback`) and yields it after the flow is done. That is gotcha 16; it is what made the answer appear twice.
@@ -290,6 +294,34 @@ Three things in that sequence are load-bearing, and each answers a "why not the 
 `current_datetime` reports the ISO date, time, weekday and timezone. The model has no clock of its own: a system prompt cannot carry a date because it is fixed when the prompt is written while the server keeps running, so "today's news" meant whatever the training cutoff suggested — and a Gemini or OpenRouter fallback has no clock to fall back on either. Instruction rule 12 requires calling it before any time-sensitive answer.
 
 It is the **complement** of the cache fix, not the fix: with the cache replaying yesterday's note the model never gets a turn in which to call anything. Ungated, unlike every other toolset, because a missing clock is a *silently wrong answer* rather than a missing capability, and it needs no key, network or configuration. An unrecognised IANA zone falls back to local and **says so in the returned `timezone` field** rather than silently reasoning about the wrong day.
+
+### The daily digest — `digest.py` (CLI) + `digest_tools.py` (agent tool)
+
+"What did the agent learn on Tuesday?" has a property no other question here has: **every fact in the answer was already written down.** `save_summary_to_second_brain` persisted the summary, its topics and its provenance; `log_conversation` persisted the exchange. So the report is a *filesystem reader*, not a prompt, and it is available as two surfaces over one implementation:
+
+```bash
+cd text_summarizer && uv run python -m text_summarizer.digest [--date YYYY-MM-DD]
+                                                      [--format text|md] [--json]
+                                                      [--include-chat] [--vault PATH]
+```
+
+and `read_day_digest`, the same reader as a tool, which rule 14 puts behind "what did you learn".
+
+**Why reading beats asking, in four parts.** No quota and no latency (a directory listing and a handful of reads — the same order as the cache lookup already on the first model call of every turn). It works when the model does not: the primary backend is rate-limited, the fallback is a *free* tier that 429s often enough that a Gemini quota error is as likely to end in a rate-limit error as in a served turn, and the provider can be mid-outage — a report on what was already learned cannot depend on any of that. It is deterministic, which is what makes `--json` usable as a script's input. And it cannot hallucinate a fact *about the vault*, because it never leaves it. The converse is the one real limitation and it is worth stating: this reports what was *recorded*, not what was true.
+
+**`digest.py` must never reach `google.adk` or `google.genai`**, and that is a test rather than a claim. `test_the_import_graph_reaches_neither_adk_nor_genai` blocks both in a subprocess *and* scans `sys.modules`, because either alone is weak — an import hook proves nothing was requested, a module scan proves nothing was already loaded. The package `__init__` exports `root_agent` and so does pull both in, so the guard stubs the parent package out and measures only this module's own graph. **This is why the tool lives in a separate file**: `FunctionTool` is an ADK import, so folding the tool into `digest.py` would mean either breaking that property or deleting the test. `digest_tools.py` is the one module allowed to import both.
+
+**The tool is gated, unlike the clock.** `build_digest_tools()` returns `[]` when the resolved vault root is not a directory, and the reasoning is the distinction already drawn for the clock: a missing clock is a *silently wrong* answer, while a missing vault is a missing capability — and with no directory on disk the tool's only possible reply is "no notes", which is worse to offer than nothing. The gate reads `digest.default_vault_root()`, the same `second_brain.VAULT_ROOT` binding the writer uses, so the tool cannot disagree with the writer about which vault is in play.
+
+**A date it cannot parse is an error, never an empty digest.** `build_digest` matches a day against filenames and frontmatter and returns zero notes for a string matching neither, so passing `"last tuesday"` through unchecked yields a perfectly clean `note_count: 0` that reads as *you learned nothing that day* — and an empty day is a legitimate answer, which is exactly why it must never be produced by accident. The tool therefore validates through `digest.iso_date`, the **same** definition `--date` uses. `test_the_tool_and_the_cli_agree_about_what_a_date_is` runs one set of spellings through both and requires both to accept or both to reject, which is what keeps it one definition rather than two that drift.
+
+One spelling is *meant* to disagree, and has its own test: `day=""` is the tool's parameter default and a function has no other way to say "not given", so it means today — while `--date ""` is a user mistake argparse rejects. That asymmetry is why the tool tests `raw != ""` and not `raw.strip() != ""`: treating blank as omitted answers a different question than the caller asked, which is the failure the validation exists to rule out.
+
+**The payload is bounded, and the bound is reported.** `note_count` stays the *true* total while `notes` is capped at `MAX_NOTES`, and `truncated` says how many were withheld, because a capped list that does not say so is indistinguishable from a quiet day. `fingerprint` is dropped from the tool's payload and kept in `--json`, because a script grouping a day's notes by what was asked wants 64 hex characters and a context window does not. Errors are data (`web_search._error`'s reasoning verbatim): the model must be able to read a failure and fall through to another tool rather than have the turn die.
+
+**Provenance is omitted, never invented** — the same rule as the `**Sources**` block. A note written before `generated_by_model` existed carries no provenance, and the payload gives the model nothing to attribute, because the tool's docstring tells it not to guess and that instruction is only credible if there is nothing to guess *from*.
+
+**Every diagnostic in the package prints to stderr.** Importing the package runs `setup_observability()` and resolves the vault, both before `digest`'s body does, so whatever they print lands in the command's output. `--json` is meant to be piped into `jq`, and a preamble on stdout makes the document unparseable; the diagnostics are real and worth keeping. `test_the_json_flag_lands_on_a_clean_stdout` pins the property end to end — a subprocess handed Langfuse keys bad enough to make it complain, asserting stdout still parses and stderr is non-empty. The second half matters: without it the test would pass for a reason that has nothing to do with the streams. Five tests elsewhere asserted the old stdout behaviour and now read `.err`; they are the reason this was not a silent change.
 
 ### The name stamp — `agent.bot_name`
 
@@ -495,6 +527,12 @@ uv run adk run text_summarizer "Summarize: your long text here..."
 # Save/run via the Windows helper
 ./run-agent.ps1
 
+# Daily digest: what was learned on a day. No agent turn, no quota.
+cd text_summarizer && uv run python -m text_summarizer.digest
+cd text_summarizer && uv run python -m text_summarizer.digest --date 2026-09-30 --json
+docker compose exec agent-testing sh -lc \
+  'cd /workspace/text_summarizer && .venv/bin/python -m text_summarizer.digest'
+
 # Single eval case
 CACHE_ENABLED=false uv run adk eval text_summarizer \
   text_summarizer/tests/eval/simple_test.test.json \
@@ -631,7 +669,7 @@ run leaves the previously published site up, which looks like success.
 8. **`.venv`, `.adk/`, `optimization_history.json`, `__pycache__`, `*.egg-info` are locally-generated state**, git-ignored, safe to delete and regenerate with `uv sync`. Note: `adk eval` writes into `Second Brain/` and `Chat Log/` in the real vault as a side effect — eval runs are not read-only.
 9. **Dependencies are managed by `uv`** (`pyproject.toml` + `uv.lock`, `uv sync --frozen`). Prefer `uv` over pip when installing or running.
 10. **`adk eval` is NOT hermetic — run it with `CACHE_ENABLED=false`.** `adk eval` calls the real agent, which calls `save_summary_to_second_brain` against the real vault. So a first run writes a summary for each eval prompt; every later run on the same eval set then hits the cache, skips the model *and* the tool calls, and reports a high `response_match_score` while testing nothing. `basic_summary` is already in this state (it collides with a note in the live vault). Always: `CACHE_ENABLED=false uv run adk eval ...`.
-11. **Retrieval tools are absent unless MCP is configured.** With neither `OBSIDIAN_VAULT_PATH` nor `OBSIDIAN_MCP_URL` set, `build_obsidian_tools()` returns `[]` and rule 7 is unactionable — the agent will have only the two `FunctionTool`s. The Docker compose path sets `OBSIDIAN_MCP_URL`, so local and container runs are not equivalent.
+11. **Retrieval tools are absent unless MCP is configured.** With neither `OBSIDIAN_VAULT_PATH` nor `OBSIDIAN_MCP_URL` set, `build_obsidian_tools()` returns `[]` and rule 7 is unactionable — the agent will have only the three first-party `FunctionTool`s (`save_summary_to_second_brain`, `log_conversation`, `current_datetime`). The Docker compose path sets `OBSIDIAN_MCP_URL`, so local and container runs are not equivalent.
 12. **`tool_context.session` is not a reliable view of the current turn.** In a resumed multi-turn session it can be a snapshot taken before the current user message was appended, so its most recent `user` event still belongs to the *previous* turn. Anything that needs the current turn's input must read `InvocationContext.user_content` (`tool_context.get_invocation_context().user_content`) and fall back to the event scan only if that is unavailable. This bit `note_provenance` too: `generated_by_model` on a note written in a later turn of a resumed session can name the previous turn's backend.
 13. **Notes saved before 2026-09-26 have no provenance.** Their frontmatter has no `generated_by_model`, and their bodies use the old `## From the vault` / `[vault] [[Note]]` shape. They are never rewritten, and citing one does not invent a model. They are also unreachable by the vault cache (their `source_fingerprint` is a fingerprint of the model's paraphrase — see gotcha 15). To backfill either, re-ask the question: the note is then written fresh with provenance and a usable key. There is no migration script.
 14. **`save_summary_to_second_brain`'s `tool_context` parameter is intentional.** ADK injects it and keeps it out of the model's JSON schema; deleting it as "unused" silently removes both `generated_by_model` and the cache key from every new note.
@@ -735,6 +773,31 @@ run leaves the previously published site up, which looks like success.
     stops at the next candidate terminator instead of at end-of-string). Measured after:
     0.03s, 0.03s, 0.02s. "Bounded, no backtracking risk" in a docstring is a claim
     someone has to *measure* before writing it.
+14. **The digest has never answered a live model turn, and rule 14 has never been
+    evaluated.** The reader and the tool are both proven offline — 14 tests on the
+    reader, 17 on the tool, and `test_adk_wiring` drives a real `InMemoryRunner` so ADK
+    is shown to accept the signature, dispatch the call and hand the payload to the next
+    model call. What that cannot cover is the part a stub decides for it: **whether the
+    model reaches for `read_day_digest` at all** when asked "what did you learn on
+    Tuesday?", and whether it then reports what came back instead of narrating. Rule 14
+    is prose in the instruction, and prose in the instruction is exactly the thing this
+    project has measured going the wrong way before (known gaps 4 and 5).
+    Two things to check when a live run is available, both cheap:
+
+    ```bash
+    # 1. does the tool get called at all?  the tool_use in the trace's event list
+    # 2. does the answer match the notes?  compare the reply against the CLI's own
+    #    reading of the same day -- they read the same files, so any disagreement is
+    #    the model, not the reader
+    uv run python -m text_summarizer.digest --date <that day>
+    ```
+
+    The ambiguity caveat from the vault section applies here too: on a mount holding
+    several vaults with no `OBSIDIAN_VAULT_NAME`, `resolve_vault_root` returns the
+    *parent*, and the digest's `vault.name` is then its basename — a plausible-looking
+    wrong name. Pre-existing across every vault-reading path, not introduced by the
+    digest, and worth fixing where `resolve_vault_root` degrades rather than in the
+    reader.
 
 ## Environment variables (see `.env.example`)
 

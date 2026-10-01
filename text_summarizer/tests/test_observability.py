@@ -134,7 +134,7 @@ def test_a_raising_client_does_not_break_the_turn(monkeypatch, capsys):
 
     monkeypatch.setattr(observability, "_langfuse", Broken())
     report_cache_outcome(enabled=True, hit=True, elapsed_ms=1.0)
-    assert "score 'cache.hit' failed" in capsys.readouterr().out
+    assert "score 'cache.hit' failed" in capsys.readouterr().err
 
 
 # --- the auth check timeout ---------------------------------------------------
@@ -211,7 +211,7 @@ def test_setup_reports_a_bad_key_and_leaves_the_client_none(monkeypatch, capsys)
     monkeypatch.setenv("LANGFUSE_BASE_URL", "http://127.0.0.1:1")  # refuses instantly
     setup_observability()
     assert langfuse_client() is None
-    assert "Langfuse unavailable" in capsys.readouterr().out
+    assert "Langfuse unavailable" in capsys.readouterr().err
 
 
 def test_an_unparseable_timeout_falls_back_to_five_seconds(monkeypatch):
