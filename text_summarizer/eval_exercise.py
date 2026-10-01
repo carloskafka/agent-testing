@@ -27,18 +27,30 @@ AGENT_FILE = os.path.join(AGENT_DIR, "agent.py")
 
 def run_eval():
     """Run adk eval and return the response_match_score."""
+    # CACHE_ENABLED=false, forced rather than inherited. `adk eval` is not
+    # hermetic: it calls the real agent, which calls save_summary_to_second_brain
+    # against the real vault. So the first run writes a note per eval prompt, and
+    # every later run on the same eval set HITS THE CACHE -- skipping the model
+    # *and* the tool calls -- while still reporting a high response_match_score
+    # against the stored summary. The loop would then be measuring its own output
+    # and nothing else. See gotcha 10 in AGENTS.md.
     result = subprocess.run(
         [
-            "python", "-m", "google.adk.cli", "eval",
+            "python",
+            "-m",
+            "google.adk.cli",
+            "eval",
             "text_summarizer",
             EVAL_FILE,
-            "--config_file_path", CONFIG_FILE,
-            "--print_detailed_results"
+            "--config_file_path",
+            CONFIG_FILE,
+            "--print_detailed_results",
         ],
         capture_output=True,
         text=True,
         cwd=os.path.dirname(AGENT_DIR),
-        timeout=60
+        env={**os.environ, "CACHE_ENABLED": "false"},
+        timeout=60,
     )
     output = result.stdout + result.stderr
 
@@ -62,10 +74,7 @@ def set_instructions(new_instructions):
     with open(AGENT_FILE, "r") as f:
         content = f.read()
     new_content = re.sub(
-        r'instruction=""".*?"""',
-        f'instruction="""{new_instructions}"""',
-        content,
-        flags=re.DOTALL
+        r'instruction=""".*?"""', f'instruction="""{new_instructions}"""', content, flags=re.DOTALL
     )
     with open(AGENT_FILE, "w") as f:
         f.write(new_content)
@@ -129,13 +138,19 @@ Then run: python eval_exercise.py
     print("MANUAL EVAL COMMAND")
     print("=" * 60)
     print("""
-To run eval manually anytime:
+To run eval manually anytime, from the repo root. This script sets
+CACHE_ENABLED=false for you; keep it if you run the eval yourself, or the
+second run hits the vault cache and grades a replay:
 
-  cd C:\\Users\\carlo\\Desktop\\agents
-  python -m google.adk.cli eval text_summarizer \\
-    text_summarizer\\tests\\eval\\simple_test.test.json \\
-    --config_file_path text_summarizer\\tests\\eval\\test_config.json \\
+  cd /path/to/agent-testing
+  CACHE_ENABLED=false uv run --project text_summarizer adk eval text_summarizer \
+    text_summarizer/tests/eval/simple_test.test.json \
+    --config_file_path text_summarizer/tests/eval/test_config.json \
     --print_detailed_results
+
+--project text_summarizer is not optional: pyproject.toml lives in
+text_summarizer/ and there is no project at the repo root, so a bare
+`uv run adk ...` from the root fails with "Failed to spawn: adk".
 
 Look for this line in the output:
   Metric: response_match_score, Status: PASSED, Score: 0.XXXX, Threshold: 0.5

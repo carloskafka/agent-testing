@@ -91,9 +91,7 @@ def test_every_array_typed_subschema_has_items():
     for schema in (SEARCH_METADATA, SEARCH_TEXT):
         for node in _walk(sanitize_tool_schema(schema)):
             declared = node.get("type")
-            is_array = declared == "array" or (
-                isinstance(declared, list) and "array" in declared
-            )
+            is_array = declared == "array" or (isinstance(declared, list) and "array" in declared)
             if is_array:
                 assert "items" in node, node
 

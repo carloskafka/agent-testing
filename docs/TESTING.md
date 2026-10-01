@@ -1,7 +1,9 @@
 # Testing in the ADK Web UI
 
-Once the agent is running at http://127.0.0.1:8000, try these prompts to see how
-the agent performs.
+Once the agent is running, try these prompts to see how it performs. The Docker
+path (`./run.sh`) serves the web UI on **http://localhost:8001**; the local,
+no-Docker path (`uv run --project text_summarizer adk web text_summarizer`)
+binds **:8000** directly, because `docker-compose.yml` publishes 8001 → 8000.
 
 ## Good Examples (Expected Behavior)
 

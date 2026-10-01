@@ -21,6 +21,39 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The usage text lives here, not in a `sed -n '2,25p' "$0"` range over the header
+# comment: the comment ends at line 20, so the last five printed lines were the
+# script's own source. A line-number range cannot survive an edit to the file it
+# describes, and a function has no range to get wrong.
+usage() {
+    printf '%s\n' \
+        'One-command bootstrap: run the whole solution (agent web UI + obsidian-mcp).' \
+        '' \
+        '  ./run.sh' \
+        '  ./run.sh --vault work            # pick a vault without the menu' \
+        '  ./run.sh --no-vault-prompt       # fail instead of asking (CI, scripts)' \
+        '' \
+        'Options:' \
+        '  --vault NAME       use this vault, no prompt; also --vault=NAME' \
+        '  --no-vault-prompt  never ask, even when there is a TTY' \
+        '  -h, --help         print this text and exit' \
+        '' \
+        'Creates a local .env from .env.example (if missing), picks which Obsidian' \
+        'vault to use, builds both containers, starts them, and prints the URLs.' \
+        '' \
+        'Vault selection is the interesting part. obsidian-mcp serves exactly one' \
+        'vault, so when the mounted parent holds several this prompts instead of' \
+        'guessing:' \
+        '' \
+        '  * no vault anywhere  -> auto-create "agent-vault" (fresh clone-and-run)' \
+        '  * one vault          -> use it, no configuration' \
+        '  * several            -> numbered menu, including vaults Obsidian already knows' \
+        '  * OBSIDIAN_VAULT_NAME / --vault -> use it, no prompt' \
+        '' \
+        'The choice is persisted to .env, so later runs (and `docker compose up` by' \
+        'hand) are non-interactive.'
+}
+
 PROMPT_FOR_VAULT=1
 VAULT_OVERRIDE=""
 # Keep in sync with vaults.DEFAULT_VAULT_NAME / resolve-vault.sh.
@@ -35,7 +68,7 @@ while [ $# -gt 0 ]; do
             ;;
         --vault=*) VAULT_OVERRIDE="${1#--vault=}" ;;
         -h|--help)
-            sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+            usage
             exit 0
             ;;
         *)
@@ -173,14 +206,29 @@ choose_vault() {
         echo "run.sh: set OBSIDIAN_VAULT_NAME in .env to pick one, e.g." >&2
         echo "         OBSIDIAN_VAULT_NAME=$(printf '%s' "$listing" | head -1 | cut -f1) ./run.sh" >&2
         echo >&2
-        echo "run.sh: or pass --vault NAME, or --vault NAME to import it by symlink." >&2
+        echo "run.sh: or pass --vault NAME to use one of these without a prompt." >&2
+        # Not "to import it by symlink", as this used to say: --vault never
+        # symlinks anything. It repoints the mount at the chosen vault's own
+        # parent, which is the better outcome anyway (nothing is copied, and the
+        # real vault name survives in the path). Copying is the menu's import
+        # option, and even that copies rather than links, because a symlink out
+        # of the bind mount dangles inside the container. See vaults.import_vault.
+        echo "         That repoints the mount at the vault's own parent -- nothing" >&2
+        echo "         is copied or linked." >&2
         return 1
     fi
 
     # Everything the user reads goes to stderr. stdout carries only the return
     # value ("<name>\t<path-to-import>"), because the caller reads it through $( ),
     # which would otherwise swallow the menu into the vault name.
-    local i=1 last name path markers mark answer source
+    #
+    # The option numbers are derived once, from the listing itself, and every
+    # other number is read off them. The previous code let `i` run to N+1 inside
+    # the loop and then called that value `last`, so the accepted range came out
+    # one wider than the range the prompt advertised: N+3 passed validation,
+    # matched no handler, and left the caller to exit 1 with nothing printed.
+    local i=1 name path markers mark answer source chosen
+    local LAST_VAULT CREATE_OPTION IMPORT_OPTION LAST_OPTION
     {
         echo
         echo "Several Obsidian vaults are available. Which one should the agent use?"
@@ -192,13 +240,14 @@ choose_vault() {
             echo "       $path"
             i=$((i + 1))
         done <<< "$listing"
-        last=$((i))
-        echo "  $i) Create a new empty vault ($DEFAULT_VAULT_NAME) in $VAULT_PARENT_HOST"
-        i=$((i + 1))
-        echo "  $i) Import a vault by path into $VAULT_PARENT_HOST (copied, original untouched)"
-        i=$((i + 1))
+        LAST_VAULT=$((i - 1))          # the last *listed* vault
+        CREATE_OPTION=$((LAST_VAULT + 1))
+        IMPORT_OPTION=$((LAST_VAULT + 2))
+        LAST_OPTION="$IMPORT_OPTION"    # the highest choice, and the one advertised
+        echo "  $CREATE_OPTION) Create a new empty vault ($DEFAULT_VAULT_NAME) in $VAULT_PARENT_HOST"
+        echo "  $IMPORT_OPTION) Import a vault by path into $VAULT_PARENT_HOST (copied, original untouched)"
         echo
-        printf 'Choice [1-%d] (default 1): ' "$((i - 1))"
+        printf 'Choice [1-%d] (default 1): ' "$LAST_OPTION"
     } >&2
 
     read -r answer || true
@@ -207,22 +256,23 @@ choose_vault() {
         echo "run.sh: not a number: '$answer'" >&2
         return 1
     fi
-    # Valid choices are the listed vaults (1..last), "create new" (last+1) and
-    # "import by path" (last+2) -- the same range the prompt advertises.
-    if [ "$answer" -lt 1 ] || [ "$answer" -gt $((last + 2)) ]; then
-        echo "run.sh: out of range: '$answer' (expected 1-$((last + 2)))" >&2
+    # The listed vaults are 1..LAST_VAULT, "create new" is CREATE_OPTION and
+    # "import by path" is IMPORT_OPTION, so the accepted range is exactly
+    # LAST_OPTION -- the same number the prompt advertised.
+    if [ "$answer" -lt 1 ] || [ "$answer" -gt "$LAST_OPTION" ]; then
+        echo "run.sh: out of range: '$answer' (expected 1-$LAST_OPTION)" >&2
         return 1
     fi
 
     # "Create a new empty vault": name it, nothing to import.
-    if [ "$answer" -eq "$last" ]; then
+    if [ "$answer" -eq "$CREATE_OPTION" ]; then
         printf '%s\t\n' "$DEFAULT_VAULT_NAME"
         return
     fi
     # "Import a vault by path": the path is typed, not chosen from the list, so this
     # works for a vault Obsidian does not know about. Both the name and the source
     # are returned, because a variable set inside $( ) does not survive the subshell.
-    if [ "$answer" -eq $((last + 1)) ]; then
+    if [ "$answer" -eq "$IMPORT_OPTION" ]; then
         {
             echo
             printf 'Absolute path of the vault to import: '
@@ -241,7 +291,16 @@ choose_vault() {
         printf '%s\t%s\n' "$(basename "$source")" "$source"
         return
     fi
-    printf '%s\t\n' "$(printf '%s' "$listing" | sed -n "${answer}p" | cut -f1)"
+    # A listed vault. The lookup is the backstop for the arithmetic above: if those
+    # numbers ever drift apart again, this prints the *same* out-of-range message
+    # instead of returning an empty name, which reached the caller as a bare tab
+    # and a `exit 1` that said nothing at all.
+    chosen="$(printf '%s' "$listing" | sed -n "${answer}p" | cut -f1)"
+    if [ -z "$chosen" ]; then
+        echo "run.sh: out of range: '$answer' (expected 1-$LAST_OPTION)" >&2
+        return 1
+    fi
+    printf '%s\t\n' "$chosen"
 }
 
 IMPORT_THIS=""
@@ -292,10 +351,22 @@ if [ -n "$VAULT_NAME" ]; then
 elif [ "$COUNT" -eq 0 ]; then
     # Nothing to choose from: scaffold the parent and let the auto-create
     # default take over on first boot.
-    case "$VAULT_PARENT_HOST" in
-        /*) ;;
-        *) mkdir -p "$VAULT_PARENT_HOST" ;;
-    esac
+    #
+    # Absolute values are created too, which they used not to be: the old
+    # `case "$VAULT_PARENT_HOST" in /*) ;;` branch existed only because the
+    # default is the relative ./vaults, and it left a user who named an absolute
+    # parent with a path that does not exist -- compose then bind-mounts a
+    # Docker-created directory it owns, not one the user chose. A user who writes
+    # an absolute OBSIDIAN_VAULT_PARENT_HOST has said where they want it, and
+    # `mkdir -p` is a no-op when it is already there. A typo becomes an empty
+    # directory, which is the same thing that already happened for a relative
+    # typo, and the failure mode stays visible: the next run finds one child.
+    if ! mkdir -p "$VAULT_PARENT_HOST"; then
+        echo "run.sh: cannot create the vault parent '$VAULT_PARENT_HOST'." >&2
+        echo "run.sh: create it yourself, or set OBSIDIAN_VAULT_PARENT_HOST in .env" >&2
+        echo "         to a directory that already exists." >&2
+        exit 1
+    fi
     echo "No Obsidian vault found — will auto-create '$DEFAULT_VAULT_NAME' in $VAULT_PARENT_HOST"
 else
     CHOSEN=""
@@ -327,9 +398,26 @@ fi
 
 env_set OBSIDIAN_VAULT_PARENT_HOST "$VAULT_PARENT_HOST"
 
+# The web tier reaches a self-hosted SearXNG over a shared external docker network
+# (see SEARXNG_URL in .env.example). Created here rather than left to compose
+# because it is declared `external: true` in BOTH projects: compose will not create
+# an external network, and its error ("network agent-net declared as external, but
+# could not be found") names the fix rather than doing it. Idempotent, so a rerun
+# costs nothing, and it only runs when the tier is actually configured -- an
+# unconfigured agent needs no network and should not create one.
+if [ -n "$(env_get SEARXNG_URL '')" ]; then
+    if ! docker network inspect agent-net >/dev/null 2>&1; then
+        echo "Creating the shared 'agent-net' bridge for the web tier (SearXNG)"
+        docker network create agent-net >/dev/null
+    fi
+fi
+
 docker compose up -d --build
 
 echo
 echo "Agent web UI  : http://localhost:8001"
 echo "Obsidian vault: ${VAULT_NAME:-<the only vault in>} ${VAULT_PARENT_HOST}"
+if [ -n "$(env_get SEARXNG_URL '')" ]; then
+    echo "Web search    : $(env_get SEARXNG_URL '') (self-hosted SearXNG, separate project)"
+fi
 echo "Onboarding guide: docs/getting-started.md"

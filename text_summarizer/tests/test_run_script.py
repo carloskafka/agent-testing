@@ -23,9 +23,7 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUN_SH = REPO_ROOT / "run.sh"
 
-pytestmark = pytest.mark.skipif(
-    not shutil.which("bash"), reason="run.sh needs bash"
-)
+pytestmark = pytest.mark.skipif(not shutil.which("bash"), reason="run.sh needs bash")
 
 
 def _make_vault(path: pathlib.Path) -> pathlib.Path:
@@ -59,13 +57,22 @@ def _sandbox(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
     return workdir, stubbin
 
 
-def _run(
-    workdir: pathlib.Path,
-    stubbin: pathlib.Path,
-    home: pathlib.Path,
-    *args: str,
-    stdin: str = "",
-) -> subprocess.CompletedProcess:
+def _sandbox_env(stubbin: pathlib.Path, home: pathlib.Path) -> dict[str, str]:
+    """The environment every run.sh invocation gets: stub docker, a clean HOME.
+
+    ``OBSIDIAN_VAULT*``/``VAULT_*`` are stripped because run.sh reads them from the
+    process environment *before* .env, and they decide what the run does at all.
+    ``conftest.py`` already blanks ``OBSIDIAN_VAULT_NAME`` and ``VAULT_NAME``, but
+    not ``OBSIDIAN_VAULT_PARENT_HOST``: a developer who exports that gets a
+    different parent, a different candidate list, and often no menu -- verified, the
+    four interactive tests below all fail under
+    ``env OBSIDIAN_VAULT_PARENT_HOST=/elsewhere``. Stripping the whole prefix here
+    also covers the next variable someone adds.
+
+    ``obsidian.json`` is a second leak of the same kind -- ``vaults.obsidian_vaults``
+    reads the developer's real vaults off disk -- so it is pinned to ``{}`` unless a
+    test wrote its own.
+    """
     env = dict(os.environ)
     env["PATH"] = f"{stubbin}:{env['PATH']}"
     env["HOME"] = str(home)
@@ -78,10 +85,44 @@ def _run(
     if not config.exists():
         # A test may have written a real one; never clobber it.
         config.write_text("{}")
+    return env
+
+
+def _run(
+    workdir: pathlib.Path,
+    stubbin: pathlib.Path,
+    home: pathlib.Path,
+    *args: str,
+    stdin: str = "",
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(workdir / "run.sh"), *args],
         cwd=workdir,
-        env=env,
+        env=_sandbox_env(stubbin, home),
+        input=stdin,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _run_in_pty(
+    workdir: pathlib.Path,
+    stubbin: pathlib.Path,
+    home: pathlib.Path,
+    stdin: str,
+) -> subprocess.CompletedProcess:
+    """Drive the menu. The answer has to reach run.sh's *own* stdin.
+
+    The pty has to be run.sh's stdin, so the input is fed to script(1) rather than
+    piped into run.sh: a pipe would make `[ -t 0 ]` false and skip the menu.
+    script forwards its stdin to the pty. A pty echoes CRLF, so callers assert on
+    ``(stdout + stderr).replace("\\r", "")``.
+    """
+    return subprocess.run(
+        ["script", "-qec", "bash run.sh", "bash"],
+        cwd=workdir,
+        env=_sandbox_env(stubbin, home),
         input=stdin,
         capture_output=True,
         text=True,
@@ -207,52 +248,31 @@ def test_a_vault_obsidian_already_knows_is_offered_and_repoints_the_mount(tmp_pa
 # --- the menu -----------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not shutil.which("script"), reason="script(1) is needed to allocate a pty"
-)
+@pytest.mark.skipif(not shutil.which("script"), reason="script(1) is needed to allocate a pty")
 @pytest.mark.parametrize("choice,expected", [("2", "work"), ("", "personal")])
 def test_the_menu_lists_the_vaults_and_honours_the_choice(tmp_path, choice, expected):
     workdir, stubbin = _sandbox(tmp_path)
     for name in ("personal", "work"):
         _make_vault(workdir / "vaults" / name)
 
-    home = tmp_path / "home"
-    home.mkdir()
-    result = subprocess.run(
-        # The pty has to be run.sh's *own* stdin, so the answer is fed to script(1)
-        # rather than piped into run.sh: a pipe would make `[ -t 0 ]` false and
-        # skip the menu. script forwards its stdin to the pty.
-        ["script", "-qec", "bash run.sh", "bash"],
-        cwd=workdir,
-        env={
-            **os.environ,
-            "PATH": f"{stubbin}:{os.environ['PATH']}",
-            "HOME": str(home),
-        },
-        input=f"{choice}\n",
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    result = _run_in_pty(workdir, stubbin, tmp_path / "home", f"{choice}\n")
     combined = result.stdout + result.stderr
     assert "Which one should the agent use?" in combined, combined
     assert "1) personal" in combined and "2) work" in combined
     # A pty echoes CRLF; normalise before asserting on the choice line.
     assert f"Vault: {expected}" in combined.replace("\r", ""), combined
-    assert f"Vault: {expected}" in combined, combined
     assert _env_value(workdir, "OBSIDIAN_VAULT_NAME") == expected
 
 
-@pytest.mark.skipif(
-    not shutil.which("script"), reason="script(1) is needed to allocate a pty"
-)
+@pytest.mark.skipif(not shutil.which("script"), reason="script(1) is needed to allocate a pty")
 def test_the_menu_can_import_an_existing_vault(tmp_path):
     """The import option: keep the mount where it is and bring the vault into it.
 
     Two listed candidates are needed, because a lone candidate is used without
     asking -- the import path is only reachable when there is a genuine choice to
     make. The path is typed rather than picked from the list, so this also covers
-    a vault Obsidian does not know about.
+    a vault Obsidian does not know about. It is also the highest advertised
+    choice, so it pins the top of the range the prompt prints.
     """
     workdir, stubbin = _sandbox(tmp_path)
     # Two listed candidates so the menu appears; the imported vault is deliberately
@@ -262,24 +282,11 @@ def test_the_menu_can_import_an_existing_vault(tmp_path):
     _make_vault(workdir / "vaults" / "other-notes")
     real = _make_vault(tmp_path / "notes" / "journal")
 
-    result = subprocess.run(
-        # The pty has to be run.sh's own stdin, so the input goes to script(1):
-        # a pipe into run.sh would make `[ -t 0 ]` false and skip the menu.
-        ["script", "-qec", "bash run.sh", "bash"],
-        cwd=workdir,
-        env={
-            **os.environ,
-            "PATH": f"{stubbin}:{os.environ['PATH']}",
-            "HOME": str(tmp_path / "home"),
-        },
-        input=f"4\n{real}\n",
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    result = _run_in_pty(workdir, stubbin, tmp_path / "home", f"4\n{real}\n")
     combined = (result.stdout + result.stderr).replace("\r", "")
     assert result.returncode == 0, combined
     assert "Import a vault by path" in combined
+    assert "Choice [1-4]" in combined, "import is the last advertised choice"
     assert "Absolute path of the vault to import" in combined
 
     imported = workdir / "vaults" / "journal"
@@ -294,28 +301,138 @@ def test_the_menu_can_import_an_existing_vault(tmp_path):
     assert _env_value(workdir, "OBSIDIAN_VAULT_PARENT_HOST") == "./vaults"
 
 
-def test_the_menu_reports_the_valid_range_and_rejects_a_bad_choice(tmp_path):
-    """The prompt used to offer a range one wider than the list; both are pinned."""
+@pytest.mark.skipif(not shutil.which("script"), reason="script(1) is needed to allocate a pty")
+def test_the_menu_can_create_a_new_empty_vault(tmp_path):
+    """The choice just below the last one: the sibling of the import option.
+
+    Its number used to come from a variable (`last`) that the loop had already
+    advanced past the end of the listing, so "the last listed vault" and "create
+    new" were the same number by coincidence. The advertised range and the
+    handlers disagreed by one at the top; this pins the handler that moved.
+    """
     workdir, stubbin = _sandbox(tmp_path)
     for name in ("personal", "work"):
         _make_vault(workdir / "vaults" / name)
 
-    result = subprocess.run(
-        ["script", "-qec", "bash run.sh", "bash"],
-        cwd=workdir,
-        env={
-            **os.environ,
-            "PATH": f"{stubbin}:{os.environ['PATH']}",
-            "HOME": str(tmp_path / "home"),
-        },
-        input="99\n",
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    result = _run_in_pty(workdir, stubbin, tmp_path / "home", "3\n")
+    combined = (result.stdout + result.stderr).replace("\r", "")
+    assert result.returncode == 0, combined
+    assert "Create a new empty vault (agent-vault)" in combined
+    assert "out of range" not in combined
+    assert "Vault: agent-vault" in combined
+    # Nothing was copied: the vault is created inside the container on first boot.
+    assert not (workdir / "vaults" / "agent-vault").exists()
+    assert _env_value(workdir, "OBSIDIAN_VAULT_NAME") == "agent-vault"
+
+
+@pytest.mark.skipif(not shutil.which("script"), reason="script(1) is needed to allocate a pty")
+def test_the_menu_reports_the_valid_range_and_rejects_a_bad_choice(tmp_path):
+    """A wildly out-of-range answer is rejected and nothing is started.
+
+    ``99`` is rejected by any off-by-one, which is why the boundary -- the choice
+    one past the advertised range -- has its own test below.
+    """
+    workdir, stubbin = _sandbox(tmp_path)
+    for name in ("personal", "work"):
+        _make_vault(workdir / "vaults" / name)
+
+    result = _run_in_pty(workdir, stubbin, tmp_path / "home", "99\n")
     combined = (result.stdout + result.stderr).replace("\r", "")
     # 2 vaults + "create new" + "import by path" = 4 choices.
     assert "Choice [1-4]" in combined, combined
     assert result.returncode != 0
     assert "out of range" in combined
     assert "STUB DOCKER" not in result.stdout
+
+
+@pytest.mark.skipif(not shutil.which("script"), reason="script(1) is needed to allocate a pty")
+def test_the_menu_rejects_the_choice_past_the_advertised_range(tmp_path):
+    """The boundary, which is the case that survived: one past the last choice.
+
+    ``99`` (the test above) is rejected by any off-by-one, so it proved nothing.
+    ``5`` is the exact bug: with N listed vaults the accepted range was computed
+    as ``1..N+3`` while the prompt advertised ``1..N+2``, so N+3 passed
+    validation, matched neither the create nor the import handler, and fell
+    through to a `sed -n "5p"` that printed nothing. The caller then died on
+    `[ -n "$CHOSEN" ] || exit 1` having printed no diagnostic at all.
+
+    The advertised range and the accepted range must be the same number, so
+    this asserts the message names the range the user was actually shown.
+    """
+    workdir, stubbin = _sandbox(tmp_path)
+    for name in ("personal", "work"):
+        _make_vault(workdir / "vaults" / name)
+
+    result = _run_in_pty(workdir, stubbin, tmp_path / "home", "5\n")
+    combined = (result.stdout + result.stderr).replace("\r", "")
+    assert "Choice [1-4]" in combined, combined
+    assert result.returncode != 0
+    assert "out of range: '5'" in combined, combined
+    assert "expected 1-4" in combined, combined
+    # Loud, not a bare non-zero exit: this is what the bug cost the user.
+    assert "run.sh:" in combined, combined
+    assert "STUB DOCKER" not in result.stdout
+
+
+# --- the shell itself ---------------------------------------------------------
+
+
+def test_help_prints_usage_and_no_source(tmp_path):
+    """--help must not print the script.
+
+    It used to be `sed -n '2,25p' "$0"`, and the header comment is 20 lines, so the
+    last five printed lines were source: `set -euo pipefail`,
+    `cd "$(dirname "$0")"`, `PROMPT_FOR_VAULT=1`, `VAULT_OVERRIDE=""`, the comment
+    above DEFAULT_VAULT_NAME. A line-number range cannot survive an edit to the
+    file it describes, so the text now lives in a `usage()` function; this asserts
+    the property structurally rather than re-pinning a range.
+    """
+    workdir, stubbin = _sandbox(tmp_path)
+
+    result = _run(workdir, stubbin, tmp_path / "home", "--help")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "One-command bootstrap" in result.stdout
+    assert "--vault NAME" in result.stdout
+    assert "OBSIDIAN_VAULT_NAME" in result.stdout
+    # Not one line of the script's own code may appear, which covers every line
+    # named in the docstring plus whatever the next edit happens to move. Lines are
+    # read whole and stripped, so indentation cannot hide a leak. Bare keywords
+    # (`fi`, `esac`, `done`) are excluded: they are substrings of ordinary prose
+    # and "fi" appears in "configured", so matching them would prove nothing.
+    code_lines = [
+        stripped
+        for line in RUN_SH.read_text().splitlines()
+        if (stripped := line.strip())
+        and not stripped.startswith("#")
+        and (" " in stripped or "=" in stripped)
+    ]
+    leaked = [line for line in code_lines if line in result.stdout]
+    assert not leaked, f"--help printed the script's own source: {leaked}"
+    # Help is answered before anything is configured or started.
+    assert "STUB DOCKER" not in result.stdout
+    assert not (workdir / ".env").exists()
+
+
+def test_an_absolute_vault_parent_is_created(tmp_path):
+    """An absolute OBSIDIAN_VAULT_PARENT_HOST is scaffolded like a relative one.
+
+    The `mkdir -p` was guarded by `case "$VAULT_PARENT_HOST" in /*) ;;`, which
+    only made sense while the default was the relative ./vaults: a user who named
+    an absolute parent got a path that was never created, so compose bind-mounted
+    a Docker-created directory of its own instead of the one that was configured.
+    """
+    workdir, stubbin = _sandbox(tmp_path)
+    parent = tmp_path / "somewhere-else"
+    assert not parent.exists()
+    (workdir / ".env").write_text(f"OBSIDIAN_VAULT_PARENT_HOST={parent}\n")
+
+    result = _run(workdir, stubbin, tmp_path / "home")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert parent.is_dir()
+    assert f"will auto-create 'agent-vault' in {parent}" in result.stdout
+    assert _env_value(workdir, "OBSIDIAN_VAULT_PARENT_HOST") == str(parent)
+    # The configured parent is the only one that is created: nothing is written
+    # into the repo checkout just because ./vaults is the default.
+    assert not (workdir / "vaults").exists()

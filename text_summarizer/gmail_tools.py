@@ -30,10 +30,7 @@ def build_gmail_tools() -> list:
         )
         from mcp import StdioServerParameters
     except ImportError:
-        print(
-            "Gmail MCP env vars set but google-adk[mcp] not installed; "
-            "run: uv sync"
-        )
+        print("Gmail MCP env vars set but google-adk[mcp] not installed; run: uv sync")
         return []
 
     server_path = Path(__file__).with_name("gmail_mcp_server.py")

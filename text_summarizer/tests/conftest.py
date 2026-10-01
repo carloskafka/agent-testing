@@ -51,6 +51,14 @@ os.environ["MODEL_ALIAS"] = ""
 os.environ["OBSIDIAN_VAULT_PATH"] = ""
 os.environ["OBSIDIAN_MCP_URL"] = ""
 
+#: The web tier. Same reason as the two above: ``agent`` builds its tool list at
+#: import time, so a developer with ``SEARXNG_URL`` set in ``.env`` would exercise
+#: ``build_web_search_tools()``'s configured branch during collection and this
+#: suite would silently become a different suite. With the URL blank,
+#: ``build_web_search_tools()`` returns ``[]``.
+os.environ["SEARXNG_URL"] = ""
+os.environ["WEB_SEARCH_ENABLED"] = "true"
+
 #: Observability: no key means no instrumenting, and no network.
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""

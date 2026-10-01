@@ -161,13 +161,7 @@ def gmail_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
 def gmail_read(message_id: str) -> dict[str, Any]:
     """Read one full email (headers + body) by its message id."""
     try:
-        msg = (
-            _service()
-            .users()
-            .messages()
-            .get(userId="me", id=message_id, format="full")
-            .execute()
-        )
+        msg = _service().users().messages().get(userId="me", id=message_id, format="full").execute()
         return _full(msg)
     except (HttpError, ValueError) as exc:
         # ValueError is _env's "credential is not set". It is caught here for the
@@ -180,9 +174,7 @@ def gmail_read(message_id: str) -> dict[str, Any]:
 def gmail_get_thread(thread_id: str) -> list[dict[str, Any]]:
     """Return every message in an email thread by thread id, oldest first."""
     try:
-        thread = (
-            _service().users().threads().get(userId="me", id=thread_id).execute()
-        )
+        thread = _service().users().threads().get(userId="me", id=thread_id).execute()
         return [_full(m) for m in (thread.get("messages") or [])]
     except (HttpError, ValueError) as exc:
         return [{"error": str(exc)}]

@@ -181,9 +181,10 @@ def select_vault(
 
     if wanted:
         # Pointed straight at the vault it names: nothing to descend into.
-        if os.path.isdir(os.path.join(parent, BRAIN_DIR)) and os.path.basename(
-            os.path.normpath(parent)
-        ) == wanted:
+        if (
+            os.path.isdir(os.path.join(parent, BRAIN_DIR))
+            and os.path.basename(os.path.normpath(parent)) == wanted
+        ):
             return VaultSelection(
                 Vault(wanted, parent, looks_like_vault=True),
                 reason=f"{VAULT_NAME_ENV}={wanted} names the mounted directory itself",
@@ -256,9 +257,7 @@ def obsidian_config_path(config_path: str | None = None) -> str:
     explicit = os.environ.get("OBSIDIAN_CONFIG_DIR", "").strip()
     if explicit:
         return os.path.join(explicit, "obsidian.json")
-    return os.path.join(
-        os.path.expanduser("~"), ".config", "obsidian", "obsidian.json"
-    )
+    return os.path.join(os.path.expanduser("~"), ".config", "obsidian", "obsidian.json")
 
 
 def obsidian_vaults(config_path: str | None = None) -> list[Vault]:
@@ -294,9 +293,7 @@ def obsidian_vaults(config_path: str | None = None) -> list[Vault]:
             continue
         name = os.path.basename(os.path.normpath(resolved)) or str(vault_id)
         # Several config ids can name one directory; keep the first.
-        found.setdefault(
-            resolved, Vault(name=name, path=resolved, looks_like_vault=True)
-        )
+        found.setdefault(resolved, Vault(name=name, path=resolved, looks_like_vault=True))
     return sorted(found.values(), key=lambda v: v.name.lower())
 
 
@@ -342,13 +339,9 @@ def import_vault(source: str, parent: str, *, mode: str = "copy") -> Vault:
     name = os.path.basename(os.path.normpath(source))
     target = os.path.join(parent, name)
     if os.path.lexists(target):
-        raise VaultSelectionError(
-            f"{target!r} already exists; remove it or pick a different vault"
-        )
+        raise VaultSelectionError(f"{target!r} already exists; remove it or pick a different vault")
     if mode not in ("copy", "link"):
-        raise VaultSelectionError(
-            f"unknown import mode {mode!r}; use 'copy' or 'link'"
-        )
+        raise VaultSelectionError(f"unknown import mode {mode!r}; use 'copy' or 'link'")
 
     os.makedirs(parent, exist_ok=True)
     if mode == "link":

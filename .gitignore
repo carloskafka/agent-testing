@@ -225,3 +225,8 @@ vaults/
 # --- Google OAuth ---
 *client_secret*.json
 *token.json
+
+# The self-hosted SearXNG project's own working state. It lives outside this repo
+# (see SEARXNG_URL in .env.example), so these only appear here if someone copies
+# its layout in; .env must never be committed.
+searxng/.env

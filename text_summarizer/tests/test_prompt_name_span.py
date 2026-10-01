@@ -13,35 +13,18 @@ This runs a real ``LlmAgent`` through a real ``InMemoryRunner`` with a stub
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncGenerator
 
+from _helpers import _StubLlm
 from google.adk.agents import LlmAgent
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-
 from text_summarizer import observability
 
 PROMPT_NAME_ATTR = "langfuse.observation.prompt.name"
-
-
-class _StubLlm(BaseLlm):
-    """A BaseLlm that returns one canned answer and reports a model_version."""
-
-    async def generate_content_async(
-        self, llm_request: LlmRequest, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse, None]:
-        yield LlmResponse(
-            content=types.Content(role="model", parts=[types.Part(text="- stub answer")]),
-            finish_reason=types.FinishReason.STOP,
-            model_version=self.model,
-        )
 
 
 def _capture_spans(agent: LlmAgent, message: str = "Summarize: hello world") -> list:
@@ -64,9 +47,7 @@ def _capture_spans(agent: LlmAgent, message: str = "Summarize: hello world") -> 
             async for _ in runner.run_async(
                 user_id="u1",
                 session_id=session.id,
-                new_message=types.Content(
-                    role="user", parts=[types.Part(text=message)]
-                ),
+                new_message=types.Content(role="user", parts=[types.Part(text=message)]),
             ):
                 pass
 
@@ -90,14 +71,8 @@ def test_generation_span_carries_prompt_name():
     """The attribute must land on a real generation span, not just be callable."""
     spans = _capture_spans(_agent())
     tagged = [s for s in spans if PROMPT_NAME_ATTR in (s.attributes or {})]
-    assert tagged, (
-        f"no span carried {PROMPT_NAME_ATTR}; "
-        f"spans seen: {[s.name for s in spans]}"
-    )
-    assert all(
-        s.attributes[PROMPT_NAME_ATTR] == observability.DEFAULT_PROMPT_NAME
-        for s in tagged
-    )
+    assert tagged, f"no span carried {PROMPT_NAME_ATTR}; spans seen: {[s.name for s in spans]}"
+    assert all(s.attributes[PROMPT_NAME_ATTR] == observability.DEFAULT_PROMPT_NAME for s in tagged)
 
 
 def test_prompt_name_env_override(monkeypatch):

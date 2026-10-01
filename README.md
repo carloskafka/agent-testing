@@ -37,69 +37,56 @@ in your Obsidian config — and asks which one the agent should use, then rememb
 the answer. One vault needs no configuration; several are never guessed between.
 See [using a vault you already have](docs/INTEGRATIONS.md#using-a-vault-you-already-have).
 
-On the first run it also creates `.env` from `.env.example` and stops — edit it
-to put in your `GEMINI_API_KEY`, then run `./run.sh` again.
+On the first run it also creates `.env` from `.env.example` if it isn't there yet,
+and prints a reminder to set your `GEMINI_API_KEY` — but it does **not** stop. It
+carries on into the vault menu and `docker compose up -d --build`, so edit `.env`
+and re-run `./run.sh` once your key is in.
 
 > **Local (no Docker), optional:** 
-1. Run `cd text_summarizer && uv sync`
-2. Run `uv run adk web text_summarizer`
-3. Access http://127.0.0.1:8000. 
+> 1. Run `uv sync --project text_summarizer`
+> 2. Run `uv run --project text_summarizer adk web text_summarizer`
+> 3. Access http://127.0.0.1:8000. 
 
-Same agent, no containers.
+Same agent, no containers. Two things to know about this path: there is **no
+project at the repo root** — `pyproject.toml` lives in `text_summarizer/` — so
+every `uv run` needs `--project text_summarizer` or it fails with
+`Failed to spawn: adk`; and it binds :8000 directly, where the Docker path
+publishes **:8001 → 8000**. Everything below this section is run from the repo root.
 
 ### 3. Configure Environment Variables
 
-Copy `.env.example` to your local `.env` and set what you need. This is every variable:
+**[`.env.example`](.env.example) is the single source of truth** for every variable
+and its comments — it is the file `./run.sh` copies into a fresh `.env`, and it is
+kept fuller than anything duplicated here on purpose. Two copies of a config
+reference drift, and these had. Only the handful you are most likely to touch are
+shown inline:
 
 ```env
-# === Model provider ===
-# "gemini" (default) or "openrouter"
+# === Model provider ===  "gemini" (default) or "openrouter"
 MODEL_PROVIDER=gemini
-# Gemini (free tier) — key at https://aistudio.google.com/app/apikey
-GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_API_KEY=your_gemini_api_key_here       # https://aistudio.google.com/app/apikey
 
-# OpenRouter (optional, free models) — key at https://openrouter.ai/keys
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-OPENROUTER_API_BASE=https://openrouter.ai/api/v1
-MODEL_ALIAS=gemma              # gemma / qwen / nvidia
-
-# === Langfuse (optional observability) ===
-LANGFUSE_PUBLIC_KEY=pk-lf-your_langfuse_public_key_here
-LANGFUSE_SECRET_KEY=sk-lf-your_langfuse_secret_key_here
-LANGFUSE_BASE_URL=http://localhost:3000
-LANGFUSE_PROMPT_NAME=text_summarizer
-LANGFUSE_TRACE_NAME=          # default: text_summarizer
-LANGFUSE_AUTH_CHECK_TIMEOUT=5
-
-# === Obsidian MCP (optional) — set exactly one ===
-OBSIDIAN_VAULT_PATH=/absolute/path/to/vault
-OBSIDIAN_MCP_URL=http://127.0.0.1:37842/mcp
-
-# === Gmail (optional, read-only) ===
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REFRESH_TOKEN=
+# === Obsidian ===  set EXACTLY ONE of these two (OBSIDIAN_MCP_URL wins if both are set)
+OBSIDIAN_VAULT_PATH=/absolute/path/to/your/vault
+# OBSIDIAN_MCP_URL=http://127.0.0.1:37842/mcp
 
 # === Second brain — which vault (optional) ===
 SECOND_BRAIN_VAULT=/absolute/path/to/your/vault   # point at the vault's PARENT dir
-OBSIDIAN_VAULT_NAME=                             # only when that dir holds several
-VAULT_NAME=                                      # display label only, rarely needed
+OBSIDIAN_VAULT_NAME=                              # only when that dir holds several
+OBSIDIAN_CONFIG_DIR=                              # only for an unusual Obsidian install
 
 # === Cache & eval (optional) ===
 # "false" bypasses the vault cache. Keep it OFF for `adk eval`.
 CACHE_ENABLED=true
-
-# === Docker only (optional) ===
-OBSIDIAN_VAULT_PARENT_HOST=./vaults   # host dir holding the vault(s) (auto-creates "agent-vault") if empty
-VAULT_PARENT=/vaults                  # in-container mount point, matched to the line above
-OBSIDIAN_MCP_PORT=37842
 ```
 
 All capabilities are optional and load automatically when configured:
 **[Gmail](docs/INTEGRATIONS.md)** (read-only), **[Obsidian second brain](docs/INTEGRATIONS.md#obsidian-vault-second-brain)**,
 **[Langfuse tracing](docs/ARCHITECTURE.md#observability-langfuse)**, and the
 **[`**Sources**` provenance block](docs/ARCHITECTURE.md#sources-provenance)**.
-`.env.example` carries the full comments for each variable.
+`.env.example` carries the full comments for each variable, and
+[AGENTS.md](AGENTS.md#environment-variables-see-envexample) the full table with
+what each one is read by.
 
 ### 4. Try It
 
@@ -111,21 +98,23 @@ All capabilities are optional and load automatically when configured:
 docker compose exec agent-testing sh -lc \
   'cd /workspace/text_summarizer && .venv/bin/adk run text_summarizer "Summarize: Your long text here..."'
 
-# CLI (local, no Docker):
-cd text_summarizer
-uv run adk run text_summarizer "Summarize: Your long text here..."
+# CLI (local, no Docker, from the repo root):
+uv run --project text_summarizer adk run text_summarizer "Summarize: Your long text here..."
 ```
 
 ### 5. Run Evaluations
 
 ```bash
-CACHE_ENABLED=false uv run adk eval text_summarizer \
+CACHE_ENABLED=false uv run --project text_summarizer adk eval text_summarizer \
   text_summarizer/tests/eval/simple_test.test.json \
   --config_file_path text_summarizer/tests/eval/test_config.json \
   --print_detailed_results
 ```
 
-`CACHE_ENABLED=false` is mandatory — evals call the real agent and hit the vault cache otherwise.
+`CACHE_ENABLED=false` is mandatory — evals call the real agent, which writes to the
+vault, so a second run hits the cache and grades a replay. `--project
+text_summarizer` is equally mandatory: there is no project at the repo root, so a
+bare `uv run adk …` fails with `Failed to spawn: adk`.
 
 ## Documentation
 

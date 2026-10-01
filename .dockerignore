@@ -4,6 +4,15 @@
 __pycache__
 **/__pycache__
 *.pyc
+*.egg-info
+# Local tool caches. AGENTS.md notes there is no linter or type-checker
+# configured in this repo, yet .mypy_cache/ had grown to 197 MB and was being
+# shipped to the daemon on every build.
+.mypy_cache
+**/.mypy_cache
+.pytest_cache
+**/.pytest_cache
+**/.ruff_cache
 .sdk
 .adk
 .env

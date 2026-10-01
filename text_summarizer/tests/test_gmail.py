@@ -29,10 +29,8 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-
 from text_summarizer import gmail_mcp_server as server
 from text_summarizer import gmail_tools
-
 
 # --- fakes --------------------------------------------------------------------
 
@@ -251,7 +249,7 @@ def test_nested_multipart_is_walked_recursively():
                     _text_part("<b>rich</b>", "text/html"),
                 ],
             },
-        ]
+        ],
     }
     assert server._decoded_body(payload) == "the real text\n<b>rich</b>"
 
@@ -337,12 +335,8 @@ def test_search_passes_the_query_through(monkeypatch, fake_service):
     assert list_call["q"] == "from:jobs subject:offer is:unread"
 
 
-@pytest.mark.parametrize(
-    "requested,expected", [(0, 1), (-5, 1), (5, 5), (50, 50), (9999, 50)]
-)
-def test_max_results_is_clamped_to_a_sane_range(
-    monkeypatch, fake_service, requested, expected
-):
+@pytest.mark.parametrize("requested,expected", [(0, 1), (-5, 1), (5, 5), (50, 50), (9999, 50)])
+def test_max_results_is_clamped_to_a_sane_range(monkeypatch, fake_service, requested, expected):
     """The model picks this number. 0 or 9999 must not reach the API."""
     fake = fake_service({"messages": []})
     server.gmail_search("q", max_results=requested)
@@ -365,7 +359,11 @@ def test_a_non_numeric_max_results_becomes_a_readable_error(monkeypatch, fake_se
 def test_list_tools_return_an_api_error_as_data(monkeypatch, fake_service, tool):
     """The model has to be able to read this, so it is data, not an exception."""
     fake_service(_http_error(500, b"backend exploded"))
-    out = getattr(server, tool)() if tool == "gmail_get_latest_messages" else getattr(server, tool)("q")
+    out = (
+        getattr(server, tool)()
+        if tool == "gmail_get_latest_messages"
+        else getattr(server, tool)("q")
+    )
     assert len(out) == 1 and "error" in out[0]
     assert "500" in out[0]["error"]
 
@@ -376,7 +374,11 @@ def test_list_tools_return_a_missing_credential_as_data(monkeypatch, fake_servic
         raise ValueError("GOOGLE_REFRESH_TOKEN is not set - Gmail tools unavailable")
 
     monkeypatch.setattr(server, "_service", boom)
-    out = getattr(server, tool)() if tool == "gmail_get_latest_messages" else getattr(server, tool)("q")
+    out = (
+        getattr(server, tool)()
+        if tool == "gmail_get_latest_messages"
+        else getattr(server, tool)("q")
+    )
     assert out == [{"error": "GOOGLE_REFRESH_TOKEN is not set - Gmail tools unavailable"}]
 
 
@@ -452,6 +454,7 @@ def test_single_message_tools_do_not_crash_on_a_missing_credential(monkeypatch, 
     ``{"error": "GOOGLE_REFRESH_TOKEN is not set"}`` -- with no way to recover on
     the next turn.
     """
+
     def boom():
         raise ValueError("GOOGLE_REFRESH_TOKEN is not set - Gmail tools unavailable")
 
@@ -510,9 +513,7 @@ def test_the_client_is_built_once_and_cached(monkeypatch):
             built.append("refresh")
 
     monkeypatch.setattr(server, "Credentials", _Creds)
-    monkeypatch.setattr(
-        server, "build", lambda *a, **kw: (built.append("build"), "client")[1]
-    )
+    monkeypatch.setattr(server, "build", lambda *a, **kw: (built.append("build"), "client")[1])
     for name in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"):
         monkeypatch.setenv(name, f"{name}-value")
 

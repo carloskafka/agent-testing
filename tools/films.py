@@ -127,7 +127,7 @@ def main_film(caps, vault):
                "identifiers", F(9.5), FAINT, anchor="lt")
         yy = BAR + 268
         f.rrect((14, yy, OUT_W - 14, OUT_H - 14), r=10, fill=PANEL, outline=STROKE, w=1)
-        f.text((30, yy + 14), "after_agent_callback  →  sources.render_sources", F(10.5,
+        f.text((30, yy + 14), "after_model_callback  →  sources.render_sources", F(10.5,
                  bold=True, mono=True), BLUE, anchor="lt")
         f.caption(30, yy + 36, 420,
                   "Both @@ADK_VAULT@@ and @@ADK_MODEL@@ are replaced in code. The vault comes "

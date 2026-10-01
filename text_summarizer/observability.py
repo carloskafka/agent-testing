@@ -74,9 +74,7 @@ def tag_trace_identity(callback_context, *_: object) -> None:
         # CallbackContext.user_id is the authoritative value: it is the identity the
         # runner resolved for this turn, and it is set even for sessions that were
         # restored without a user_id on the session record.
-        user_id = getattr(callback_context, "user_id", None) or getattr(
-            session, "user_id", None
-        )
+        user_id = getattr(callback_context, "user_id", None) or getattr(session, "user_id", None)
         if user_id:
             attributes[_USER_ID_ATTR] = str(user_id)
 
@@ -136,7 +134,10 @@ def report_cache_outcome(*, enabled: bool, hit: bool, elapsed_ms: float) -> None
     except Exception as exc:  # pragma: no cover
         print(f"[observability] cache tagging failed: {exc}")
 
-    for name, value in (("cache.hit", 1.0 if hit else 0.0), ("cache.lookup_ms", round(elapsed_ms, 3))):
+    for name, value in (
+        ("cache.hit", 1.0 if hit else 0.0),
+        ("cache.lookup_ms", round(elapsed_ms, 3)),
+    ):
         try:
             _langfuse.score_current_trace(name=name, value=value, data_type="NUMERIC")
         except Exception as exc:  # pragma: no cover
@@ -153,11 +154,19 @@ def _auth_check_with_timeout(client, timeout: float) -> bool | None:
     "unknown" and the caller proceeds to instrument anyway -- a genuinely invalid
     key then fails at export time, where the error is actionable, rather than at
     startup, where it looks like "observability is off".
+
+    The executor is shut down with ``wait=False`` and deliberately *not* used as a
+    context manager. ``ThreadPoolExecutor.__exit__`` calls ``shutdown(wait=True)``,
+    which joins the worker -- so a ``with`` block turns the timeout back into a
+    full wait, and the caller blocks for however long the wedged call takes. The
+    timeout then reports the right answer and still costs the time it was added to
+    save. Measured: a 6 s call under a 0.2 s timeout returned ``None`` after 6.0 s.
     """
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeout
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
         future = pool.submit(client.auth_check)
         try:
             return bool(future.result(timeout=timeout))
@@ -167,6 +176,9 @@ def _auth_check_with_timeout(client, timeout: float) -> bool | None:
         except Exception as exc:
             print(f"[observability] auth check error ({type(exc).__name__}: {exc})")
             return False
+    finally:
+        # wait=False, and never in a `with`: see the docstring.
+        pool.shutdown(wait=False)
 
 
 def setup_observability() -> None:
@@ -180,7 +192,7 @@ def setup_observability() -> None:
     except ImportError:
         print(
             "Langfuse env vars set but packages missing; "
-            'run: uv sync  (needs langfuse + openinference-instrumentation-google-adk)'
+            "run: uv sync  (needs langfuse + openinference-instrumentation-google-adk)"
         )
         return
 

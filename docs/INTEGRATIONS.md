@@ -26,12 +26,17 @@ sent or deleted.
    - **Create Credentials → OAuth client ID → type "Desktop app"** → download `client_secret.json`
    - If the app is in Testing mode on the consent screen, add your Gmail address as a **Test user**
 
-2. **Mint a refresh token** from inside the repo:
+2. **Mint a refresh token**, from the **repo root** (not from inside
+   `text_summarizer/`):
 
    ```bash
-   cd text_summarizer
-   uv run python -m text_summarizer.gmail_oauth --console
+   uv run --project text_summarizer python -m text_summarizer.gmail_oauth --console
    ```
+
+   Both halves of that are load-bearing. The module path is
+   `text_summarizer.gmail_oauth`, so the command names the package the way it is
+   imported — which is why the cwd is the repo root. And `--project
+   text_summarizer` points `uv` at the only `pyproject.toml` in the repo.
 
    `--console` prints a URL — open it in any browser (handy when the browser can't
    reach this machine's localhost, e.g. a VM), approve read-only access, and paste
@@ -50,8 +55,10 @@ revoked or expired, just re-run step 2 and replace `GOOGLE_REFRESH_TOKEN`.
 
 ### Troubleshooting
 
-- **`ModuleNotFoundError: dotenv`** — run the command from inside `text_summarizer/`
-  (or `uv run --project text_summarizer ...`), not the repo root.
+- **`ModuleNotFoundError: dotenv`** — the command ran without
+  `--project text_summarizer`. There is no project at the repo root, so `uv` fell
+  back to an interpreter that has none of the dependencies installed. Re-run it as
+  above; adding `cd text_summarizer` does not help, the flag is what matters.
 - **Browser says connection refused after approving** — that's Google's localhost
   redirect racing a VM's browser; ignore it and copy the **authorization code**
   instead, then paste it at the terminal prompt. Don't paste the whole URL.
@@ -90,7 +97,10 @@ at all. See [Docker deployment](ARCHITECTURE.md#docker-topology).
 explicit and never guessed. `./run.sh` handles it: it discovers the children of
 `OBSIDIAN_VAULT_PARENT_HOST` **and** every vault listed in your Obsidian config
 (`~/.config/obsidian/obsidian.json`), shows them as a numbered menu, and writes
-your answer back to `.env`.
+your answer back to `.env`. Set `OBSIDIAN_CONFIG_DIR` if Obsidian is installed
+somewhere unusual — the agent reads the same variable Obsidian does, so the two
+stay in step — and note that a missing or malformed file simply contributes no
+candidates: discovery is a convenience, never a reason the agent fails to start.
 
 ```
 $ ./run.sh

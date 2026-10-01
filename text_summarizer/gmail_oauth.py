@@ -79,14 +79,11 @@ def _exchange_authorization_code(flow: InstalledAppFlow, code: str) -> dict:
         timeout=60,
     )
     if response.status_code != 200:
-        raise SystemExit(
-            f"Token exchange failed (HTTP {response.status_code}): {response.text}"
-        )
+        raise SystemExit(f"Token exchange failed (HTTP {response.status_code}): {response.text}")
     token = response.json()
     if not token.get("refresh_token"):
         raise SystemExit(
-            "No refresh_token in the token response. "
-            f"Response was: {json.dumps(token)}"
+            f"No refresh_token in the token response. Response was: {json.dumps(token)}"
         )
     return token
 
@@ -151,11 +148,7 @@ def main() -> None:
             raise SystemExit("No refresh token returned - did you grant access?")
 
     installed = client_config.get("installed", {})
-    client_id = (
-        installed.get("client_id")
-        or creds.client_id
-        or flow.client_config.get("client_id")
-    )
+    client_id = installed.get("client_id") or creds.client_id or flow.client_config.get("client_id")
     client_secret = (
         installed.get("client_secret")
         or creds.client_secret

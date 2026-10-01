@@ -43,9 +43,7 @@ def _normalize(text: str) -> str:
 def _user_prompt(invocation: dict) -> str:
     content = invocation.get("user_content") or {}
     parts = content.get("parts") or []
-    return "".join(
-        p.get("text", "") or "" for p in parts if isinstance(p, dict) and p.get("text")
-    )
+    return "".join(p.get("text", "") or "" for p in parts if isinstance(p, dict) and p.get("text"))
 
 
 def _golden_response(invocation: dict) -> str:
