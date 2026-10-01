@@ -428,6 +428,14 @@ SearXNG is a **separate compose project**, reached over a shared external docker
 
 `run.sh` creates that network idempotently, and only when `SEARXNG_URL` is set. `WEB_SEARCH_ENABLED=false` removes the tools while leaving the URL alone — which is what eval runs want, because live results change daily and would make `response_match_score` measure the day rather than the instruction edit (same reasoning as `CACHE_ENABLED`).
 
+**The configured SearXNG is not attacker-supplied, and applying the SSRF rule to it made the tier unusable.** `check_url` refuses every private and loopback address, which is exactly right for `web_fetch` — there the URL came out of a search result, so its whole risk is that a page author named `169.254.169.254`. It was also applied to the one URL the operator wrote in `.env`, and a self-hosted SearXNG is on a Docker bridge (`172.30.0.2`) or on localhost. So the web tier could never work in the deployment it exists for. Measured live, after enabling it for the first time: `cannot reach the configured SearXNG instance: searxng-core resolves to the non-public address 172.30.0.2`, on every call.
+
+The failure was **silent**, which is what made it worth fixing rather than working around. Every error here is returned as *data*, so the model reads it and falls through to its own knowledge: the tools stay in the list, the agent answers, the trace shows a healthy turn, and nothing records that the tier is dead. A crash would have been cheaper.
+
+`check_url` therefore takes `allow_private`, and the two callers genuinely differ: `search_web` passes it, `web_fetch` does not, and both verdicts are asserted against the *same* private address so the pair cannot be collapsed into one rule by a later refactor. **Link-local stays refused either way** — that is the cloud-metadata range, no search engine lives there, and the flag is a boundary rather than a switch-off. `test_allow_private_does_not_allow_link_local` fails if that check is dropped, which was verified by deleting it.
+
+The pinning is unchanged: `allow_private` alters which addresses are *acceptable*, not how many lookups happen, so a self-hosted host is still resolved once and dialled by literal address. `test_an_allowlisted_address_is_still_what_gets_pinned` asserts the vetted list is exactly `['172.30.0.2']`, so the DNS-rebinding defence cannot be reopened by this change.
+
 **Web pages are untrusted input, unlike the user's text, the vault or their mail.** Anyone can publish a page that ranks for a query, and its text lands verbatim in the model's context. Three independent defences, all required:
 
 - **The connection is pinned to the address that was vetted.** `check_url` resolves the host, vets every address, and hands the approved list back via `vetted=[...]`; `_http_get` then builds a transport that **dials that literal address** and carries `Host` + `sni_hostname` so TLS still validates against the real name. Without this the guard is *vacuous*: httpx resolves the hostname itself at connect time, so a name vetted as `93.184.216.34` can be re-pointed at `169.254.169.254` in between — the DNS-rebinding case. Checking all addresses from one lookup defeats a *mixed* public/private answer; it does nothing about an answer that *changes*. `_http_get` now **raises** if no vetted address is passed, so the guard cannot be forgotten. `trust_env=False` too, or `HTTP_PROXY` would send the socket somewhere the vetted address is not.
@@ -882,11 +890,10 @@ written, and each is its own PR:
 * **the documented SearXNG host does not resolve** — `searxng:8080` vs the real
   service name `searxng-core`. Silent, because `web_search` returns errors as
   data, so the tier degrades to the model's own knowledge with nothing logged.
-* **the SSRF guard refuses the configured SearXNG itself** — `check_url` vets the
-  operator-configured search host with the same rule as an attacker-supplied URL,
-  so a self-hosted instance on a Docker bridge (`172.30.0.2`) is rejected as
-  "non-public". The guard belongs on `web_fetch`, where the URL comes from a
-  search result, not on the one URL the operator chose.
+* ~~**the SSRF guard refuses the configured SearXNG itself.**~~ **Fixed** — the
+  web tier could not reach a self-hosted instance at all, and failed silently
+  while doing so. `check_url` takes `allow_private`, which `search_web` passes and
+  `web_fetch` does not; link-local stays refused either way.
 * **the fallback path still dies on the union-typed parameter** — on the *third*
   upstream reached. `sanitize_tool_schema` adds `items` to array branches, which
   fixed the Google AI Studio `any_of[0].items` rejection, but leaves the `type`

@@ -132,7 +132,11 @@ def _allow(monkeypatch, *, only=None):
 
     approved = ipaddress.ip_address("93.184.216.34")
 
-    def fake(url, *, vetted=None):
+    # `allow_private` is accepted and ignored: this stub approves the public
+    # address above regardless, so recording the flag would assert nothing. Taking
+    # it is the point -- a fake that rejects an unexpected keyword turns a
+    # signature change into twenty unrelated failures, which buries the real one.
+    def fake(url, *, vetted=None, allow_private=False):
         if only is not None and only not in url:
             return "non-public"
         if vetted is not None:
@@ -406,6 +410,114 @@ def test_private_and_loopback_addresses_are_refused(host, real_resolver):
     problem = ws.check_url(f"http://{host}/latest/meta-data/")
     assert problem, f"{host} should be refused"
     assert "non-public" in problem or "cannot resolve" in problem or "scheme" in problem
+
+
+# --- the operator's own host is a different kind of URL ------------------------
+#
+# `check_url` refused every private address, which is right for a URL that came
+# out of a search result and wrong for the one the operator wrote in .env. Found
+# live: a self-hosted SearXNG on a Docker bridge is 172.30.0.2, so `web_search`
+# returned "cannot reach the configured SearXNG instance" on every call -- and
+# because every failure here is *data*, the model just fell through to its own
+# knowledge and nothing recorded that the tier was dead.
+#
+# Every test below takes `real_resolver`. The module-wide autouse stub answers
+# every host with the same *public* address, so without it these assertions would
+# be handed 93.184.216.34 for a request to 169.254.169.254 and pass for the wrong
+# reason -- which is exactly how the bug they guard would slip back in.
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "172.30.0.2",  # a Docker bridge -- where a self-hosted SearXNG actually is
+        "127.0.0.1",  # SearXNG on the same host
+        "10.0.0.5",
+        "192.168.1.137",
+        "[::1]",
+    ],
+)
+def test_the_configured_host_may_be_private(real_resolver, address):
+    """Self-hosting is the reason the tier exists, so it has to be reachable."""
+    assert ws.check_url(f"http://{address}:8080/search", allow_private=True) == ""
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "169.254.169.254",  # cloud instance metadata
+        "169.254.1.1",  # the whole link-local block, not just the famous one
+        "[fe80::1]",
+        "0.0.0.0",
+        "[::]",
+    ],
+)
+def test_allow_private_does_not_allow_link_local(real_resolver, address):
+    """The flag opens self-hosting. It does not open the metadata endpoint.
+
+    This is what makes the flag a boundary rather than a switch-off.
+    `169.254.0.0/16` is the class `check_url` exists to protect, and no search
+    engine lives there, so allowing it would buy nothing and cost the only
+    defence `web_fetch` has.
+
+    Also why the test is on the *address* rather than on the caller being
+    trusted: an operator-chosen name still has to be resolved, and a name that
+    resolves to link-local is a poisoned record or a redirect, not an engine.
+    """
+    problem = ws.check_url(f"http://{address}:8080/search", allow_private=True)
+
+    assert problem, f"{address} must stay refused even for the configured host"
+    assert "non-public" in problem or "cannot resolve" in problem
+
+
+def test_the_same_address_is_accepted_for_one_caller_and_refused_for_the_other(real_resolver):
+    """The flag is per-call, and the two callers genuinely disagree.
+
+    `search_web` talks to the host the operator named; `web_fetch` talks to
+    whatever a search returned. Both verdicts are asserted here against the *same*
+    private address, so the pair cannot be collapsed into one rule by accident --
+    a refactor that threaded `allow_private` through a shared helper would fail
+    this while leaving every `check_url`-level test above green.
+
+    Nothing is dialled: the claim under test is which verdict each caller reaches,
+    not that a fetch succeeds.
+    """
+    docker_bridge = "172.30.0.2:8080"
+
+    assert ws.check_url(f"http://{docker_bridge}/page"), "a search result must stay refused"
+    assert ws.check_url(f"http://{docker_bridge}/search", allow_private=True) == ""
+
+
+def test_an_allowlisted_address_is_still_what_gets_pinned(real_resolver):
+    """One resolution, and the dialled address is the one that was checked.
+
+    `vetted` exists so the name is resolved once and the connection is pinned to
+    the result. `allow_private` changes which addresses are *acceptable*, not how
+    many lookups happen -- so a self-hosted host must not quietly reintroduce a
+    second resolve at connect time, which is the DNS-rebinding case the pinning
+    was added to close.
+    """
+    vetted = []
+
+    assert ws.check_url("http://172.30.0.2:8080/search", vetted=vetted, allow_private=True) == ""
+
+    assert [str(a) for a in vetted] == ["172.30.0.2"]
+
+
+def test_a_blocked_configured_host_vets_nothing(real_resolver):
+    """A refusal hands back no addresses, so nothing can be pinned to one.
+
+    The list is only populated on a clean verdict. If a refused host leaked its
+    addresses, the caller would have something to dial despite the refusal --
+    turning a "you may not fetch this" into "you may not fetch this the way the
+    code was going to".
+    """
+    vetted = ["stale"]
+
+    problem = ws.check_url("http://169.254.169.254:8080/search", vetted=vetted, allow_private=True)
+
+    assert problem
+    assert vetted == [], "a refused host must not leave a usable address behind"
 
 
 def test_decimal_ip_is_resolved_not_string_matched(real_resolver):

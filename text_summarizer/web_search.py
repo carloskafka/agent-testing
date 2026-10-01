@@ -373,7 +373,7 @@ def _is_public_address(address) -> bool:
     return not any(address in network for network in _BLOCKED_NETWORKS)
 
 
-def check_url(url: str, *, vetted: list | None = None) -> str:
+def check_url(url: str, *, vetted: list | None = None, allow_private: bool = False) -> str:
     """Return ``""`` when ``url`` is safe to fetch, else why it is not.
 
     The scheme and address checks are separated from the fetch so they are
@@ -383,6 +383,30 @@ def check_url(url: str, *, vetted: list | None = None) -> str:
     Pass ``vetted=[]`` to receive the approved addresses that were checked, so the
     caller can pin the connection to one of them rather than letting httpx resolve
     the name a second time. The list is only populated when the verdict is ``""``.
+
+    ``allow_private`` exists for exactly one caller: the search endpoint named by
+    ``SEARXNG_URL``. The two kinds of URL are not the same kind of thing, and
+    applying one rule to both makes the tier unusable while protecting nothing.
+
+    * A **search result URL** is chosen by whoever published the page. Its whole
+      risk is that it can name a private or loopback address -- the cloud
+      metadata endpoint, a database, the host's own admin port -- so
+      ``check_url`` refuses those, and :func:`web_fetch` calls it with the default.
+    * The **configured SearXNG** is named by the operator, in ``.env``, with the
+      same trust level as ``GEMINI_API_KEY``. Self-hosting is the *reason* the
+      tier exists, and a self-hosted SearXNG is on a Docker bridge (``172.30.x``)
+      or on localhost -- both private. Refusing them meant the web tier could never
+      work in the deployment it was built for, and it failed silently: every
+      refusal comes back as data, the model falls through to its own knowledge, and
+      nothing records that the tier is dead.
+
+    **Link-local stays refused even with ``allow_private=True``.** That is the
+    cloud-metadata range (``169.254.0.0/16``, and the IPv6 ``fe80::/10``), and no
+    legitimate search engine lives there. So the flag opens the realistic
+    self-hosted cases -- private and loopback -- without opening the address class
+    this whole function exists to protect. It is a deliberate boundary, not a
+    loosening of the guard: an operator who can set ``SEARXNG_URL`` can already do
+    far more than reach a metadata endpoint.
     """
     if vetted is not None:
         vetted.clear()
@@ -407,7 +431,14 @@ def check_url(url: str, *, vetted: list | None = None) -> str:
     addresses = _resolve_public_address(host)
     if not addresses:
         return f"cannot resolve {host}"
-    blocked = [a for a in addresses if not _is_public_address(a)]
+    def acceptable(address) -> bool:
+        if _is_public_address(address):
+            return True
+        # A private or loopback address is only ever acceptable on the
+        # operator-configured host, and never when it is link-local.
+        return allow_private and not (address.is_link_local or address.is_unspecified)
+
+    blocked = [a for a in addresses if not acceptable(a)]
     if blocked:
         return f"{host} resolves to the non-public address {blocked[0]}"
     if vetted is not None:
@@ -522,7 +553,9 @@ def search_web(query: str, max_results: int = 5, *, base_url: str | None = None)
     # rather than an attack to refuse.
     vetted: list = []
     try:
-        problem = check_url(url, vetted=vetted)
+        # allow_private: this is the operator's own host, named in .env. See
+        # check_url's docstring for why the two URL kinds need different rules.
+        problem = check_url(url, vetted=vetted, allow_private=True)
     except Exception as exc:
         raise ValueError(f"could not resolve the SearXNG instance: {exc}") from exc
     if problem:
