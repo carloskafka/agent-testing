@@ -1,3 +1,10 @@
+# Uncapped json-file. The ADK dev UI and the MCP server both log per-request.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   obsidian-mcp:
     build:
@@ -5,6 +12,11 @@ services:
       dockerfile: Dockerfile.obsidian-mcp
     container_name: obsidian-mcp
     restart: unless-stopped
+    # Shares agent-testing's network namespace, so these two are only ever
+    # correct together: recreating this one alone leaves it attached to the
+    # old namespace and every MCP call is refused while it still logs
+    # "listening". If you change either service, recreate the pair.
+    logging: *logging
     network_mode: service:agent-testing
     depends_on:
       - agent-testing
@@ -24,6 +36,7 @@ services:
       dockerfile: Dockerfile
     container_name: agent-testing
     restart: unless-stopped
+    logging: *logging
     ports:
       - "8001:8000"
     env_file:
