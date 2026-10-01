@@ -843,6 +843,57 @@ run leaves the previously published site up, which looks like success.
 | `CACHE_ENABLED` | `false` bypasses the vault cache and tags traces `cache-disabled`. **Set `false` for `adk eval`.** |
 | `BOT_NAME` | Label stamped in bold at the head of every answer. **Unset** derives it from the agent's name (`Text Summarizer Agent`); a value pins it; **set to empty** turns the stamp off — the control for measuring what it changes. Note the asymmetry: unset derives, empty disables. |
 
+## MVP status
+
+The work is tracked as independent, individually mergeable slices, each of which
+depends on nothing and can be reverted alone. Status verified against `main` by
+checking for the artefact each one is supposed to produce -- not by reading a
+claim, which is how the "documentation is wrong" problem starts.
+
+| MVP | Slice | Tier | Status | Evidence |
+|---|---|---|---|---|
+| 1 | The Gate — CI on every push | A | shipped | `.github/workflows` gates ruff + mypy + pytest |
+| 2 | Documentation Truth | A | shipped | #23 |
+| 3 | Doc-Drift Ratchet — makes 2 permanent | A | **remaining** | no `tests/test_doc_drift.py` |
+| 4 | `tools/` pipeline tests | A | shipped | #20 |
+| 5 | Untrusted input as paths and YAML | B | shipped | `_safe_name`, `_yaml_str`, `_assert_in_vault` |
+| 6 | Shell and bootstrap | B | shipped | `vaults.py`, `run.sh` menu |
+| 7 | Durable writes | B | shipped | #21 |
+| 8 | The untested half | C | shipped | #19 |
+| 9 | `doctor` — is this deployment wired up? | C | **remaining** | no `doctor.py` |
+| 10 | Turn metrics — cache lookup as its own span | C | **remaining** | cost visible only as a score, never in the waterfall |
+| 11 | Degradation banner | C | **remaining** | three silent failure modes, no signal |
+| 12 | Cache index — O(1) fingerprint lookup | C | deferred | a stale index is a silent wrong answer; the bounded scan measures <1 ms |
+| 13 | Streaming guard | C | **remaining** | `partial` guard present, no streaming test |
+| 14 | Vault semantic retrieval | C | **remaining** | `search_semantic` is advertised by the server and absent from our allow-list |
+| 15 | Digest mode | C | shipped | #22 |
+| 16 | Metric truth — scores that say what they measure | D | shipped | #25 |
+| 17 | One turn-text function | D | **remaining** | the question is answered four times, in two shapes |
+| 18 | Ports and factories | D | **remaining** | callbacks testable without ADK and `SimpleNamespace` |
+| 19 | `Settings` object | D | **remaining** | five modules each read the environment |
+
+**Tier A** changes no behaviour and can land in any order. **Tier B** closes live
+defects. **Tier C** is new capability, purely additive. **Tier D** is refactoring:
+the payoff is testability, not behaviour, and it goes last.
+
+Three live defects are not in the catalogue because they were found after it was
+written, and each is its own PR:
+
+* **the documented SearXNG host does not resolve** — `searxng:8080` vs the real
+  service name `searxng-core`. Silent, because `web_search` returns errors as
+  data, so the tier degrades to the model's own knowledge with nothing logged.
+* **the SSRF guard refuses the configured SearXNG itself** — `check_url` vets the
+  operator-configured search host with the same rule as an attacker-supplied URL,
+  so a self-hosted instance on a Docker bridge (`172.30.0.2`) is rejected as
+  "non-public". The guard belongs on `web_fetch`, where the URL comes from a
+  search result, not on the one URL the operator chose.
+* **the fallback path still dies on the union-typed parameter** — on the *third*
+  upstream reached. `sanitize_tool_schema` adds `items` to array branches, which
+  fixed the Google AI Studio `any_of[0].items` rejection, but leaves the `type`
+  union itself intact, and OpenRouter's `ModelRun` provider answers
+  `more than one JSON reading of the same emitted value`. Measured, not inferred;
+  see the section on tool-schema sanitisation.
+
 ## Evaluating your changes
 
 The intended workflow is: **edit instructions in `agent.py` → run eval → compare score → keep or revert**. Make one change at a time so you can attribute score deltas. Always re-check `git status`/`git diff` after running the eval scripts, since they edit `agent.py` and `optimization_history.json` for you.
