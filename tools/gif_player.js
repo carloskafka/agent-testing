@@ -10,7 +10,7 @@
  *
  * So the GIF is decoded here. The LZW pass and the frame compositing were
  * verified frame-for-frame against Pillow's own decoder on all three
- * recordings (tools/verify_gif.js) -- the composed output is byte-identical, so
+ * recordings (tools/verify_gif.py) -- the composed output is byte-identical, so
  * what a reader sees under the controls is what a browser would show natively.
  *
  * Behaviour worth knowing:

@@ -38,7 +38,7 @@ agent-testing/
 |   |-- films.py                # Which capture goes in which scene (the story)
 |   |-- gif_player.js           # The player inlined into docs/index.html
 |   |-- inject_player.py        # Inlines it; keep docs/index.html generated, not hand-edited
-|   `-- verify_gif.py           # Proves the inlined decoder matches Pillow, frame for frame
+|   |-- verify_gif.py           # Proves the inlined decoder matches Pillow, frame for frame
 |   `-- make_favicon.py         # Draws the site icon from --primary/--on-primary in the page
 `-- text_summarizer/            # The ADK agent package (Python)
     |-- __init__.py             # Entrypoint: loads .env, inits observability, exposes root_agent
@@ -85,6 +85,7 @@ agent-testing/
         |-- test_run_script.py             # run.sh: discovery, menu, import, .env persistence
         |-- test_adk_devui_patch.py       # The mobile patch + its guards against ADK drift
         |-- test_gmail.py                 # Gmail MCP server logic + the toolset that spawns it
+        |-- test_tools_gif.py             # tools/: generator-artifact sync + the decoder round trip
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
             |-- summarizer_eval_set.evalset.json # 4 eval cases
@@ -513,6 +514,36 @@ python3 tools/build_gifs.py --captures /tmp/cap \
 python3 tools/inject_player.py                         # after editing tools/gif_player.js
 python3 tools/verify_gif.py                            # decoder vs Pillow, byte for byte
 ```
+
+**`tools/` is not in the ruff or mypy gate** (`make lint` / `make types` scope to
+`$(PKG)` = `text_summarizer/`, by design — it is the only Python project with a
+`pyproject.toml`), so the 28 pre-existing `ruff check tools/` findings are not
+gating and are not this directory's problem to fix incidentally. `test_tools_gif.py`
+is the gate that *does* cover this directory, and it is worth knowing why it is not
+just a smoke test: **two lists of equal length agreeing is also what a decoder that
+returns zeros produces**, so the round trip proves nothing unless something
+deliberately breaks the decoder and the comparison is required to notice. That is
+`test_a_wrongly_decoding_page_is_reported_rather_than_passed`, and without it every
+other test in the file is compatible with a verifier that always prints "ok".
+
+`build_gifs.py` loads faces from `$AGENT_TESTING_FONTDIR` when set, else the
+Debian/Ubuntu `FONTDIR` path, and raises a message naming both remedies if the
+face is missing — `ImageFont.truetype`'s own error names the file but not the knob.
+
+**A caption in `films.py` is a claim about the architecture, and one of them was
+wrong.** The `e2e-main` scene draws `after_model_callback → sources.render_sources`
+as a label on a panel. It said `after_agent_callback` until this directory was
+covered, which is the pre-gotcha-16 architecture — the callback the fix moved the
+rewrite *out of*. A walkthrough is documentation, so a wrong one is worse than no
+one, and nothing could have caught it: the caption is rendered into a GIF at
+capture time, so changing the string does not change the checked-in recordings.
+
+**The three committed GIFs therefore still show the old caption** and need a
+regeneration pass (`docker compose up -d`, `check_stack.sh`, then `capture_ui.py`
+and `build_gifs.py`) to pick it up. That pass spends real quota and needs both
+services up, which is why it is not part of a PR that changes a string. Until it
+runs, the source is right and the artifact is stale — the opposite of the usual
+drift direction, and worth knowing if you compare them.
 
 **Recreate both services together.** `obsidian-mcp` runs with
 `network_mode: service:agent-testing`, so it shares the agent container's network

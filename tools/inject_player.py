@@ -3,7 +3,7 @@
 
 Kept as a build step rather than hand-edited into the page because the decoder
 below is a few hundred lines of code that has to stay byte-identical to the one
-in tools/verify_gif.js, which is the copy proved frame-for-frame identical to
+in tools/verify_gif.py, which is the copy proved frame-for-frame identical to
 Pillow's decoder. Generate it, then check it in.
 
     python3 tools/inject_player.py

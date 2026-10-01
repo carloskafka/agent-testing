@@ -50,7 +50,19 @@ VIOLET = (183, 156, 255)
 CORAL = (242, 139, 130)
 
 FONTDIR = "/usr/share/fonts/truetype/dejavu"
+FONTDIR_ENV = "AGENT_TESTING_FONTDIR"
 _fonts: dict = {}
+
+
+def font_dir() -> str:
+    """The directory `F` loads faces from: the override if set, else `FONTDIR`.
+
+    The constant above is one host's layout -- where `fonts-dejavu-core` installs
+    on Debian and Ubuntu -- and this module is otherwise portable. Resolved per
+    call rather than at import, because an override set after import (which is
+    what a test's `monkeypatch.setenv` is) would otherwise be read too early.
+    """
+    return os.environ.get(FONTDIR_ENV) or FONTDIR
 
 
 def F(size: float, bold: bool = False, mono: bool = False):
@@ -58,7 +70,15 @@ def F(size: float, bold: bool = False, mono: bool = False):
     hit = _fonts.get(key)
     if hit is None:
         face = ("DejaVuSansMono" if mono else "DejaVuSans") + ("-Bold" if bold else "")
-        hit = ImageFont.truetype(os.path.join(FONTDIR, face + ".ttf"), int(size))
+        path = os.path.join(font_dir(), face + ".ttf")
+        if not os.path.exists(path):
+            # ImageFont.truetype's own message names the file but not the knob
+            # that fixes it, so a missing font package reads as a bug here.
+            raise OSError(
+                f"no font at {path}. Install the DejaVu faces "
+                f"(fonts-dejavu-core), or point {FONTDIR_ENV} at a directory "
+                "that has them.")
+        hit = ImageFont.truetype(path, int(size))
         _fonts[key] = hit
     return hit
 
