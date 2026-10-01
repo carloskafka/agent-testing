@@ -422,7 +422,11 @@ A third retrieval tier, so the agent answers from **vault → web → its own kn
 
 Deliberately **not** a third MCP server. The two existing MCP toolsets wrap servers we do not own; this is two HTTP GETs against a URL *we* configure, so there is no subprocess, no session pool, and no schema union for `sanitize_tool_schema` to repair. It copies their *gating* discipline instead — including returning errors as **data**, never raising, so the model can fall through to its own knowledge instead of the turn dying.
 
-SearXNG is a **separate compose project**, reached over a shared external docker network (`agent-net`) as a service name rather than a published port, so nothing is exposed on the LAN for the agent's sake. `run.sh` creates that network idempotently, and only when `SEARXNG_URL` is set. `WEB_SEARCH_ENABLED=false` removes the tools while leaving the URL alone — which is what eval runs want, because live results change daily and would make `response_match_score` measure the day rather than the instruction edit (same reasoning as `CACHE_ENABLED`).
+SearXNG is a **separate compose project**, reached over a shared external docker network (`agent-net`) as a service name rather than a published port, so nothing is exposed on the LAN for the agent's sake.
+
+**The hostname in the docs was wrong, and the failure it causes is silent.** `.env.example` and `docs/INTEGRATIONS.md` said `http://searxng:8080`; the service on `agent-net` is `searxng-core`, so that name does not resolve — `Name or service not known`. What makes this worth recording rather than just fixing is the consequence: `web_search` returns every failure as **data**, never an exception, so the model reads the error and falls through to its own knowledge. The tools stay in the list, the agent answers, nothing is logged as broken, and the web tier is simply not a tier. Verified both ways from inside the agent container: `searxng-core:8080` returns HTTP 200 with 10 results, `searxng:8080` does not resolve. Read the host off `docker network inspect agent-net` rather than copying a name from any document, including this one.
+
+`run.sh` creates that network idempotently, and only when `SEARXNG_URL` is set. `WEB_SEARCH_ENABLED=false` removes the tools while leaving the URL alone — which is what eval runs want, because live results change daily and would make `response_match_score` measure the day rather than the instruction edit (same reasoning as `CACHE_ENABLED`).
 
 **Web pages are untrusted input, unlike the user's text, the vault or their mail.** Anyone can publish a page that ranks for a query, and its text lands verbatim in the model's context. Three independent defences, all required:
 
@@ -825,7 +829,7 @@ run leaves the previously published site up, which looks like success.
 | `OBSIDIAN_VAULT_PATH` | Optional MCP over stdio (set EXACTLY ONE of the two) |
 | `OBSIDIAN_MCP_URL` | Optional MCP over HTTP, e.g. `http://127.0.0.1:37842/mcp` |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN` | Optional read-only Gmail MCP. All three must be set; mint the refresh token once with `text_summarizer/gmail_oauth.py` |
-| `SEARXNG_URL` | Optional web-search tier. Unset means no web tools. Under Docker the agent reaches a self-hosted SearXNG (a **separate** compose project) as `http://searxng:8080` over the shared `agent-net` bridge |
+| `SEARXNG_URL` | Optional web-search tier. Unset means no web tools. Under Docker the agent reaches a self-hosted SearXNG (a **separate** compose project) as a service name over the shared `agent-net` bridge — here `http://searxng-core:8080`, and **the host must be your SearXNG container's service name**. See below. |
 | `WEB_SEARCH_ENABLED` | `false` removes the web tools while leaving `SEARXNG_URL` in place. Eval runs want this: live results change daily, so they would make `response_match_score` measure the day |
 | `SECOND_BRAIN_VAULT` | Absolute path of the directory holding the vault(s) for direct writes; defaults to `/vault`. Under Docker point this at the vault's **parent** (`/vaults`) so the real name survives — see "Which vault is active" |
 | `OBSIDIAN_VAULT_NAME` | Picks the active vault by directory name when the parent holds several. Never guessed. `./run.sh` can prompt for it and writes it to `.env` |
