@@ -175,6 +175,67 @@ def test_the_sources_block_never_reaches_the_payload(vault):
     assert "[obsidian]" not in rendered
 
 
+# --- the answer carries provenance ----------------------------------------------
+#
+# The payload deliberately carries no ``[obsidian]`` marker (above), so the Sources
+# block on a digest turn can only come from the model emitting a sentinel line and
+# ``sources.render_sources`` substituting it -- which means the model has to be
+# *asked*. Rule 7 asks, and it is scoped to "Before summarizing", i.e. the
+# ``search_text``/``note_read`` flow. Rule 14 covers the digest flow and, until
+# this test was written, did not ask.
+
+
+def test_the_digest_rule_asks_for_sources_like_every_other_vault_answer():
+    """A report *about* the vault is the most provenance-worthy answer there is.
+
+    Found live, not reasoned about: session ``2d756ad4-ef8b-4dec-a6e0-f07342a9957a``,
+    "What did you learn on Tuesday?". The model resolved the date with the clock,
+    called ``read_day_digest``, got 7 notes and reported them accurately -- and the
+    answer carried no Sources block at all, while the name stamp *was* applied. That
+    asymmetry is the signature: the stamp is unconditional in the same callback, so a
+    half-rendered answer means the renderer had nothing to substitute, which means no
+    sentinel line, which means nothing asked for one.
+
+    Asserted on the rule text because that is the only place the ask can be made.
+    A failing test here is the fix, not an obstacle to it.
+    """
+    from text_summarizer.agent import root_agent
+
+    rule_14 = _instruction_rule(root_agent.instruction, 14)
+
+    assert "rule 7" in rule_14, "the digest rule must defer to rule 7's template, not restate it"
+    assert "at the END" in rule_14, "the ask has to say where the lines go, as rule 7 does"
+    # Deferring to rule 7 only works if rule 7 actually carries the sentinel.
+    assert "@@ADK_VAULT@@" in _instruction_rule(root_agent.instruction, 7)
+
+
+def _instruction_rule(instruction: str, number: int) -> str:
+    """One numbered rule out of the ``instruction`` string, up to the next number.
+
+    Splitting on the ``N. `` prefix rather than asserting on a substring of the
+    whole block, so a mention in some *other* rule cannot keep this passing. The
+    numbering is what the model reads too, so it is the right granularity: the
+    failure this guards is "the ask lives in the wrong rule".
+    """
+    import re
+
+    # Anchored to the start of a line, not to any whitespace: rule 13 ends a
+    # sentence with "…as rule 7." and the next sentence begins "If the vault…",
+    # which a looser pattern reads as a second rule numbered 7. That was this
+    # helper's own bug, and it silently pointed the assertion at the wrong text.
+    starts = [
+        (int(m.group(1)), m.start())
+        for m in re.finditer(r"^\s*(\d+)\. [A-Z]", instruction, re.MULTILINE)
+    ]
+    body = {}
+    for index, (n, begin) in enumerate(starts):
+        end = starts[index + 1][1] if index + 1 < len(starts) else len(instruction)
+        body[n] = instruction[begin:end]
+
+    assert number in body, f"rule {number} not found; found {sorted(body)}"
+    return body[number]
+
+
 # --- dates -----------------------------------------------------------------------
 
 
