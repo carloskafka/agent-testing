@@ -892,8 +892,65 @@ def _split_frontmatter(text: str) -> tuple[str, str]:
 #: ``sources._FRONTMATTER_PREFIX_BYTES``.
 _FINGERPRINT_PREFIX_BYTES = 8 * 1024
 
+#: How old a cached note may be and still be replayed, in days.
+#:
+#: **Why this exists.** Found on session ``c3f105bf``, where a wrong answer became
+#: permanent. Asked for the Osasco session times, the agent reported that
+#: Ingresso.com "does not provide session or checkout links" -- which was false,
+#: the data was one click away on a per-movie page. The *reason* was a bug, since
+#: fixed (see "The web tier" in AGENTS.md). What this constant addresses is what
+#: happened next: the wrong summary was written to the vault, and every later
+#: asking of the same question replayed it **verbatim, with no model call at all**.
+#:
+#: That is the shape worth naming. The cache is not a cache of *facts*, it is a
+#: cache of *answers to a fixed string*, and it has no notion that the world moved
+#: on. A cinema listing, a price, a roster and a release date all change; a
+#: summary of a document the user pasted in never does. Serving the second kind
+#: forever is the entire feature. Serving the first kind forever is a machine for
+#: confidently repeating a mistake -- and it is *self-sealing*, because the replay
+#: never reaches the model, so nothing in the system can ever notice.
+#:
+#: 7 days is a judgement call and the direction is what matters: a redundant
+#: re-fetch costs one turn, while a stale replay costs the user an answer they
+#: have no way to distrust. Tied to nothing in particular -- not to a deployment,
+#: not to a model -- so it is one number to change rather than a policy to reason
+#: about. Set ``CACHE_MAX_AGE_DAYS=0`` to disable replay entirely.
+CACHE_MAX_AGE_DAYS = int(os.environ.get("CACHE_MAX_AGE_DAYS", "7") or 7)
 
-def find_cached_summary(source_text: str) -> str | None:
+#: Notes written before this existed carry no timestamp the reader can compare, so
+#: there is no honest age for them. The filename does: every note this module
+#: writes is ``<date> - <slug>.md``, and a note without that shape was either
+#: hand-written or imported. Treated as "too old to trust", which costs one live
+#: turn and never serves a guess.
+_DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\s+-\s+")
+
+
+def note_age_days(name: str, *, today: str | None = None) -> int | None:
+    """How many days old a note is, from the date in its filename.
+
+    ``None`` when the filename carries no ``YYYY-MM-DD - `` prefix, meaning the age
+    is unknown and the note must not be replayed on the strength of it.
+
+    The date comes from the **filename** rather than the frontmatter ``date:`` field
+    deliberately. The filename is what makes a stale note cheap to exclude -- it is
+    already there, no note body has to be parsed, and the bounded-prefix read that
+    the fingerprint scan does cannot reach a field that might sit further down.
+    Reading frontmatter instead would mean a second parse of every note on the scan
+    path to answer a question the filename already answers.
+    """
+    match = _DATE_PREFIX_RE.match(name)
+    if not match:
+        return None
+    reference = today or date.today().isoformat()
+    try:
+        written = date.fromisoformat(match.group(1))
+        current = date.fromisoformat(reference)
+    except ValueError:
+        return None
+    return (current - written).days
+
+
+def find_cached_summary(source_text: str, *, today: str | None = None) -> str | None:
     """Return the stored summary note for an identical source text, if any.
 
     Scans the Second Brain notes' frontmatter for a ``source_fingerprint`` matching
@@ -921,6 +978,16 @@ def find_cached_summary(source_text: str) -> str | None:
     read of one file per hit, and a hit ends the turn, so it does not sit on the
     path of every turn the way the scan does.
 
+    **A note older than :data:`CACHE_MAX_AGE_DAYS` is never replayed**, and one
+    whose filename carries no date is never replayed either -- see
+    :func:`note_age_days` for why a forever-cache is a machine for repeating a
+    mistake, and why the default direction is to re-fetch rather than trust. This
+    is the fix for the wrong answer that session ``c3f105bf`` made permanent: the
+    summary was wrong, and the replay path never reaches the model, so nothing in
+    the system could notice. It is a *bound* rather than a correctness check --
+    the vault cannot tell a stale answer from a true one, only an old one from a
+    new one, so that is what it checks.
+
     Known cost: still O(n) in the number of notes on the first model call of every
     turn, now O(n) in *prefixes* rather than in note sizes. Measured at well under
     a millisecond for a few dozen notes, so it is not worth an index file until a
@@ -930,9 +997,20 @@ def find_cached_summary(source_text: str) -> str | None:
     brain_dir = os.path.join(VAULT_ROOT, BRAIN_DIR)
     if not os.path.isdir(brain_dir):
         return None
+    if CACHE_MAX_AGE_DAYS <= 0:
+        # Replay disabled outright. Checked *before* the scan so the whole point
+        # of the setting -- never serve a stored answer -- costs no filesystem work.
+        return None
     frontmatter_spec = rf"source_fingerprint:\s*([0-9a-f]{{64}})\s*\n"
     for name in os.listdir(brain_dir):
         if not name.endswith(".md"):
+            continue
+        # Age is checked before the file is opened, and before the fingerprint is
+        # even compared. A stale note is the common case on an old vault, and
+        # reading it to discover it is too old would be work spent on every one of
+        # them on the first model call of every turn.
+        age = note_age_days(name, today=today)
+        if age is None or age > CACHE_MAX_AGE_DAYS:
             continue
         path = os.path.join(brain_dir, name)
         frontmatter, _ = _split_frontmatter(_read_prefix(path, _FINGERPRINT_PREFIX_BYTES))
