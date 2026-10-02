@@ -288,3 +288,130 @@ def test_cache_key_text_from_context_also_scopes():
     ctx.user_content = _Content("user", "summarize today news")
     scoped = cache_key_text(ctx)
     assert date.today().isoformat() in scoped
+
+
+# --- replaying an old answer -------------------------------------------------
+#
+# Found on session ``c3f105bf``. The agent answered a question wrongly, the wrong
+# summary was written to the vault, and every later asking of the same question
+# replayed it **verbatim with no model call at all**. The replay path never
+# reaches the model, so nothing in the system could notice the answer was wrong --
+# the cache was self-sealing.
+#
+# Day-scoping (above) is not the fix for that: it only applies to prompts naming a
+# relative time, and "movies in Osasco with session times" names none, so the key
+# was byte-identical forever. What is needed is a bound on how old a note may be.
+
+
+def test_a_note_older_than_the_limit_is_not_replayed(monkeypatch):
+    """The general defect: a cinema listing from last month is not today's listing.
+
+    Deliberately a prompt with **no** relative time in it, because that is the
+    shape that survived day-scoping: its fingerprint is stable, so only an age
+    bound can retire it.
+    """
+    import os
+    import tempfile
+
+    from text_summarizer import second_brain
+
+    with tempfile.TemporaryDirectory() as tmp:
+        brain = os.path.join(tmp, "Second Brain")
+        os.makedirs(brain)
+        monkeypatch.setattr(second_brain, "VAULT_ROOT", tmp)
+
+        prompt = "summarize movies in Osasco with session times"
+        digest = second_brain.source_fingerprint(prompt)
+        with open(os.path.join(brain, "2026-09-01 - old.md"), "w") as fh:
+            fh.write(f"---\nsource_fingerprint: {digest}\n---\nLast month's answer\n")
+
+        # Within the window: still a hit, so the cache keeps doing its job.
+        assert (
+            second_brain.find_cached_summary(prompt, today="2026-09-05")
+            == "Last month's answer"
+        )
+        # Past it: a miss, so the model runs and the world gets consulted again.
+        assert second_brain.find_cached_summary(prompt, today="2026-10-02") is None
+
+
+def test_a_note_with_no_date_in_its_name_is_never_replayed(monkeypatch):
+    """Unknown age means unknown trust, and a hand-written note is the common case.
+
+    The alternative -- guessing an age from the file's mtime -- would make a note
+    written by an editor or restored from a backup arbitrarily fresh or stale.
+    """
+    import os
+    import tempfile
+
+    from text_summarizer import second_brain
+
+    with tempfile.TemporaryDirectory() as tmp:
+        brain = os.path.join(tmp, "Second Brain")
+        os.makedirs(brain)
+        monkeypatch.setattr(second_brain, "VAULT_ROOT", tmp)
+
+        prompt = "summarize my hand written note"
+        digest = second_brain.source_fingerprint(prompt)
+        with open(os.path.join(brain, "no date here.md"), "w") as fh:
+            fh.write(f"---\nsource_fingerprint: {digest}\n---\nA hand written answer\n")
+
+        assert second_brain.note_age_days("no date here.md") is None
+        assert second_brain.find_cached_summary(prompt) is None
+
+
+def test_setting_the_limit_to_zero_disables_replay_entirely(monkeypatch):
+    """The off switch, and the control for measuring what the cache is worth.
+
+    Asserted rather than assumed because it is the documented way to opt out --
+    and because "0 means unlimited" is the mistake a reader would plausibly make.
+    """
+    import os
+    import tempfile
+
+    from text_summarizer import second_brain
+
+    with tempfile.TemporaryDirectory() as tmp:
+        brain = os.path.join(tmp, "Second Brain")
+        os.makedirs(brain)
+        monkeypatch.setattr(second_brain, "VAULT_ROOT", tmp)
+        monkeypatch.setattr(second_brain, "CACHE_MAX_AGE_DAYS", 0)
+
+        prompt = "summarize something"
+        digest = second_brain.source_fingerprint(prompt)
+        with open(os.path.join(brain, "2026-10-02 - today.md"), "w") as fh:
+            fh.write(f"---\nsource_fingerprint: {digest}\n---\nToday's answer\n")
+
+        # Written today, so age cannot be what excluded it -- only the switch.
+        assert second_brain.find_cached_summary(prompt, today="2026-10-02") is None
+
+
+def test_a_future_dated_note_is_not_treated_as_permanently_fresh():
+    """A note dated ahead of today has negative age and would never age out.
+
+    Clock skew, a typo in the date, or a note copied from a vault in another
+    timezone all produce one. Serving it forever is the failure the limit exists
+    to prevent, so the bound is applied to the age rather than trusting a
+    negative number.
+    """
+    from text_summarizer import second_brain
+
+    assert second_brain.note_age_days("2030-01-01 - future.md", today="2026-10-02") < 0
+
+
+def test_the_age_limit_is_read_from_the_environment():
+    """Deployment-configurable without editing code.
+
+    Read at import time from the environment, so this reloads the module with a
+    value set -- reloading is what proves the constant is *read* rather than
+    hardcoded, which an assertion on the default could not.
+    """
+    import importlib
+    import os
+
+    os.environ["CACHE_MAX_AGE_DAYS"] = "30"
+    try:
+        reloaded = importlib.reload(importlib.import_module("text_summarizer.second_brain"))
+        assert reloaded.CACHE_MAX_AGE_DAYS == 30
+    finally:
+        os.environ.pop("CACHE_MAX_AGE_DAYS", None)
+        importlib.reload(importlib.import_module("text_summarizer.second_brain"))

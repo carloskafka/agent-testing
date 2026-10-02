@@ -66,12 +66,12 @@ services:
       # OBSIDIAN_VAULT_NAME in .env to choose; run.sh can prompt for it.
       SECOND_BRAIN_VAULT: /vaults
       OBSIDIAN_VAULT_NAME: ${OBSIDIAN_VAULT_NAME:-}
-+      # Headless-browser renderer, for pages a plain HTTP GET cannot read. A
-+      # SEPARATE compose project (~/Downloads/apps/chromium) reached over the same
-+      # bridge, for the same reason SearXNG is: a service name on a private network
-+      # instead of a published port. Empty by default, so an unconfigured agent is
-+      # byte-for-byte unchanged and web_fetch simply never falls back.
-+      RENDERER_URL: ${RENDERER_URL:-}
+      # Headless-browser renderer, for pages a plain HTTP GET cannot read. A
+      # SEPARATE compose project (~/Downloads/apps/chromium) reached over the same
+      # bridge, for the same reason SearXNG is: a service name on a private network
+      # instead of a published port. Empty by default, so an unconfigured agent is
+      # byte-for-byte unchanged and web_fetch simply never falls back.
+      RENDERER_URL: ${RENDERER_URL:-}
     networks:
       # Default, plus the external bridge shared with the SearXNG project so the web
       # tier can reach it as a service name. Declared external because this repo does
