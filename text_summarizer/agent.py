@@ -4,7 +4,7 @@ import sys
 import time
 
 from google.adk.agents import LlmAgent
-from google.adk.models import FallbackModel, LlmResponse
+from google.adk.models import LlmResponse
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import FunctionTool
 from google.genai.types import Content, Part
@@ -14,6 +14,7 @@ from .clock import build_clock_tools
 from .digest_tools import build_digest_tools
 from .eval_scoring import response_match_for_agent
 from .gmail_tools import build_gmail_tools
+from .model_chain import HistorySafeFallbackModel, signature_free_chain
 from .observability import (
     langfuse_client,
     report_cache_outcome,
@@ -79,24 +80,34 @@ def _openrouter_llm(model_name: str) -> LiteLlm:
 
 
 def get_model():
+    """The model chain, wrapped so one provider never sees another's history.
+
+    Both branches return the same wrapper type. Under ``MODEL_PROVIDER=openrouter``
+    there is no Gemini in the chain, so the history restriction is vacuous there
+    -- but making it vacuous by construction rather than by a special case means a
+    Gemini entry added to that chain later cannot reintroduce the bug by omission,
+    which is how the tool-schema sanitiser had to be shared by both MCP toolsets
+    (``obsidian_tools.py`` / ``gmail_tools.py``) to stop a third server doing it.
+    """
     if MODEL_PROVIDER == "openrouter":
         primary_name = OPENROUTER_MODELS.get(MODEL_ALIAS) or _free_openrouter_models()[0]
         fallback_names = [
             name for name in _free_openrouter_models() if name != primary_name
         ]
-        return FallbackModel(
-            models=[
-                _openrouter_llm(primary_name),
-                *(_openrouter_llm(name) for name in fallback_names),
-            ]
-        )
-    # Default provider is Gemini; fall back to free OpenRouter models on quota
-    # exhaustion (HTTP 429) or transient 5xx errors.
-    return FallbackModel(
-        models=[
+        chain = [
+            _openrouter_llm(primary_name),
+            *(_openrouter_llm(name) for name in fallback_names),
+        ]
+    else:
+        # Default provider is Gemini; fall back to free OpenRouter models on quota
+        # exhaustion (HTTP 429) or transient 5xx errors.
+        chain = [
             GEMINI_MODEL,
             *(_openrouter_llm(name) for name in _free_openrouter_models()),
         ]
+    return HistorySafeFallbackModel(
+        models=chain,
+        unsigned_history_models=signature_free_chain(chain),
     )
 
 

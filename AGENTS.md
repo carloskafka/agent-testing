@@ -49,6 +49,7 @@ agent-testing/
     |-- eval_scoring.py         # ROUGE-1 (response_match_score) matching eval-set golden answers
     |-- web_search.py           # Optional third retrieval tier: SearXNG search + guarded page fetch
     |-- obsidian_tools.py       # Optional MCP tools for an Obsidian vault
+    |-- model_chain.py          # The model chain, and the guard that keeps a foreign history off Gemini
     |-- gmail_tools.py          # Optional MCP tools for read-only Gmail access
     |-- gmail_mcp_server.py     # Stdio Gmail MCP server spawned by gmail_tools
     |-- gmail_oauth.py          # One-time helper that mints GOOGLE_REFRESH_TOKEN
@@ -72,6 +73,7 @@ agent-testing/
         |-- test_bot_name.py               # The **Name** stamp: derivation, idempotence, and the metrics control
         |-- test_gmail_oauth.py            # The one-time refresh-token mint, and its failure modes
         |-- test_model_selection.py        # Model choice: aliases, the ":free" filter, the fallback chain
+        |-- test_model_chain.py            # The history guard: 3 calls, 1 growing conversation
         |-- test_obsidian_toolset.py       # Toolset gating and the schema sanitiser, per connection
         |-- test_scoring.py                # The quality.* heuristics, computed directly
         |-- test_second_brain_tools.py     # save/log/find as the *model* calls them (arg shapes)
@@ -109,8 +111,20 @@ Import chain (all through `text_summarizer/__init__.py`):
 
 - `MODEL_PROVIDER=gemini` (default) uses `gemini-3.5-flash-lite`.
 - `MODEL_PROVIDER=openrouter` uses a `:free` model chosen by `MODEL_ALIAS` (gemma/qwen/nvidia) — see `OPENROUTER_MODELS`.
-- Both paths return a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors.
+- Both paths return a `HistorySafeFallbackModel` (`model_chain.py`), which *wraps* a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors. Same order, same entries, same failover — the wrapper only decides which models may see a given conversation (see below).
 - Models referenced are the free-tier aliases used by this project; don't "fix" the names to older released models.
+
+#### A conversation is never offered to a provider that will reject it — `model_chain.py`
+
+`FallbackModel` restarts at `models[0]` on **every** model call and keeps no per-turn memory. That is correct for failover and wrong for one thing here: Gemini validates the *entire* conversation on each call, including turns it did not take part in, and rejects any `functionCall` part with no `thought_signature`. So a mid-turn fallback to a free-tier model poisons the history for the primary, and the next call dies on a 400 — which is not in `DEFAULT_STATUS_CODES`, so it propagates instead of failing over. Measured end to end on session `bc4de8b5-535f-41ce-b35b-775b297df039`; the write-up is that module's docstring.
+
+The wrapper holds two chains and picks **per call, from `llm_request.contents`**: a signature-requiring model is only offered a conversation whose `functionCall` parts all carry a signature. Three things about that choice are load-bearing:
+
+- **It is stateless, and that is the point.** There is no turn identity on `LlmRequest` to pin against — `base_llm_flow._run_one_step_async` builds a fresh one per step and `run_async` loops steps — so a pin keyed on the request would silently never fire, which is the gotcha-12 shape this repo has already paid for once. Deriving it from the payload means no turn boundary exists to get wrong: resumed sessions, concurrent turns and live connections are one code path, and no state can leak between them.
+- **It delegates rather than reimplementing.** `FallbackModel`'s loop snapshots and rolls back the request between attempts (`_RequestSnapshot`), restores `llm_request.model` per delegate, and refuses to fail over mid-stream once a response has been yielded. Two chains share their delegate instances, so this costs no second client. The response object is passed through untouched — `model_version` must stay the delegate's, or every `**Sources**` line would name the wrapper.
+- **`retriable_status_codes` is untouched.** Adding 400 would have saved the live turn in one line, but it would also silently re-route the union-type 400 in "Tool-schema sanitisation" — turning a loud schema bug into a slow answer from a different backend. The two defects are unrelated and the fix is scoped to one.
+
+`test_model_chain.py` drives **three successive calls sharing one growing conversation**, because a single-call test cannot show this defect at all: one call has no foreign history to protect. The `test_adk_wiring.py` counterpart runs the wrapper through a real `InMemoryRunner` with a tool call in the middle, since nothing else establishes that ADK accepts the wrapper as a model at all.
 
 The LlmAgent has: name `AGENT_NAME` (`text_summarizer`, also the source of the displayed label — see below), the model above, a description, bullet-point `instruction` rules, and `tools` = `build_clock_tools()` + `build_obsidian_tools()` + `build_gmail_tools()` + `build_web_search_tools()` + `build_digest_tools()`. The clock is the one **ungated** toolset — it always returns its tool, because a missing clock is a silently wrong answer rather than a missing capability; the other four return `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second shapes the answer itself: it rewrites the response's `**Sources**` block with the real vault name and the real served model, then stamps the bot name in bold at the head (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
 
@@ -403,9 +417,51 @@ The error reads `GenerateContentRequest.tools[0].function_declarations[6].parame
 
 The transform is two rules, both no-ops on an already-valid schema:
 1. **`$ref` inlined, `$schema`/`$defs` dropped.** Gemini answers `reference to undefined schema` for a dangling ref, and `search_text.fields` points at `#/$defs/SearchField`.
-2. **`items` added to any array-typed subschema that lacks one.** The original left element types unconstrained; `{"type": "string"}` is the schema that survives every backend above. Verified against all three paths.
+2. **`items` added — but only where `array` is the parameter's whole non-null type.** This is the rule that changed, and the reason is the second fault below: the `items` *is* what the next upstream refuses.
 
 Only the schema sent to the model changes — arguments are still forwarded to the MCP server untouched, so no tool's behaviour changes. The rewrite happens in place on the raw tool, which ADK caches per connection, and is idempotent. `test_obsidian_tool_schema.py` pins all of it, including the depth cap that stops a self-referential `$defs` from hanging the process.
+
+**A top-level `items` on a multi-type union is refused by a different upstream.** Found live on 2026-10-02, session `2fe0d9d0-a73b-4d9b-bc13-452658c2d585`, third occurrence of this family. `qwen/qwen3.8-27b:free` — which OpenRouter routes to a provider it calls `ModelRun` — rejects the *repaired* schema outright:
+
+```
+failed to translate request: folding the request grammar: tool "search_metadata"
+parameter schema: parameter "value": more than one JSON reading of the same
+emitted value
+```
+
+Read literally, that is a complaint about a parameter having **two valid JSON forms**, and `search_metadata.value` is declared `["array","boolean","null","number","object","string"]` *with* the `items` rule 2 just added. That makes it readable as both "a string" and "an array of strings". So the original fix was making the parameter ambiguous for the next provider in line.
+
+Every alternative was measured against the **real eight-tool payload** rather than reasoned about, because the upstreams disagree and guessing wrong costs a turn:
+
+| Candidate for `value` | qwen (`ModelRun`) | Google AI Studio upstream |
+|---|---|---|
+| 6-way union + `items` (what shipped) | **AMBIGUOUS** | accepted |
+| multi-type union, no `items` | accepted | **`any_of[0].items: missing field`** |
+| `anyOf` branches | **UNION-REJECTED** | — |
+| property dropped entirely | accepted | — |
+
+`anyOf` is the spelling that could put `items` *inside* the array branch, where JSON Schema wants it, and the same provider refuses that. So there is **no spelling that satisfies both upstreams**, and the two are in direct conflict over one parameter.
+
+The resolution is to narrow rather than describe: a multi-type union loses its `array` member, and with it goes the need for `items`. Four of the five alternatives survive, and the array case is not a capability loss — the server's own description says a JSON-encoded string is compared as a literal string, so an array was already only reachable quoted.
+
+**Scope is one parameter.** `obsidian-mcp` serves **17** nullable unions and 16 are `["T","null"]` with a single non-null member — the shape every optional array uses, untouched, because there `items` is unambiguous. Only `value` has more than one non-null member. That is measured against the live server (`tools/` walk in the commit), not asserted about.
+
+**Not verified:** the narrowing was not re-tested on a Google AI Studio upstream. `gemma`'s `:free` tier was rate-limited for the whole measurement window, so "narrowing does not reintroduce `any_of[0].items`" rests on the reasoning that a union with no `array` member has no array branch to leave bare. The qwen half — the one that was killing turns — is measured and reproducible.
+
+### Tool-argument coercion — the quoted number
+
+`obsidian-mcp` is Rust and deserialises strictly. A free-tier model answered a weather question by searching the vault and quoted both numeric arguments:
+
+```
+{'query': 'São Paulo weather', 'max_results': '5', 'context_length': '50'}
+→ failed to deserialize parameters: invalid type: string "50", expected usize
+```
+
+ADK does not validate tool arguments against the schema before dispatch, so the mismatch surfaces at the far end. `coerce_tool_args` parses a quoted scalar against the declared type — and the *declared* type is always a union here, because `obsidian-mcp` writes every optional parameter as `["integer","null"]`, so a parser that only understood `{"type": "integer"}` would coerce nothing.
+
+It is deliberately narrow, because a permissive coercion is its own defect: only a `str` is touched, only when the declared type names a scalar, and only when the string **parses**. A union that still allows `string` is left alone, and so is `"many"` for an integer — turning unparseable input into a different value would move the failure somewhere it can no longer be seen.
+
+Wired by rebinding `run_async` on the tool *instance*. A subclass would mean re-passing six private `McpTool` constructor arguments a future ADK can rename. The toolset skips the wrap when there is no `run_async`, which is the failure shape worth avoiding: an `AttributeError` in `_fetch_tools` aborts the listing, and that is the one failure `SanitizingMcpToolset` exists to *recover* from, so the turn would die against a perfectly healthy vault.
 
 **Both** MCP toolsets go through it — `sanitizing_mcp_toolset_class()` is shared by `obsidian_tools.py` and `gmail_tools.py`, so a third server cannot reintroduce the bug by omission. The in-repo Gmail server declares no union types today, so it does not strictly need the rewrite; it gets it anyway because the failure is silent until a fallback run happens to route to a Google upstream.
 
@@ -646,9 +702,76 @@ PYTHONPATH=/tmp/agent-testing-testlibs \
 ```
 
 - `tests/conftest.py` blanks `LANGFUSE_PUBLIC_KEY` before any import, because importing the package runs `setup_observability()`, which otherwise does a network auth check against an unreachable host.
-- `test_adk_wiring.py` runs a real `LlmAgent` through a real `InMemoryRunner` with a stub `BaseLlm`. That is how the three ADK facts the provenance feature depends on are verified without spending quota. **If you change how the model or tool context is read, keep these tests green — they are the only automated guard on that wiring.**
+- `test_adk_wiring.py` runs a real `LlmAgent` through a real `InMemoryRunner` with a stub `BaseLlm`. That is how the three ADK facts the provenance feature depends on are verified without spending quota. **If you change how the model or tool context is read, keep these tests green — they are the only automated guard on that wiring.** It also carries the one test that proves ADK accepts `HistorySafeFallbackModel` as a model at all: a real turn with a mid-turn failover and a tool call in the middle. Nothing that calls `generate_content_async` directly can establish that, and a wrapper that the flow rejects would otherwise pass every unit test in `test_model_chain.py`.
+- `test_model_chain.py` has no network and no vault. Its tests drive **successive** calls on one growing conversation, because the defect it guards is only observable across a turn: a single-call test has no foreign history to protect and passes against code with no guard at all.
 
 There is no linter or type-checker configured in this repo (no `ruff`/`mypy`/`pyright` config, no `Makefile`). The only automated gate is the pytest run above.
+
+### The renderer — `web_fetch` falls back to a browser
+
+A plain HTTP GET cannot execute JavaScript, and a measurable number of pages build their content with it. The page that set this up:
+
+```
+ingresso.com/filmes?city=osasco
+  94,700 bytes of HTML
+  → 183 characters of visible text after stripping tags and scripts
+  25 external scripts, no __NEXT_DATA__, no __NUXT__
+```
+
+183 characters of navigation for a page whose entire purpose is a list of films. The agent's honest answer to that was *"the titles are rendered dynamically and are not exposed in the static page text"* — true, and useless. Through a browser the same URL yields **2,024 characters naming the actual films in 2.1s**, and the agent now answers with *Verity, Digger, Resident Evil, Homem-Aranha: Um Novo Dia* instead of declining.
+
+A **separate compose project** at `~/Downloads/apps/chromium`, joined to `agent-net` by service name, configured with `RENDERER_URL`. Deliberately not part of this repo: that container executes JavaScript written by whoever published the page, so it holds no vault mount, no API key, no published port, and can be stopped without touching the agent.
+
+**It is a fallback, not a second path.** `web_fetch` does the plain GET first and only renders when what came back is too thin to be the page. `RENDER_BELOW_CHARS = 700` is set from measurement — visible chars from a GET, then from Chromium:
+
+| Page | GET | Browser | |
+|---|---|---|---|
+| `ingresso.com/filmes` | 478 | 2024 | shell → renders |
+| `ingresso.com/cinemas` | 583 | 1511 | shell → renders |
+| `example.com` | 444 | 917 | short but real → renders, and gets more |
+| `ai-act-service-desek…` | 3093 | 2793 | real prose → skipped |
+| `python.org/downloads` | 20301 | 19996 | real prose → skipped |
+
+700 sits above every shell and below every page with prose. It is set **high** on purpose: a false positive costs one ~2s render on a merely-short page, and `example.com` shows that is not a penalty. Nothing here can separate a shell from a genuinely short page by length alone; both are worth rendering, so the ambiguity costs nothing.
+
+Unset `RENDERER_URL` and the tier is byte-for-byte what it was: the gate is not part of `build_web_search_tools`, the fallback is simply never taken, and a thin page is returned as-is rather than failed.
+
+**The renderer's address vetting is per-request and is *weaker* than `check_url`'s.** Every request — document and every subresource — is intercepted before it leaves, resolved, and aborted on loopback/private/link-local/multicast. What cannot be done is **pinning**: `_pinned_transport` makes httpx dial the exact vetted address, and a browser cannot be made to. So the resolve-then-connect gap that gotcha 19 closed is open here, and the renderer says so in its own docstring rather than implying parity. All four probes refuse: `169.254.169.254`, `127.0.0.1`, `file:///etc/passwd`, and the host's own LAN address.
+
+**A side effect of the DNS choice is worth knowing.** The renderer resolves via `192.168.1.137`, this machine's own LAN address where `systemd-resolved` listens, so the browser sees the host's view of DNS. That resolver returns `0.0.0.0` for ad and tracker domains (`1.1.1.1` resolves them normally), so **the browser inherits that filtering for free** — 12 of the requests on the ingresso.com render were refused that way. The refusal message distinguishes it from a genuine non-public address, because "refused: non-public address" on an ad domain reads like a bug.
+
+**Not verified:** no live turn has run with the renderer configured *and* a working model tier. The `web_js_rendered_page_is_not_invented` scenario passed against a rebuilt container (26s, real film names, cited), but the final full-suite run was cut short — see below.
+
+### Scenario harness — `tools/scenarios.py`
+
+Real prompts against the deployed agent, judged from the **persisted session events**. Not a pytest test and not part of `make check`: it spends Gemini quota, writes to the real vault, and needs both services up.
+
+```bash
+python3 tools/scenarios.py --list
+python3 tools/scenarios.py                  # all 13
+python3 tools/scenarios.py --only web_      # by prefix
+python3 tools/scenarios.py --keep           # do not delete the scenario sessions
+```
+
+**Why the session and not the HTTP response or a trace.** The response to a dead turn is still `200`. A Langfuse trace reports the *last* event, which is the correct text even when the answer was emitted twice (gotcha 13) and looks healthy on a turn that ended on an error. The events are what the session actually holds — every tool call, the served model per step, and the error event a failed turn ends with. A scenario cannot pass by having a plausible answer, because a dead turn has no answer event at all.
+
+**It exists because three separate live failures fell through the unit suite** — a fallback splicing providers mid-turn, a quoted argument the server rejected, and a schema a fallback upstream refused. Each was found by reading a session, not by a failing test. A unit suite can prove a function is correct; it cannot prove that a *prompt* produces the intended tool calls on the deployed code.
+
+Three of the prompts are ones that actually failed in production, run verbatim. A prompt is the only thing that reproduces a failure faithfully: the unit suite tests coercion with a synthetic `"50"`, not a model that decided to search a vault for weather and quoted both its numeric arguments.
+
+**Every scenario asserts `_no_cache_hit`**, and that guard earned its place on the second live run. Rule 8 tells the agent to save *every* summary it writes, so a fixed prompt leaves a note behind — and the next run is answered from disk in about a millisecond, satisfies every other check, and reports PASS without searching anything. The outcome is read from the state ADK persisted, never inferred from a duration. A nonce on every prompt is the second net.
+
+**Every check is also fed a turn that should fail.** `test_scenarios_harness.py` covers the checkers offline, and a check that returns `True` for an empty answer, or that matches a cited URL against an empty allow-list, is green forever while the tier is dead. That is the same shape as `test_a_wrongly_decoding_page_is_reported_rather_than_passed`: something must break on purpose for the comparison to mean anything. `test_every_scenario_has_a_check_that_can_fail` walks the whole table with one dead turn, and a scenario that passes it has a check that cannot fail.
+
+Three harness bugs were found this way and none by writing it — each is a reminder that the fixtures were tidier than reality:
+
+| Bug | Symptom | Why the offline tests missed it |
+|---|---|---|
+| nonce written `{{nonce}}` | every run sent the same prompt; the 2nd was a cache hit | uniqueness was checked on the *template*, which was unique while the render was fixed |
+| citation check read `results[0]` at top level | reported "no URLs" on a turn that returned nine | real payloads are `{"result": "<json string>"}` — ADK wraps a tool's return value |
+| duplication check counted text events | failed a healthy 4-tool turn as duplicated | a model narrating alongside a tool call is legitimate; only *repeated* text is duplication |
+
+`web_js_rendered_page_is_not_invented` is the one worth knowing about: `ingresso.com` builds its listings in JavaScript and `web_fetch` does a plain HTTP GET with an HTML sanitiser, so the page arrives as a title and navigation. The failure there is not a crash — it is a model handed an empty page and a confident instruction writing plausible films and showtimes, every one fiction, with a citation attached. The check fires on a *schedule* claim and not on a bare film name, because a name can legitimately come from a search snippet and firing on those would make "stop citing" the only way to pass.
 
 ### Publishing the documentation (`docs/`)
 
@@ -869,6 +992,7 @@ claim, which is how the "documentation is wrong" problem starts.
 | 7 | Durable writes | B | shipped | #21 |
 | 8 | The untested half | C | shipped | #19 |
 | 9 | `doctor` — is this deployment wired up? | C | **remaining** | no `doctor.py` |
+| 9a | The fallback chain never splices providers mid-turn | C | shipped | `model_chain.py`, session `bc4de8b5` |
 | 10 | Turn metrics — cache lookup as its own span | C | **remaining** | cost visible only as a score, never in the waterfall |
 | 11 | Degradation banner | C | **remaining** | three silent failure modes, no signal |
 | 12 | Cache index — O(1) fingerprint lookup | C | deferred | a stale index is a silent wrong answer; the bounded scan measures <1 ms |
@@ -884,9 +1008,29 @@ claim, which is how the "documentation is wrong" problem starts.
 defects. **Tier C** is new capability, purely additive. **Tier D** is refactoring:
 the payoff is testability, not behaviour, and it goes last.
 
-Three live defects are not in the catalogue because they were found after it was
+Four live defects are not in the catalogue because they were found after it was
 written, and each is its own PR:
 
+* ~~**a mid-turn fallback poisons the history for the primary.**~~ **Fixed** —
+  `model_chain.HistorySafeFallbackModel`. Measured on session
+  `bc4de8b5-535f-41ce-b35b-775b297df039` (*"What did you learn yesterday?"*):
+  Gemini answered with a **signed** `current_datetime` call, then returned **503**,
+  so nemotron — after gemma and qwen both 429'd — took the next call and emitted a
+  `read_day_digest` `functionCall` **without** a `thought_signature`. The call
+  after that went **back to Gemini**: `FallbackModel.generate_content_async`
+  restarts at `models[0]` on every call and keeps no per-turn memory. Gemini
+  validates the *whole* conversation, so it rejected the *previous* turn's part
+  with `400 INVALID_ARGUMENT`, and 400 is not in `DEFAULT_STATUS_CODES` — it
+  propagated instead of failing over. **No answer, no name stamp, no
+  `**Sources**`, no note written.** The digest tool itself was fine; it had
+  already returned 17 notes. The wrapper holds two chains and picks per call
+  *from the payload*, so a signature-requiring model is only offered a
+  conversation whose `functionCall` parts are all signed. Stateless by
+  construction: `base_llm_flow._run_one_step_async` builds a fresh `LlmRequest`
+  per step, so there is no turn identity to pin against, and a pin keyed on the
+  request would never fire. `retriable_status_codes` is deliberately left alone —
+  adding 400 would have saved this turn but would also silently re-route the
+  union-type 400 below.
 * **the documented SearXNG host does not resolve** — `searxng:8080` vs the real
   service name `searxng-core`. Silent, because `web_search` returns errors as
   data, so the tier degrades to the model's own knowledge with nothing logged.
@@ -894,12 +1038,15 @@ written, and each is its own PR:
   web tier could not reach a self-hosted instance at all, and failed silently
   while doing so. `check_url` takes `allow_private`, which `search_web` passes and
   `web_fetch` does not; link-local stays refused either way.
-* **the fallback path still dies on the union-typed parameter** — on the *third*
-  upstream reached. `sanitize_tool_schema` adds `items` to array branches, which
-  fixed the Google AI Studio `any_of[0].items` rejection, but leaves the `type`
-  union itself intact, and OpenRouter's `ModelRun` provider answers
-  `more than one JSON reading of the same emitted value`. Measured, not inferred;
-  see the section on tool-schema sanitisation.
+* ~~**the fallback path still dies on the union-typed parameter.**~~ **Fixed** —
+  and the cause was the previous fix, not the union. `sanitize_tool_schema`'s
+  `items` rule made `search_metadata.value` readable as two JSON forms, and
+  OpenRouter's `ModelRun` provider answers `more than one JSON reading of the same
+  emitted value`. A Google AI Studio upstream needs that `items` and the same
+  provider refuses `anyOf`, so no spelling satisfies both; `items` is now injected
+  only where `array` is the whole non-null type, and a multi-type union loses that
+  member. Three occurrences, all on the fallback path: sessions `8026284f` (Sep 30)
+  and `2fe0d9d0` (Oct 2), plus one on Oct 1. See "Tool-schema sanitisation".
 
 ## Evaluating your changes
 

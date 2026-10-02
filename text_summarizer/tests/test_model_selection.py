@@ -30,9 +30,9 @@ runs for the values it is given.
 from __future__ import annotations
 
 import pytest
-from google.adk.models import FallbackModel
 from google.adk.models.lite_llm import LiteLlm
 from text_summarizer import agent as agent_module
+from text_summarizer.model_chain import HistorySafeFallbackModel
 
 #: The prefix that tells LiteLLM which provider to route to. Without it a free
 #: OpenRouter model name is looked up against the default provider, and the
@@ -255,11 +255,16 @@ def test_both_providers_return_a_fallback_model(monkeypatch):
     name the *caller asked for*, not the name that served the call. The chain is
     what makes "which backend answered" a question with more than one answer --
     and therefore the reason the substitution has to happen in code.
+
+    ``HistorySafeFallbackModel`` rather than ``FallbackModel`` since it replaced
+    it as what ``get_model()`` returns. The chain is still a chain: the wrapper
+    holds the same entries and delegates the failover to a real ``FallbackModel``
+    per conversation, so "which backend answered" is unchanged.
     """
     for provider in ("gemini", "openrouter"):
         monkeypatch.setattr(agent_module, "MODEL_PROVIDER", provider)
         model = agent_module.get_model()
-        assert isinstance(model, FallbackModel), provider
+        assert isinstance(model, HistorySafeFallbackModel), provider
         assert len(model.models) >= 2, f"{provider} chain has no fallback at all"
 
 
@@ -271,7 +276,50 @@ def test_the_agent_runs_on_a_chain_not_on_a_single_model():
     test above would still pass while the deployed agent had lost its fallback
     and rendered a single name for every answer.
     """
-    assert isinstance(agent_module.root_agent.model, FallbackModel)
+    assert isinstance(agent_module.root_agent.model, HistorySafeFallbackModel)
+
+
+# --- the history restriction ---------------------------------------------------
+
+
+def test_gemini_is_excluded_from_the_unsigned_history_chain(monkeypatch):
+    """The exclusion the wrapper exists for, asserted on the built chain.
+
+    Under the default provider the chain leads with Gemini, so this is the case
+    that would go wrong: a Gemini ``functionCall`` reached from a non-Gemini turn
+    is rejected with a 400 that is not in ``FallbackModel``'s retriable set, and
+    the turn dies instead of falling back (see ``model_chain``'s module
+    docstring). Checking it here rather than only in ``test_model_chain`` keeps
+    it next to the chain-shape assertions it is a property of.
+    """
+    monkeypatch.setattr(agent_module, "MODEL_PROVIDER", "gemini")
+    chain = agent_module.get_model()
+    allowed = [m if isinstance(m, str) else m.model for m in chain.unsigned_history_models]
+
+    assert agent_module.GEMINI_MODEL not in allowed
+    assert allowed, "an empty sub-chain has nowhere to send a foreign conversation"
+
+
+def test_the_openrouter_path_excludes_nothing(monkeypatch):
+    """No Gemini in the chain, so nothing to exclude -- and the wrapper still does it.
+
+    Vacuous by construction rather than by special case, which is the point: the
+    same wrapper is returned on both paths, so a Gemini entry added to the
+    openrouter chain later would be filtered without a second code path to
+    remember to update.
+
+    ``monkeypatch.setattr`` rather than relying on the imported default, because
+    the assertion is about the *openrouter* chain and the two tests above it are
+    about the gemini one. Asserting the wrong branch's chain would pass for the
+    wrong reason.
+    """
+    monkeypatch.setattr(agent_module, "MODEL_PROVIDER", "openrouter")
+    chain = agent_module.get_model()
+
+    def names(entries):
+        return [m if isinstance(m, str) else m.model for m in entries]
+
+    assert names(chain.unsigned_history_models) == names(chain.models)
 
 
 def test_the_env_var_alone_does_not_move_the_chain(monkeypatch):

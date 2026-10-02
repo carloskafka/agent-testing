@@ -331,6 +331,52 @@ def test_get_tools_rewrites_the_raw_mcp_tool_schema(monkeypatch):
     sanitized = obsidian_tools.sanitize_tool_schema(DEAD_ON_GOOGLE_UPSTREAM)
     assert sanitized != DEAD_ON_GOOGLE_UPSTREAM, "the fixture must actually need fixing"
 
+    async def run_async(*, args, tool_context):
+        return "ok"
+
+    tool = SimpleNamespace(
+        name="search_metadata",
+        raw_mcp_tool=SimpleNamespace(inputSchema=DEAD_ON_GOOGLE_UPSTREAM),
+        run_async=run_async,
+    )
+
+    async def fake_get_tools(self, readonly_context=None):
+        return [tool]
+
+    monkeypatch.setattr(McpToolset, "get_tools", fake_get_tools)
+
+    tools = asyncio.run(_http_toolset().get_tools())
+
+    assert tools == [tool]
+    assert tool.raw_mcp_tool.inputSchema == sanitized
+    # The six-way union is narrowed, not merely given an `items`: a top-level
+    # `items` on a parameter that is also a plain string is what OpenRouter's
+    # ModelRun provider refuses ("more than one JSON reading of the same emitted
+    # value"), and that refusal is a dead turn on the fallback path. See
+    # `_require_items`.
+    assert tool.raw_mcp_tool.inputSchema["properties"]["value"]["type"] == [
+        "boolean",
+        "null",
+        "number",
+        "object",
+        "string",
+    ]
+    # ...and the tool is now dispatchable through the coercing wrapper, not just
+    # carrying a rewritten schema. A tool that was sanitised but not wired up
+    # would look identical above, which is why this is asserted separately.
+    assert asyncio.run(tool.run_async(args={}, tool_context=None)) == "ok"
+
+
+def test_get_tools_tolerates_a_tool_with_no_run_async(monkeypatch):
+    """Coercion is skipped, not fatal, when there is nothing to wrap.
+
+    Worth pinning because the failure it avoids is the worst available shape. An
+    ``AttributeError`` inside ``_fetch_tools`` aborts the listing, which is the one
+    failure this class exists to *recover* from -- the eviction-and-retry path would
+    then run against a server that was answering perfectly, and the turn would die
+    on a healthy vault. Degrading to "no coercion" costs one rejected argument and
+    keeps the tools.
+    """
     tool = SimpleNamespace(
         name="search_metadata",
         raw_mcp_tool=SimpleNamespace(inputSchema=DEAD_ON_GOOGLE_UPSTREAM),
@@ -344,17 +390,11 @@ def test_get_tools_rewrites_the_raw_mcp_tool_schema(monkeypatch):
     tools = asyncio.run(_http_toolset().get_tools())
 
     assert tools == [tool]
-    assert tool.raw_mcp_tool.inputSchema == sanitized
-    # The union is still a union -- sanitising adds ``items``, it does not
-    # narrow the parameter, which would change what the tool accepts.
-    assert tool.raw_mcp_tool.inputSchema["properties"]["value"]["type"] == [
-        "array",
-        "boolean",
-        "null",
-        "number",
-        "object",
-        "string",
-    ]
+    # The schema rewrite -- the part that predates coercion -- still happened.
+    assert tool.raw_mcp_tool.inputSchema == obsidian_tools.sanitize_tool_schema(
+        DEAD_ON_GOOGLE_UPSTREAM
+    )
+    assert not hasattr(tool, "run_async")
 
 
 @pytest.mark.parametrize(

@@ -51,6 +51,13 @@ os.environ["MODEL_ALIAS"] = ""
 os.environ["OBSIDIAN_VAULT_PATH"] = ""
 os.environ["OBSIDIAN_MCP_URL"] = ""
 
+#: The headless-browser renderer. Pinned like CACHE_ENABLED rather than defaulted,
+#: because a developer's exported value would otherwise decide whether the web tier
+#: falls back to a browser, and the tests that cover that path would pass or fail
+#: depending on the machine. Empty here; the render tests set their own.
+RENDERER_URL = os.environ.pop("RENDERER_URL", None)
+os.environ["RENDERER_URL"] = ""
+
 #: Observability: no key means no instrumenting, and no network.
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""
