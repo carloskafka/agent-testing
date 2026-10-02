@@ -23,6 +23,137 @@ _MAX_REF_DEPTH = 10
 #: :func:`sanitize_tool_schema` for why the absence is fatal rather than merely lax.
 _DEFAULT_ITEMS: dict[str, str] = {"type": "string"}
 
+#: JSON-Schema scalar names mapped to the callables that parse them from a string.
+#: ``integer`` is tried before ``number`` deliberately: a parameter declared as
+#: either yields an ``int`` for ``"50"``, which is what a Rust server
+#: deserialising into ``usize`` expects and what ``float`` would not satisfy.
+_SCALAR_PARSERS: dict[str, Any] = {
+    "integer": lambda raw: int(raw),
+    "number": lambda raw: float(raw) if any(c in raw for c in ".eE") else int(raw),
+    "boolean": lambda raw: {"true": True, "false": False}[raw.lower()],
+}
+
+#: Tried in this order when a declared union could accept more than one scalar.
+_SCALAR_ORDER = ("integer", "number", "boolean")
+
+
+def _declared_types(node: Any) -> set[str]:
+    """The ``type`` of a subschema as a set, whether or not it is a union.
+
+    A JSON-Schema ``type`` is a string or a list of strings, and this project has
+    to understand both: ``obsidian-mcp`` declares every optional parameter as
+    ``["integer", "null"]``, so a parser handling only the scalar spelling would
+    coerce nothing at all.
+    """
+    declared = node.get("type") if isinstance(node, dict) else None
+    if isinstance(declared, str):
+        return {declared}
+    if isinstance(declared, list):
+        return {t for t in declared if isinstance(t, str)}
+    return set()
+
+
+def coerce_tool_args(schema: Any, args: Any) -> Any:
+    """Return ``args`` with string-encoded numbers and booleans parsed to their declared types.
+
+    **Why this exists.** ``obsidian-mcp`` is Rust and deserialises strictly, so a
+    ``context_length`` of ``"50"`` where the schema says ``["integer", "null"]``
+    comes back as ``failed to deserialize parameters: invalid type: string "50",
+    expected usize``. Seen live on session ``2fe0d9d0-a73b-4d9b-bc13-452658c2d585``,
+    where a free-tier model answered a weather question by searching the vault and
+    quoted both numeric arguments. The tool returned that as data, so the turn
+    could have continued -- but the next model call died on an unrelated fault and
+    took the retry with it.
+
+    ADK does not validate tool arguments against the schema before dispatch; it
+    forwards whatever the ``functionCall`` carried. So the mismatch surfaces at the
+    far end, against a server with no way to know a number arrived in quotes.
+
+    Deliberately narrow, because a permissive coercion is its own defect:
+
+    * only a ``str`` is touched, so a correctly-typed argument is never at risk;
+    * only when the declared type names a scalar, so a genuine string parameter
+      keeps its string even when the string looks numeric;
+    * only when the string *parses*. A union that also allows ``string`` is left
+      alone, and so is a malformed number -- the server then rejects it, which is
+      the honest outcome, because quietly turning unparseable input into a
+      different value moves the failure somewhere it can no longer be seen.
+
+    Returns a new structure rather than mutating ``args``, which the caller may
+    still want for logging.
+    """
+    if not isinstance(args, dict) or not isinstance(schema, dict):
+        return args
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return args
+
+    coerced = dict(args)
+    for name, value in args.items():
+        subschema = properties.get(name)
+        if isinstance(subschema, dict):
+            coerced[name] = _coerce_value(subschema, value)
+    return coerced
+
+
+def _coerce_value(subschema: dict, value: Any) -> Any:
+    """Coerce one value against one subschema, recursing through objects and arrays."""
+    declared = _declared_types(subschema) - {"null"}
+
+    if isinstance(value, list) and "array" in declared:
+        items = subschema.get("items")
+        if isinstance(items, dict):
+            return [_coerce_value(items, item) for item in value]
+        return value
+
+    if isinstance(value, dict) and "object" in declared:
+        return coerce_tool_args(subschema, value)
+
+    # A union that still contains "string" after "null" is removed genuinely
+    # permits a quoted number, so the string is what the server asked for.
+    if not isinstance(value, str) or not declared or "string" in declared:
+        return value
+
+    for scalar in _SCALAR_ORDER:
+        if scalar not in declared:
+            continue
+        try:
+            return _SCALAR_PARSERS[scalar](value.strip())
+        except (ValueError, KeyError, TypeError):
+            continue
+    return value
+
+
+def _coercing_run_async(original: Any, schema: Any) -> Any:
+    """A ``run_async`` for one MCP tool that coerces its arguments first.
+
+    Bound onto the *instance* rather than a subclass, because ``BaseTool`` is a
+    plain class (not a pydantic model, so no ``model_copy`` trick exists) and
+    because rebuilding an ``McpTool`` means re-passing six private constructor
+    arguments that a future ADK is free to rename. An instance attribute shadows
+    the class method and survives neither problem.
+
+    **Only the keyword form is coerced, and that is deliberate.** ADK calls a tool
+    as ``tool.run_async(args=..., tool_context=...)`` -- both keyword-only -- so
+    there is no positional form to handle. Rewriting one would mean guessing the
+    signature, and guessing wrong turns a *missed* coercion into a ``TypeError``
+    raised inside tool dispatch, where the traceback blames the schema and says
+    nothing about this wrapper. Skipping the coercion instead degrades to what the
+    server does with a quoted number anyway: a loud rejection of one argument, on
+    one call, that the model can read and retry.
+
+    ``*args, **kwargs`` in any case, so an unfamiliar call convention is carried by
+    the original rather than raising a ``TypeError`` of our own.
+    """
+    import functools
+
+    async def run_async(*call_args: Any, **call_kwargs: Any) -> Any:
+        if isinstance(call_kwargs.get("args"), dict):
+            call_kwargs["args"] = coerce_tool_args(schema, call_kwargs["args"])
+        return await original(*call_args, **call_kwargs)
+
+    return functools.wraps(original)(run_async)
+
 
 def _inline_refs(node: Any, defs: dict, depth: int = 0) -> Any:
     """Recursively replace ``{"$ref": "#/$defs/X"}`` with a copy of ``defs["X"]``.
@@ -192,7 +323,7 @@ def sanitizing_mcp_toolset_class():
     class SanitizingMcpToolset(McpToolset):
         """``McpToolset`` that repairs a dead session and normalises tool schemas.
 
-        Two jobs, both in ``get_tools`` because that is the one method every turn
+        Three jobs, all in ``get_tools``, because that is the one method every turn
         runs before the model sees any tool:
 
         * **Recovery.** A server that drops the session leaves ADK pooling a
@@ -202,6 +333,9 @@ def sanitizing_mcp_toolset_class():
           :func:`evict_pooled_session` for the full mechanism.
         * **Schema normalisation.** Every schema is rewritten so each Gemini
           backend accepts it; see :func:`sanitize_tool_schema`.
+        * **Argument coercion.** Every tool's ``run_async`` is wrapped so an
+          argument the model quoted but the server declares numeric arrives as a
+          number; see :func:`coerce_tool_args`.
 
         Recovery is retried exactly once and the second failure is re-raised
         rather than swallowed. That is a deliberate behaviour change: a vault
@@ -216,8 +350,22 @@ def sanitizing_mcp_toolset_class():
             for tool in tools:
                 raw = getattr(tool, "raw_mcp_tool", None)
                 schema = getattr(raw, "inputSchema", None)
-                if isinstance(schema, dict):
-                    raw.inputSchema = sanitize_tool_schema(schema)
+                if not isinstance(schema, dict):
+                    continue
+                schema = sanitize_tool_schema(schema)
+                raw.inputSchema = schema
+                # Coercion reads the *sanitised* schema, so the types it coerces
+                # to are the ones the model was shown. Reading the raw one would
+                # be wrong the moment the two ever disagree.
+                #
+                # Skipped when there is no ``run_async`` to wrap, and that guard is
+                # the difference between a defensive feature and a new way to lose
+                # the vault. An ``AttributeError`` here would abort the listing --
+                # the one failure this class exists to *recover* from -- and the
+                # turn would die against a server that was answering perfectly.
+                run_async = getattr(tool, "run_async", None)
+                if callable(run_async):
+                    tool.run_async = _coercing_run_async(run_async, schema)
             return tools
 
         async def get_tools(self, readonly_context=None):
