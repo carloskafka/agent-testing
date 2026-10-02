@@ -43,7 +43,7 @@ import re
 import socket
 import time
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlparse, urlsplit
 
 from google.adk.tools.function_tool import FunctionTool
 
@@ -823,6 +823,84 @@ def _is_followable(url: str) -> bool:
     return lowered.startswith(_LINK_SCHEMES)
 
 
+#: Path segments that mark a link as site furniture rather than content. Matched
+#: case-insensitively as whole segments, so ``/about/legal/`` is chrome while
+#: ``/blog/legal-things`` is not.
+_CHROME_SEGMENTS = frozenset(
+    {
+        "about",
+        "legal",
+        "privacy",
+        "terms",
+        "cookies",
+        "contact",
+        "careers",
+        "jobs",
+        "press",
+        "sitemap",
+        "rss",
+        "feed",
+        "login",
+        "signup",
+        "sign-in",
+        "sign-up",
+        "account",
+        "cart",
+        "help",
+        "support",
+        "faq",
+        "newsletter",
+        "subscribe",
+        "advertise",
+        "status",
+        "psf",
+    }
+)
+
+
+def _link_rank(url: str, label: str, base_url: str) -> int:
+    """How likely a link is to be the content the caller came for. Lower is better.
+
+    Three tiers, and the reasoning is that the model's follow-up cost is the scarce
+    resource: it can fetch a handful of pages, so the block's job is to make sure
+    *those* pages are in it.
+
+    0. **same-site, content-shaped** -- the listing entry, the detail page. This is
+       the tier the whole block exists for: ``/filme/verity?city=osasco`` on a
+       listing page whose other links are ``/about/legal/`` and an app store.
+    1. **same-site, furniture-shaped** -- a legal or contact page on the same host.
+       Followable and possibly relevant, just not what was asked for.
+    2. **off-site** -- an external reference. Genuinely useful (a spec, a
+       changelog) but the least likely to be the thing the user meant.
+
+    Host comparison is exact rather than by suffix on purpose. Suffix matching
+    would make ``evil-ingresso.com.attacker.test`` a sibling of
+    ``ingresso.com``, and this ranking is attacker-influenced (a page decides its
+    own link order), so a loose comparison would let a page promote its links by
+    naming a lookalike domain.
+    """
+    try:
+        parsed = urlparse(url)
+        base = urlparse(base_url)
+    except ValueError:
+        return 2
+
+    same_site = parsed.netloc.lower() == base.netloc.lower()
+    if not same_site:
+        return 2
+
+    segments = [s.lower() for s in parsed.path.split("/") if s]
+    if any(segment in _CHROME_SEGMENTS for segment in segments):
+        return 1
+
+    # A bare host root carries no path, so it is the site's front door rather than
+    # a page about the subject -- treat it as furniture even though nothing matched.
+    if not segments:
+        return 1
+
+    return 0
+
+
 def _format_links(markup: str, base_url: str, limit: int = MAX_LINKS) -> str:
     """A ``[links]`` block of the page's outbound URLs, for the model to follow.
 
@@ -854,9 +932,13 @@ def _format_links(markup: str, base_url: str, limit: int = MAX_LINKS) -> str:
         markup = markup[:_SANITISE_INPUT_CAP]
 
     seen: set[str] = set()
-    lines: list[str] = []
-    total = 0
-    truncated = False
+    # Collected first, ranked second. Truncating *while* iterating means the cap
+    # keeps whatever comes first in the document, and on a real page the first
+    # thing in the document is the header nav: measured on python.org, that kept 8
+    # footer/legal links ahead of 79 same-site content links, purely because of
+    # where they sat. Which links survive a cap should not depend on where the
+    # author put them.
+    collected: list[tuple[str, str, int]] = []
 
     for match in _HREF_SRC_RE.finditer(markup):
         href = next((g for g in match.groups() if g), "")
@@ -878,20 +960,12 @@ def _format_links(markup: str, base_url: str, limit: int = MAX_LINKS) -> str:
         # Measured: the raw href above returned a block containing a literal
         # `</untrusted_content>`.
         href = _neutralise_marker(href)
-        # urljoin resolves "relative", "/rooted" and "//protocol-relative" against
-        # the page it was found on, and leaves javascript:/mailto: alone -- so the
-        # scheme test has to come *after*, or every root-relative link (the common
-        # case on a real site) is discarded before it can be resolved.
         absolute = urljoin(base_url, href)
         if not _is_followable(absolute):
             continue
         if absolute in seen:
             continue
         seen.add(absolute)
-
-        if len(lines) >= limit:
-            truncated = True
-            break
 
         # The anchor's own text, so the model can tell a per-movie link from a
         # cookie-policy link without fetching every one of them. Read from just
@@ -909,6 +983,20 @@ def _format_links(markup: str, base_url: str, limit: int = MAX_LINKS) -> str:
                         _collapse(html.unescape(found.group(0)))
                     )
 
+        collected.append((absolute, label, _link_rank(absolute, label, base_url)))
+
+    # Stable sort on the rank: within a tier the document order is preserved, so
+    # the block still reads the way the page does and two runs agree.
+    collected.sort(key=lambda item: item[2])
+
+    lines: list[str] = []
+    total = 0
+    truncated = False
+
+    for absolute, label, _rank in collected:
+        if len(lines) >= limit:
+            truncated = True
+            break
         line = f"- {absolute}" + (f" ({label})" if label else "")
         if total + len(line) > _MAX_LINK_BLOCK_CHARS:
             truncated = True

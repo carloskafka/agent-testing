@@ -1245,3 +1245,72 @@ def test_check_url_approves_nothing_when_the_url_is_refused(monkeypatch):
     vetted = []
     assert ws.check_url("https://evil.example/", vetted=vetted) != ""
     assert vetted == []
+
+
+# --- which links survive the cap ----------------------------------------------
+#
+# Measured, not assumed: on `docs.python.org/3/library/index.html` (292 links,
+# cap 120) the pre-ranking block kept **71** same-site content links, because the
+# cap kept whatever came first in the document and the first thing in a document
+# is the header nav. On `www.python.org/` it dropped 8 same-site content links
+# while keeping footer/legal ones. So the cap was selecting on *position*, which
+# the page author chooses, rather than on what the links are.
+
+
+def test_content_links_survive_the_cap_and_chrome_does_not():
+    """Same-site content first, so the model's few follow-up fetches land on it."""
+    out = ws._format_links(
+        '<a href="https://example.com/privacy">Privacy</a>'
+        '<a href="https://other.example/spec">Spec</a>'
+        '<a href="https://example.com/docs/intro">Intro</a>',
+        "https://example.com/index",
+    )
+    lines = [line for line in out.splitlines() if line.startswith("- ")]
+    assert lines[0].startswith("- https://example.com/docs/intro")
+    # Furniture and off-site survive, but last -- they are still reachable.
+    assert any("/privacy" in line for line in lines)
+    assert any("other.example/spec" in line for line in lines)
+
+
+def test_the_cap_keeps_content_rather_than_whatever_came_first(monkeypatch):
+    """The regression, at the size that actually triggered it.
+
+    200 chrome links *before* one content link is the shape that lost 8 real links
+    on python.org. Before ranking, the content link fell off the end.
+    """
+    chrome = "".join(
+        f'<a href="https://example.com/legal/page-{i}">L{i}</a>' for i in range(200)
+    )
+    markup = chrome + '<a href="https://example.com/movies/verity">Verity</a>'
+    out = ws._format_links(markup, "https://example.com/listing", limit=10)
+    assert "https://example.com/movies/verity" in out, (
+        "the one content link was crowded out by chrome that appeared earlier"
+    )
+
+
+def test_a_lookalike_domain_is_not_treated_as_the_same_site():
+    """The ranking is attacker-influenced: a page chooses its own link order.
+
+    Suffix matching would let a page promote its links by pointing them at a
+    lookalike host, so the comparison is on the exact netloc.
+    """
+    assert ws._link_rank(
+        "https://ingresso.com.attacker.test/filme/verity", "", "https://ingresso.com/x"
+    ) == 2
+    assert ws._link_rank("https://ingresso.com/filme/verity", "", "https://ingresso.com/x") == 0
+
+
+def test_a_chrome_segment_matches_whole_segments_only():
+    """``/blog/legal-things`` is content; ``/about/legal/`` is not."""
+    assert ws._link_rank("https://x.test/about/legal/terms", "", "https://x.test/p") == 1
+    assert ws._link_rank("https://x.test/blog/legal-things", "", "https://x.test/p") == 0
+
+
+def test_ranking_is_stable_so_two_renders_agree():
+    """A non-deterministic block would make the same page read differently twice."""
+    markup = "".join(
+        f'<a href="https://x.test/page-{i}">P{i}</a>' for i in range(30)
+    )
+    first = ws._format_links(markup, "https://x.test/", limit=5)
+    second = ws._format_links(markup, "https://x.test/", limit=5)
+    assert first == second
