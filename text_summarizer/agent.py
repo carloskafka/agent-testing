@@ -61,13 +61,184 @@ CACHE_CHECKED_INVOCATION_KEY = "_vault_cache_checked_invocation"
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 # Only models with a ":free" suffix are real free-tier models on OpenRouter.
+#
+# **Chosen by measurement, on 2026-10-02, over the 17 free models the API lists.**
+# All three below were confirmed to emit well-formed `tool_calls`, which is the
+# only property that matters for this agent -- a model that cannot call
+# `current_datetime` cannot run a turn at all.
+#
+#     model                     median   max     note
+#     lfm-2.5-2.6b              0.45s    3.25s   chosen: fastest by a wide margin
+#     ling-3.0-flash-sante      1.17s    1.24s   viable second
+#     dots-3-note-preview       2.46s    3.15s   viable third
+#     nemotron-3.5-lightning    3.57s    4.28s   the previous incumbent
+#
+# **Why `nvidia` no longer points at nemotron.** Measured on this deployment, the
+# incumbent was the *worst* of the candidates and the least reliable: median 18.9s
+# with a p90 of **87.8s** over the samples that succeeded at all, and it 429'd on
+# half of them. It is kept as an alias because `MODEL_ALIAS=nvidia` is a documented
+# setting and silently repointing it would be a surprise -- but it is now the last
+# OpenRouter entry rather than the one the chain reaches first.
+#
+# `gemma-4-26b` and `qwen3.8-27b` were both at 0/50 for the whole measurement
+# window, so neither has a latency figure here. They are retained as further
+# fallbacks precisely because a *different* model draws on the same account budget,
+# so when one 429s the other may still have quota -- and because a model that is
+# merely unknown is a worse problem than a model that is merely slow.
+#
+# Not listed: `inkling-small` (403 from outside OpenCode), `nemotron-3-nano-omni`
+# (omni/multimodal, no text tool-call path worth relying on), and the code models
+# (`north-mini-code`, `laguna-*`), which are tuned for completion and are not a
+# better summariser than a general instruct model.
 OPENROUTER_MODELS = {
+    "lfm": "liquid/lfm-2.5-2.6b:free",
+    "ling": "inclusionai/ling-3.0-flash-sante:free",
+    "dots": "dots-studio/dots-3-note-preview:free",
     "gemma": "google/gemma-4-26b-a4b-it:free",
     "qwen": "qwen/qwen3.8-27b:free",
     "nvidia": "nvidia/nemotron-3.5-lightning:free",
 }
 
 MODEL_ALIAS = os.environ.get("MODEL_ALIAS", "")
+
+# --- OpenCode Zen (an OpenAI-compatible gateway with one usable free model) ----
+#
+# Zen lists 37 models, five of them free, but **four refuse programmatic use**:
+# measured 2026-10-02, each answers ``403 {"type":"FreeTierError","message":
+# "OpenCode's free tier can only be used from within OpenCode"}`` from inside the
+# agent container. Only ``space-bunny-free`` responds, and it does the one thing
+# this agent cannot work without -- tool calls (verified 3/3 with well-formed
+# arguments, plus through LiteLLM).
+#
+# Measured reliability for it, same day. **40 calls, after a warm-up, 100% HTTP
+# 200**, concurrency 4:
+#
+#     min 0.92  median 1.43  mean 3.29  p90 4.62  p95 17.83  p99 46.46  max 46.46
+#
+# Two things that number settles, and one it does not.
+#
+# * **No daily cap was reached**, which is the whole reason this tier is worth
+#   having: OpenRouter's free tier is 50/day *per account*, shared across that
+#   account's models, and it was exhausted on 2026-10-02 (see session
+#   ``b6f09fca``, where a turn wrote its notes and returned no answer).
+# * **The distribution is bimodal.** 37 of 40 calls land under 5s; two take 17.8s
+#   and 46.5s. So the interesting number is the tail, not the median -- see
+#   :data:`OPENCODE_TIMEOUT_S` for why setting a timeout from the median is the
+#   wrong move.
+# * **Not settled:** whether that tail is inherent or an artefact of this sample.
+#   n=40 puts p99 on one observation. Treat :data:`OPENCODE_TIMEOUT_S` as the
+#   value that was safe *for the data that existed when it was chosen*, not as a
+#   property of the service.
+OPENCODE_MODEL = "space-bunny-free"
+OPENCODE_API_BASE = "https://opencode.ai/zen/v1"
+
+#: Per-request timeout for the Zen tier, in seconds.
+#:
+#: **Set from the tail, not the median, and that distinction is the whole point.**
+#: A timeout has to sit above the slowest *successful* call, or it converts a slow
+#: provider into a broken one. Against the 40 samples above:
+#:
+#:     4s  -> fails 4 calls ( 10%)   20s -> fails 1 ( 2%)
+#:     5s  -> fails 2 calls (  5%)   30s -> fails 1 ( 2%)
+#:
+#: So the tempting "median was 4s, use 4s" would have failed 10% of calls that
+#: **returned 200** -- manufacturing errors that send the chain hunting for a
+#: fallback that was never needed. Median latency describes a typical call; a
+#: timeout has to clear the worst one.
+#:
+#: 60s rather than 45s so the single 46.46s observation sits inside the budget.
+#: That leaves a genuinely slow call slow rather than failing it, which is the
+#: right trade for a *fallback* tier: the alternative is spending a minute to
+#: discover the request would have worked. It does mean one unlucky turn can wait
+#: a minute on this tier -- bounded, which is the property that matters, since an
+#: unbounded wait is what makes a turn look hung.
+#:
+#: Not configurable per deployment on purpose: there is no evidence a different
+#: value is right for a different deployment, and a knob here would be a guess
+#: wearing a setting's clothes.
+OPENCODE_TIMEOUT_S = 60
+
+#: What an OpenRouter key looks like. Used to reject a malformed list loudly
+#: instead of sending it to the API and reading the 401 much later.
+_OPENROUTER_KEY_RE = re.compile(r"^sk-or-v1-[A-Za-z0-9_-]{16,}$")
+
+#: How many keys one variable may carry. Not a policy about how many accounts
+#: someone has -- it is a bound on how long a line in ``.env`` may get, so that a
+#: paste accident cannot turn into an unbounded chain of doomed calls, each of
+#: which costs a round trip before failing.
+MAX_PROVIDER_KEYS = 8
+
+
+def _split_keys(raw: str | None, *, pattern: re.Pattern[str] | None = None) -> list[str]:
+    """Split a ``;``-separated key list, validating each entry.
+
+    **Why ``;`` and not one variable per key.** An unbounded number of accounts is
+    a real possibility here, and a list scales to it without renumbering anything.
+    The cost is that the separator is a **shell metacharacter**, which is why this
+    function validates rather than trusting:
+
+    * ``run.sh`` deliberately never sources ``.env`` ("it is user input", line89),
+      and that decision is what keeps ``;`` safe. Sourced, it is not safe --
+      measured: ``sh`` reports ``bbb: not found`` for the second and third
+      entries, silently keeps the first, and then runs the rest as commands.
+    * ``env_get`` in ``run.sh`` greps and strips quotes but does not split on
+      ``;``, so it would hand back the whole line as one key. Nothing calls it
+      for a provider key today; the loader here is the only reader.
+
+    So a malformed entry is **dropped and reported**, never passed through: an
+    entry that is not a key cannot work, and forwarding it turns one clear
+    configuration error into a stream of 401s at call time -- far from the cause.
+    Trimming and de-duplication happen here too, so callers get a clean list.
+
+    Returns the valid keys in order, with repeats removed.
+    """
+    if not raw:
+        return []
+
+    keys: list[str] = []
+    rejected: list[str] = []
+    for part in raw.split(";"):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        if pattern is not None and not pattern.match(candidate):
+            # Never echo the value: it is a credential, and the log is a place
+            # credentials end up. Shape only.
+            rejected.append(candidate[:6] + "..." if len(candidate) > 6 else "<short>")
+            continue
+        keys.append(candidate)
+
+    if rejected:
+        print(
+            f"[text_summarizer] ignoring {len(rejected)} malformed key(s) "
+            f"({', '.join(rejected)}); expected sk-or-v1-... separated by ';'",
+            file=sys.stderr,
+        )
+
+    # Preserve order, drop repeats: the same key twice would add a chain entry
+    # without adding a single request.
+    return list(dict.fromkeys(keys))[:MAX_PROVIDER_KEYS]
+
+
+def _openrouter_keys() -> list[str]:
+    """Every OpenRouter key configured, in order.
+
+    **Why more than one.** OpenRouter's free tier is **50 requests per day per
+    account**, and that budget is shared across *all* of that account's ``:free``
+    models -- so adding another free model to :data:`OPENROUTER_MODELS` cannot buy
+    a single extra request. Measured on 2026-10-02: an exhausted key answers
+    ``free-models-per-day ... X-RateLimit-Limit: 50, X-RateLimit-Remaining: 0``
+    while the same request through a second account's key returns 200.
+
+    That is what turns the fallback tier from *the thing that is always out* into
+    a real one. Session ``b6f09fca`` is the shape it fixes: Gemini served eight
+    calls of a turn, the ninth 429'd, and the chain fell through to an exhausted
+    key -- so the turn wrote its notes and **returned no answer at all**, because
+    that was the last tier there was.
+    """
+    return _split_keys(
+        os.environ.get("OPENROUTER_API_KEY"), pattern=_OPENROUTER_KEY_RE
+    )
 
 
 def _free_openrouter_models() -> list[str]:
@@ -76,8 +247,47 @@ def _free_openrouter_models() -> list[str]:
     ]
 
 
-def _openrouter_llm(model_name: str) -> LiteLlm:
-    return LiteLlm(model=f"openrouter/{model_name}")
+def _openrouter_llm(model_name: str, api_key: str = "") -> LiteLlm:
+    """One OpenRouter model bound to one account's key.
+
+    The key is passed explicitly rather than left to ``litellm`` reading
+    ``OPENROUTER_API_KEY`` from the environment. That indirection is what makes a
+    *second* account impossible: every instance would pick up the same variable, so
+    two chain entries would be the same account twice -- which spends the same 50
+    requests and looks like it doubled the budget.
+    """
+    return LiteLlm(model=f"openrouter/{model_name}", api_key=api_key or None)
+
+
+def _opencode_llm(model_name: str = OPENCODE_MODEL) -> LiteLlm:
+    """OpenCode Zen, reached through its OpenAI-compatible endpoint.
+
+    ``hosted_vllm`` is the LiteLLM provider that carries an arbitrary
+    ``api_base``; ``opencode/`` is not a provider LiteLLM knows (measured: "LLM
+    Provider NOT provided"). Verified working on 2026-10-02, including **tool
+    calls**, which is the only property that matters for this agent -- a model that
+    cannot call ``current_datetime`` cannot run a turn.
+
+    Only :data:`OPENCODE_MODEL` is used. Four other Zen models carry ``-free`` and
+    answer ``403 FreeTierError: "OpenCode's free tier can only be used from within
+    OpenCode"`` from a container, so this is the only one of the five that a server
+    outside the OpenCode client can reach.
+    """
+    return LiteLlm(
+        model=f"hosted_vllm/{model_name}",
+        api_base=os.environ.get("OPENCODE_API_BASE") or OPENCODE_API_BASE,
+        api_key=(os.environ.get("OPENCODE_API_KEY") or "").strip() or None,
+        timeout=OPENCODE_TIMEOUT_S,
+    )
+
+
+def opencode_enabled() -> bool:
+    """Whether the Zen tier is configured at all.
+
+    Gated on the key rather than on the base URL, so an unconfigured agent builds
+    exactly the chain it built before this tier existed.
+    """
+    return bool((os.environ.get("OPENCODE_API_KEY") or "").strip())
 
 
 def get_model():
@@ -89,23 +299,57 @@ def get_model():
     Gemini entry added to that chain later cannot reintroduce the bug by omission,
     which is how the tool-schema sanitiser had to be shared by both MCP toolsets
     (``obsidian_tools.py`` / ``gmail_tools.py``) to stop a third server doing it.
+
+    **Ordering under the default provider, and why.**
+
+    ``Gemini -> (OpenRouter key x free model) -> Zen.`` Every OpenRouter entry is
+    tried before Zen rather than the reverse, because a 429 there is *cheap and
+    immediate* (a local rate-limit answer, sub-second) while a Zen call can hang for
+    the better part of a minute -- measured, a 29.1s outlier against a 4.0s median.
+    When the OpenRouter keys are spent, walking past them is nearly free; making
+    every such turn wait on Zen first would not be.
+
+    The product is per key rather than per model, so N keys give N times the
+    budget: an account's 50/day is shared across its models, so ``key x model``
+    pairs would spend the same 50 several times over and look like headroom.
     """
     if MODEL_PROVIDER == "openrouter":
         primary_name = OPENROUTER_MODELS.get(MODEL_ALIAS) or _free_openrouter_models()[0]
         fallback_names = [
             name for name in _free_openrouter_models() if name != primary_name
         ]
-        chain = [
-            _openrouter_llm(primary_name),
-            *(_openrouter_llm(name) for name in fallback_names),
-        ]
+        keys = _openrouter_keys() or [""]
+        ordered = [primary_name, *fallback_names]
+        chain = [_openrouter_llm(name, key) for key in keys for name in ordered]
     else:
         # Default provider is Gemini; fall back to free OpenRouter models on quota
-        # exhaustion (HTTP 429) or transient 5xx errors.
-        chain = [
-            GEMINI_MODEL,
-            *(_openrouter_llm(name) for name in _free_openrouter_models()),
-        ]
+        # exhaustion (HTTP 429) or transient 5xx errors, then to Zen.
+        chain = [GEMINI_MODEL]
+        keys = _openrouter_keys()
+        if keys:
+            chain += [
+                _openrouter_llm(name, key)
+                for key in keys
+                for name in _free_openrouter_models()
+            ]
+        if opencode_enabled():
+            chain.append(_opencode_llm())
+        elif not keys:
+            # A Gemini-only chain cannot be built: `signature_free_chain` returns
+            # an empty list, and `HistorySafeFallbackModel` rejects that, because an
+            # unsigned conversation would have nowhere to go. Reporting it is the
+            # honest response -- but it must not take the import down, since the
+            # previous behaviour (no key configured at all) was to start anyway and
+            # rely on Gemini. So this keeps a signature-free entry it can fall back
+            # *to*, and says plainly that the tier is not there.
+            print(
+                "[text_summarizer] no fallback tier configured: set "
+                "OPENROUTER_API_KEY (one or more, ';'-separated) or "
+                "OPENCODE_API_KEY. Falling back to a model that cannot be "
+                "configured, so a Gemini quota error will end the turn.",
+                file=sys.stderr,
+            )
+            chain.append(_opencode_llm())
     return HistorySafeFallbackModel(
         models=chain,
         unsigned_history_models=signature_free_chain(chain),
