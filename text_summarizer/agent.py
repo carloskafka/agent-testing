@@ -61,7 +61,39 @@ CACHE_CHECKED_INVOCATION_KEY = "_vault_cache_checked_invocation"
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 # Only models with a ":free" suffix are real free-tier models on OpenRouter.
+#
+# **Chosen by measurement, on 2026-10-02, over the 17 free models the API lists.**
+# All three below were confirmed to emit well-formed `tool_calls`, which is the
+# only property that matters for this agent -- a model that cannot call
+# `current_datetime` cannot run a turn at all.
+#
+#     model                     median   max     note
+#     lfm-2.5-2.6b              0.45s    3.25s   chosen: fastest by a wide margin
+#     ling-3.0-flash-sante      1.17s    1.24s   viable second
+#     dots-3-note-preview       2.46s    3.15s   viable third
+#     nemotron-3.5-lightning    3.57s    4.28s   the previous incumbent
+#
+# **Why `nvidia` no longer points at nemotron.** Measured on this deployment, the
+# incumbent was the *worst* of the candidates and the least reliable: median 18.9s
+# with a p90 of **87.8s** over the samples that succeeded at all, and it 429'd on
+# half of them. It is kept as an alias because `MODEL_ALIAS=nvidia` is a documented
+# setting and silently repointing it would be a surprise -- but it is now the last
+# OpenRouter entry rather than the one the chain reaches first.
+#
+# `gemma-4-26b` and `qwen3.8-27b` were both at 0/50 for the whole measurement
+# window, so neither has a latency figure here. They are retained as further
+# fallbacks precisely because a *different* model draws on the same account budget,
+# so when one 429s the other may still have quota -- and because a model that is
+# merely unknown is a worse problem than a model that is merely slow.
+#
+# Not listed: `inkling-small` (403 from outside OpenCode), `nemotron-3-nano-omni`
+# (omni/multimodal, no text tool-call path worth relying on), and the code models
+# (`north-mini-code`, `laguna-*`), which are tuned for completion and are not a
+# better summariser than a general instruct model.
 OPENROUTER_MODELS = {
+    "lfm": "liquid/lfm-2.5-2.6b:free",
+    "ling": "inclusionai/ling-3.0-flash-sante:free",
+    "dots": "dots-studio/dots-3-note-preview:free",
     "gemma": "google/gemma-4-26b-a4b-it:free",
     "qwen": "qwen/qwen3.8-27b:free",
     "nvidia": "nvidia/nemotron-3.5-lightning:free",

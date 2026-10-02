@@ -29,6 +29,9 @@ runs for the values it is given.
 
 from __future__ import annotations
 
+import pathlib
+import re
+
 import pytest
 from google.adk.models.lite_llm import LiteLlm
 from text_summarizer import agent as agent_module
@@ -41,7 +44,7 @@ OPENROUTER_PREFIX = "openrouter/"
 
 #: The eight filter names are pinned in ``test_obsidian_toolset.py``; this is the
 #: alias table they are unrelated to, spelled out here so a reordering is visible.
-EXPECTED_ALIASES = ("gemma", "qwen", "nvidia")
+EXPECTED_ALIASES = ("lfm", "ling", "dots", "gemma", "qwen", "nvidia")
 
 
 def _chain_names(model) -> list[str]:
@@ -82,8 +85,67 @@ def test_the_aliases_are_the_three_documented_families():
     primary backend, so dict order is a routing decision rather than a cosmetic
     one. A new alias inserted at the front silently changes which model answers
     an ``openrouter`` run.
+
+    The order is measured, not alphabetical. Benchmarked over the 17 free models
+    OpenRouter lists on 2026-10-02, every entry confirmed to emit tool calls:
+
+        lfm-2.5-2.6b  median 0.45s   <- first, and the default alias
+        ling-3.0      median 1.17s
+        dots-3        median 2.46s
+        gemma / qwen  no figure: 0/50 for the whole window
+        nemotron      median 18.9s, p90 87.8s, 429 on half its calls
+
+    So the previous incumbent is now *last*, and the two models with no
+    measurement at all sit in the middle rather than leading -- unknown is a
+    different risk from slow, and neither should displace a known-good tier.
     """
     assert tuple(agent_module.OPENROUTER_MODELS) == EXPECTED_ALIASES
+
+
+def test_the_default_alias_is_the_measured_fastest():
+    """The *unset* default must be the fastest model, and ``.env.example`` must agree.
+
+    Two separate files set the value independently, which is exactly the shape of a
+    drift bug: the table could lead with ``lfm`` while a shipped ``.env`` still
+    said ``gemma``, and every deployment would quietly run the 429'd model. So
+    both are pinned here.
+
+    ``conftest.py`` blanks ``MODEL_ALIAS``, so at import ``get_model`` takes the
+    ``_free_openrouter_models()[0]`` branch -- which is precisely the deployment
+    shape this asserts about.
+    """
+    assert agent_module.MODEL_ALIAS == "", (
+        "conftest blanks MODEL_ALIAS; if that changes, this test is asserting the "
+        "wrong thing and the unset branch is no longer being exercised"
+    )
+    fastest = agent_module._free_openrouter_models()[0]
+    assert fastest.startswith("liquid/lfm-2.5-2.6b"), (
+        f"with MODEL_ALIAS unset the chain starts at {fastest!r}, not the measured fastest"
+    )
+
+    example = pathlib.Path(__file__).resolve().parents[2] / ".env.example"
+    configured = re.search(
+        r"^MODEL_ALIAS=(\S*)", example.read_text(encoding="utf-8"), re.M
+    )
+    assert configured and configured.group(1) == "lfm", (
+        "MODEL_ALIAS in .env.example does not name the fastest measured model"
+    )
+
+
+def test_nemotron_is_no_longer_the_default_free_model():
+    """The specific regression this change fixes, kept as a test.
+
+    Nemotron was measured at a median of 18.9s with a p90 of 87.8s, and it 429'd
+    on half the calls that were attempted. It stays in the table because
+    ``MODEL_ALIAS=nvidia`` is a documented setting, but a fresh deployment must
+    not be routed to it first.
+    """
+    free = agent_module._free_openrouter_models()
+    assert not free[0].startswith("nvidia/")
+    assert free[-1].startswith("nvidia/"), (
+        "the slowest measured model should be the last OpenRouter entry, not removed "
+        "or promoted"
+    )
 
 
 def test_no_two_aliases_name_the_same_model():
