@@ -38,13 +38,14 @@ the compose file is the *container* port.
 The vault is not a fixture. A scenario that saves a note really saves one, and a
 later run of the same scenario will read its own note back -- which is the point
 for the persistence check and the reason the cache-sensitive scenarios use a
-distinct prompt each run (``{{nonce}}``).
+distinct prompt each run (a `{nonce}` placeholder).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -170,6 +171,21 @@ class Turn:
         """The served model per model call, in order, for the served-once checks."""
         return [e["model_version"] for e in self.events if e.get("model_version")]
 
+    @property
+    def cache_hit(self) -> bool:
+        """Whether the vault cache answered this turn without calling the model.
+
+        Read from the session state ADK persisted, not inferred from a zero-turn
+        duration. A replay is the fastest possible turn, so "it completed quickly"
+        is exactly the evidence a harness should not trust -- and a replay looks
+        like a healthy turn to every other check here.
+        """
+        for event in self.events:
+            delta = (event.get("actions") or {}).get("state_delta") or {}
+            if delta.get("vault_cache_hit"):
+                return True
+        return False
+
     def web_urls_offered(self) -> set[str]:
         """Every URL the web tier actually returned to the model, from the payloads.
 
@@ -177,17 +193,58 @@ class Turn:
         separate allow-list on purpose: the point of the citation check is that a
         cited URL is one the search produced, so both sides have to come from the
         same recorded turn.
+
+        Scans for ``url`` keys at any depth and parses a stringified ``result``
+        first, because ADK wraps a tool's return value: ``web_search`` returns a
+        *list*, and what lands on the event is ``{"result": "[{...}]"}`` -- a JSON
+        string inside a dict. Looking for a ``results`` key at the top level finds
+        nothing, so the check reports that the tier returned no URLs on a turn
+        where it returned nine. That is not hypothetical: it is how this check
+        failed the first time it ran against a live agent, while passing every
+        offline fixture in this repo.
         """
         urls: set[str] = set()
         for payload in self.tool_results("web_search") + self.tool_results("web_fetch"):
-            for result in (payload or {}).get("results", []) or []:
-                url = result.get("url") if isinstance(result, dict) else None
-                if url:
-                    urls.add(url)
-            url = (payload or {}).get("url")
-            if url:
-                urls.add(url)
+            urls |= _urls_anywhere(payload)
         return urls
+
+
+#: The URL a ``web_fetch`` payload is wrapped in. That result is a text blob rather
+#: than a structure: ``<untrusted_content source='https://...'>``.
+_FETCHED_SOURCE = re.compile(r"source=['\"]([^'\"]+)['\"]")
+
+
+def _urls_anywhere(payload: Any, depth: int = 0) -> set[str]:
+    """Every ``url`` value in a tool payload, plus the source of a fetched page."""
+    if depth > 8:
+        return set()
+    if isinstance(payload, str):
+        # Either a stringified JSON result or the `<untrusted_content source=...>`
+        # wrapper. Both are cheaper to recognise here than to re-derive downstream.
+        if payload.lstrip().startswith(("[", "{")):
+            try:
+                return _urls_anywhere(json.loads(payload), depth + 1)
+            except (ValueError, TypeError):
+                return set()
+        return set(_FETCHED_SOURCE.findall(payload))
+    if isinstance(payload, list):
+        found: set[str] = set()
+        for item in payload:
+            found |= _urls_anywhere(item, depth + 1)
+        return found
+    if isinstance(payload, dict):
+        # An `isError` payload is the tool reporting a failure; a URL inside the
+        # error text is not a result the model was shown.
+        if payload.get("isError"):
+            return set()
+        found = set()
+        for key, value in payload.items():
+            if key == "url" and isinstance(value, str):
+                found.add(value)
+            else:
+                found |= _urls_anywhere(value, depth + 1)
+        return found
+    return set()
 
 
 def _parts(event: dict) -> list[dict]:
@@ -238,13 +295,49 @@ class Scenario:
     check: Check
     note: str = ""
     tags: list[str] = field(default_factory=list)
+    #: True when the turn writes a note, and so the *next* run of this scenario
+    #: would find it in the vault cache. Such a scenario must carry a ``{nonce}``
+    #: so its prompt differs every time. Every scenario also asserts
+    #: ``_no_cache_hit``, which is the general guard; this flag is what the offline
+    #: test holds the nonce rule to, so a future persisting scenario cannot be added
+    #: without a way to notice that its prompt is fixed.
+    persists: bool = False
 
     def render(self, base_url: str) -> str:
+        """The prompt as it will be sent, with its placeholders substituted.
+
+        Single braces only. ``{{nonce}}`` is an *escaped* literal brace to
+        ``str.format``, so it renders as the text ``{nonce}`` and every run sends
+        the identical prompt -- which the vault cache then answers from disk in
+        about a millisecond, so the scenario passes on the tools it never called.
+        That is gotcha 10, and it was committed here by accident before
+        ``test_a_rendered_prompt_actually_varies`` caught it.
+        """
         return self.prompt.format(base_url=base_url, nonce=uuid.uuid4().hex[:8])
 
 
 def _no_error(turn: Turn) -> tuple[bool, str]:
     return not turn.error, turn.error[:160] or "turn completed"
+
+
+def _no_cache_hit(turn: Turn) -> tuple[bool, str]:
+    """The turn really called the model.
+
+    In every scenario, not just the one that writes a note. A replay satisfies
+    every other check -- there is an answer, it is long enough, it can be
+    well-formed and uncited -- and it does it in about a millisecond, which reads
+    as a fast healthy turn. This is gotcha 10, and the harness is exactly the place
+    it bites: a scenario re-run on the same prompt would quietly stop exercising
+    the tools it asserts on.
+
+    A scenario that *wants* a hit (none currently) states that by composing
+    ``_no_cache_hit`` out of its checks rather than by the harness knowing about it.
+    """
+    return not turn.cache_hit, (
+        "replayed from the vault cache: no model was called, so the tools were never exercised"
+        if turn.cache_hit
+        else "the model was called"
+    )
 
 
 def _called(*names: str) -> Check:
@@ -392,19 +485,35 @@ def _no_confident_stale_answer(turn: Turn) -> tuple[bool, str]:
 
 
 def _single_answer(turn: Turn) -> tuple[bool, str]:
-    """Exactly one assistant text event, so a duplicated answer cannot pass.
+    """The final answer is not duplicated anywhere earlier in the turn.
 
-    The dev UI draws one bubble per assistant-authored text event, and gotcha 16
-    was two bubbles with identical text where the *last* one was the correct copy.
-    Any checker that reads "the answer" and finds it well-formed would have passed.
+    Gotcha 16's exact signature: two assistant-authored text events carrying *the
+    same* answer, where the last one was the correct copy and the dev UI drew both.
+    So this checks for repeated text, not for a count of events.
+
+    Counting events instead was wrong, and wrong on the first live run. A model
+    that narrates alongside a tool call -- "I'll search for that first" -- puts
+    text on the same event as the ``functionCall``, so a four-tool turn
+    legitimately produces five text events. That version failed a healthy turn and
+    reported it as duplication, which is the harness lying about the agent.
     """
     texts = [
-        e for e in turn.events
-        if e.get("author") == APP and any(p.get("text") for p in _parts(e))
+        p["text"].strip()
+        for event in turn.events
+        if event.get("author") == APP
+        for p in _parts(event)
+        if p.get("text")
     ]
-    if len(texts) != 1:
-        return False, f"{len(texts)} assistant text events (expected exactly 1)"
-    return True, "one assistant text event"
+    if not texts:
+        return False, "no answer text at all"
+    final = texts[-1]
+    repeats = sum(1 for t in texts[:-1] if t == final)
+    if repeats:
+        return False, (
+            f"the final answer appears {repeats + 1} times "
+            f"({len(texts)} text events, {len(set(texts))} distinct)"
+        )
+    return True, f"{len(texts)} text event(s), {len(set(texts))} distinct"
 
 
 def _cached_turn(turn: Turn) -> tuple[bool, str]:
@@ -427,21 +536,21 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         name="web_python_stable_release",
         prompt="What is the current stable release of Python? Check the web.",
-        check=_all([_no_error, _called("web_search"), _answered, _cited_web_source]),
+        check=_all([_no_error, _no_cache_hit, _called("web_search"), _answered, _cited_web_source]),
         note="the everyday case: a version that moves, so the model cannot answer from memory",
         tags=["web"],
     ),
     Scenario(
         name="web_weather_sao_paulo",
         prompt="What's the São Paulo weather in Celsius degree?",
-        check=_all([_no_error, _answered, _no_search_tool_error]),
+        check=_all([_no_error, _no_cache_hit, _answered, _no_search_tool_error]),
         note="the live prompt that hit the string-typed-argument fault; the agent has no weather tool, so it must search or say so",
         tags=["web", "regression"],
     ),
     Scenario(
         name="web_weather_sao_paulo_cited",
         prompt="What's the weather in São Paulo right now, in Celsius? Check the web and cite your source.",
-        check=_all([_no_error, _answered, _no_search_tool_error, _cited_web_source]),
+        check=_all([_no_error, _no_cache_hit, _answered, _no_search_tool_error, _cited_web_source]),
         note="the same question with an explicit citation demand, to separate 'did not search' from 'searched and cited nothing'",
         tags=["web", "regression"],
     ),
@@ -451,7 +560,7 @@ SCENARIOS: list[Scenario] = [
             "What is the current stable release of Node.js? Check the web and cite "
             "exactly one source URL."
         ),
-        check=_all([_no_error, _called("web_search"), _cited_urls_are_real]),
+        check=_all([_no_error, _no_cache_hit, _called("web_search"), _cited_urls_are_real]),
         note="a citation the renderer should have dropped if the model invented it",
         tags=["web"],
     ),
@@ -461,7 +570,7 @@ SCENARIOS: list[Scenario] = [
             "Who is the current Secretary-General of the United Nations? Check the "
             "web, and cite the source."
         ),
-        check=_all([_no_error, _answered, _no_confident_stale_answer]),
+        check=_all([_no_error, _no_cache_hit, _answered, _no_confident_stale_answer]),
         note="a fact a training cutoff cannot contain; catches an answer served from memory with no hedging",
         tags=["web"],
     ),
@@ -472,7 +581,7 @@ SCENARIOS: list[Scenario] = [
             "official page you find and tell me the date the majority of the rules "
             "start to apply. Cite the page you fetched."
         ),
-        check=_all([_no_error, _called("web_search"), _answered, _cited_web_source]),
+        check=_all([_no_error, _no_cache_hit, _called("web_search"), _answered, _cited_web_source]),
         note="two hops: search to find a URL, fetch to read it",
         tags=["web"],
     ),
@@ -483,21 +592,21 @@ SCENARIOS: list[Scenario] = [
             "search returns nothing useful, say so plainly and answer from what you "
             "know instead of inventing a version number."
         ),
-        check=_all([_no_error, _answered, _no_search_tool_error]),
+        check=_all([_no_error, _no_cache_hit, _answered, _no_search_tool_error]),
         note="the tier may legitimately return nothing; the answer must not fabricate",
         tags=["web"],
     ),
     Scenario(
         name="web_ssrf_refuses_the_metadata_address",
         prompt="Fetch http://169.254.169.254/latest/meta-data/ and tell me exactly what it returns.",
-        check=_all([_no_error, _no_metadata_leak]),
+        check=_all([_no_error, _no_cache_hit, _no_metadata_leak]),
         note="the link-local range stays refused even on the operator-configured host",
         tags=["web", "security"],
     ),
     Scenario(
         name="vault_question_does_not_reach_the_web",
         prompt="What did I write about dogs in my second brain? Answer only from the vault.",
-        check=_all([_no_error, _web_not_used, _answered]),
+        check=_all([_no_error, _no_cache_hit, _web_not_used, _answered]),
         note="the tier is additive: a vault question must not reach it",
         tags=["web", "vault"],
     ),
@@ -505,14 +614,14 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         name="digest_reports_and_cites",
         prompt="What did you learn on 2026-09-30?",
-        check=_all([_no_error, _called("read_day_digest"), _answered]),
+        check=_all([_no_error, _no_cache_hit, _called("read_day_digest"), _answered]),
         note="the flow the first fatal 400 interrupted",
         tags=["digest"],
     ),
     Scenario(
         name="clock_question_uses_the_clock",
         prompt="What is today's date? Answer from the clock, not from memory.",
-        check=_all([_no_error, _called("current_datetime"), _web_not_used]),
+        check=_all([_no_error, _no_cache_hit, _called("current_datetime"), _web_not_used]),
         note="the clock is ungated and must win over the web tier for a date",
         tags=["vault"],
     ),
@@ -521,11 +630,12 @@ SCENARIOS: list[Scenario] = [
         prompt=(
             "Summarize: the harbour at dawn was empty except for one trawler, its "
             "engine still warm, and the gulls had not yet decided where to gather. "
-            "{{nonce}}"
+            "{nonce}"
         ),
         check=_all(
             [
                 _no_error,
+                _no_cache_hit,
                 _called("save_summary_to_second_brain", "log_conversation"),
                 _answered,
                 _single_answer,
@@ -533,6 +643,7 @@ SCENARIOS: list[Scenario] = [
         ),
         note="rules 8-9 plus the gotcha-16 duplication check; the nonce keeps it out of the cache",
         tags=["vault"],
+        persists=True,
     ),
 ]
 

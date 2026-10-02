@@ -20,6 +20,7 @@ something has to break on purpose for the comparison to mean anything.
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -58,16 +59,52 @@ def _turn(*events: dict) -> scenarios.Turn:
     return scenarios.Turn(list(events), "a prompt")
 
 
+def _replayed(
+    text: str = (
+        "a stored note, replayed verbatim, long enough and well formed enough to "
+        "satisfy every other check in this file"
+    ),
+) -> scenarios.Turn:
+    """A turn the vault cache answered: one text event, no tool calls, no error."""
+    return scenarios.Turn(
+        [
+            {
+                "author": _APP,
+                "content": {"role": "model", "parts": [{"text": f"**Text Summarizer Agent**\n\n- {text}"}]},
+                "actions": {"state_delta": {"vault_cache_hit": True}},
+            }
+        ],
+        "a prompt",
+    )
+
+
 def _web_turn(url: str = "https://example.org/python", answer: str | None = None) -> scenarios.Turn:
-    """A healthy web turn: search, a payload, and a cited answer."""
+    """A healthy web turn: search, a payload, and a cited answer.
+
+    The payload is the shape the agent really produces -- ``{"result": "<json>"}``,
+    a JSON string inside a dict, because ADK wraps a tool's return value. Fixtures
+    that use a tidier shape are how the harness shipped a check that could not read
+    a live turn.
+    """
     body = answer or (
         f"**Text Summarizer Agent**\n\n- Python 3.13 is current.\n\n"
         f"**Sources**\n- [web][searxng][gemini-3.5-flash-lite]<{url}>: the release page"
     )
     return _turn(
         _text_event("a prompt", author="user"),
-        _event(_APP, [_call("web_search", {"query": "python release"})], model_version="gemini-3.5-flash-lite"),
-        _event(_APP, [_response("web_search", {"results": [{"url": url, "title": "Python"}]})]),
+        _event(
+            _APP,
+            [_call("web_search", {"query": "python release"})],
+            model_version="gemini-3.5-flash-lite",
+        ),
+        _event(
+            _APP,
+            [
+                _response(
+                    "web_search", {"result": json.dumps([{"title": "Python", "url": url}])}
+                )
+            ],
+        ),
         _text_event(body, model_version="gemini-3.5-flash-lite"),
     )
 
@@ -98,16 +135,54 @@ def test_the_answer_joins_every_text_part_not_just_the_last():
     Concatenating every text event is what makes the duplication detectable at all,
     and ``_single_answer`` is the check that acts on it.
     """
-    turn = _turn(_text_event("first copy"), _text_event("second copy"))
+    turn = _turn(_text_event("first part"), _text_event("second part"))
 
-    assert "first copy" in turn.answer
-    assert "second copy" in turn.answer
-    assert scenarios._single_answer(turn)[0] is False
+    assert "first part" in turn.answer
+    assert "second part" in turn.answer
+    # Two different texts are two events but not a duplicated answer.
+    assert scenarios._single_answer(turn)[0] is True
 
 
 def test_a_healthy_turn_is_exactly_one_text_event():
     """The other side of the duplication check, so it is not vacuous."""
     assert scenarios._single_answer(_web_turn())[0] is True
+
+
+def test_a_model_that_narrates_between_tools_is_not_a_duplicate():
+    """Interim text is legitimate; only repeated text is duplication.
+
+    A model that says "I'll search for that first" puts text on the same event as
+    its ``functionCall``, so a four-tool turn produces five text events. The first
+    version of this check counted events and required exactly one, and it failed a
+    healthy turn on the harness's first live run -- reporting duplication that was
+    not there, which is the harness lying about the agent.
+    """
+    turn = _turn(
+        _event(_APP, [{"text": "I'll look that up."}, _call("search_text", {"query": "dogs"})]),
+        _event(_APP, [{"text": "Now the digest."}, _call("read_day_digest", {"day": "2026-09-30"})]),
+        _text_event("Two notes about dogs."),
+    )
+
+    ok, detail = scenarios._single_answer(turn)
+    assert ok is True, detail
+    assert "3 text event(s)" in detail
+
+
+def test_the_same_answer_twice_still_fails():
+    """The check the previous version was trying to be, and now actually is.
+
+    Gotcha 16's signature: the identical final answer emitted twice, the second
+    copy being the correct one -- so a dev UI drew the answer twice and a
+    last-event assertion passed.
+    """
+    turn = _turn(
+        _text_event("The harbour was empty except for one trawler."),
+        _text_event("The harbour was empty except for one trawler."),
+    )
+
+    ok, detail = scenarios._single_answer(turn)
+    assert ok is False
+    assert "appears 2 times" in detail
 
 
 def test_tool_results_are_read_in_order():
@@ -118,13 +193,99 @@ def test_tool_results_are_read_in_order():
     """
     turn = _turn(
         _event(_APP, [_call("web_search", {})]),
-        _event(_APP, [_response("web_search", {"results": [{"url": "https://a.example"}]})]),
+        _event(
+            _APP,
+            [_response("web_search", {"result": '[{"url": "https://a.example", "title": "A"}]'})],
+        ),
         _event(_APP, [_call("web_fetch", {})]),
-        _event(_APP, [_response("web_fetch", {"url": "https://a.example"})]),
+        _event(
+            _APP,
+            [_response("web_fetch", {"result": "<untrusted_content source='https://a.example'>text"})],
+        ),
     )
 
     assert turn.tool_calls == ["web_search", "web_fetch"]
-    assert len(turn.web_urls_offered()) == 1
+    assert turn.web_urls_offered() == {"https://a.example"}
+
+
+def test_a_stringified_search_result_still_yields_its_urls():
+    """The live shape, which the first version of this harness could not read.
+
+    ``web_search`` returns a *list*; what lands on the event is
+    ``{"result": "[{...}]"}`` -- a JSON string inside a dict, because ADK wraps a
+    tool's return value. Looking for a ``results`` key at the top level finds
+    nothing, so the citation check reported that the web tier had returned no URLs
+    on a turn where it returned nine, and failed a perfectly good answer.
+
+    This is here because the bug survived every other offline fixture: the
+    hand-written ones used a ``{"results": [...]}`` shape that the real agent never
+    produces. It was only caught by running the harness against the container.
+    """
+    payload = {
+        "result": json.dumps(
+            [
+                {"title": "Node.js 26", "url": "https://nodejs.org/en/blog/release/v26.0.0/"},
+                {"title": "VersionLog", "url": "https://versionlog.com/nodejs/26/"},
+            ]
+        )
+    }
+    turn = _turn(
+        _event(_APP, [_call("web_search", {})]),
+        _event(_APP, [_response("web_search", payload)]),
+        _text_event(
+            "**Sources**\n- [web][searxng][m]<https://nodejs.org/en/blog/release/v26.0.0/>: release"
+        ),
+    )
+
+    ok, detail = scenarios._cited_urls_are_real(turn)
+    assert ok is True, detail
+    assert turn.web_urls_offered() == {
+        "https://nodejs.org/en/blog/release/v26.0.0/",
+        "https://versionlog.com/nodejs/26/",
+    }
+
+
+def test_a_url_inside_a_failed_tool_result_is_not_counted_as_offered():
+    """An ``isError`` payload is the tool reporting a failure.
+
+    A URL in an error string -- the page that failed to parse, say -- is not
+    something the model was shown, so treating it as offered would let a citation
+    of a failed URL pass.
+    """
+    turn = _turn(
+        _event(_APP, [_call("web_search", {})]),
+        _event(
+            _APP,
+            [
+                _response(
+                    "web_search",
+                    {"isError": True, "content": [{"type": "text", "text": "no results"}]},
+                )
+            ],
+        ),
+    )
+
+    assert turn.web_urls_offered() == set()
+
+
+def test_a_fetched_page_counts_as_offered_via_its_source_marker():
+    """``web_fetch`` returns text, not a structure, and the URL is in the wrapper."""
+    turn = _turn(
+        _event(_APP, [_call("web_fetch", {})]),
+        _event(
+            _APP,
+            [
+                _response(
+                    "web_fetch",
+                    {
+                        "result": "<untrusted_content source='https://ai-act.example/timeline'>\nNode 26\n</untrusted_content>"
+                    },
+                )
+            ],
+        ),
+    )
+
+    assert turn.web_urls_offered() == {"https://ai-act.example/timeline"}
 
 
 # --- the web checks ------------------------------------------------------------
@@ -348,6 +509,79 @@ def test_every_scenario_prompt_is_non_empty_and_unique():
     prompts = [s.prompt for s in scenarios.SCENARIOS]
     assert all(p.strip() for p in prompts)
     assert len(prompts) == len(set(prompts)), "two scenarios share a prompt"
+
+
+def test_a_persisting_scenario_renders_a_different_prompt_each_run():
+    """The uniqueness above is checked on the *template*, which is not what is sent.
+
+    A template can be unique and still render to a fixed string. The harness wrote
+    ``{{nonce}}`` -- doubled braces, an *escaped* literal to ``str.format`` -- so
+    every run sent the prompt ending in the text ``{nonce}``, and the second run
+    was answered from the vault cache in about a millisecond. The scenario passed
+    on the tool calls it never made.
+
+    Only the persisting scenarios are held to this, because they are the only ones
+    that write a note for the next run to find. The rest share
+    ``_no_cache_hit``, which is the general guard -- a replay fails them if one ever
+    starts persisting, without anyone having to remember to add a nonce.
+    """
+    persisting = [s for s in scenarios.SCENARIOS if s.persists]
+    assert persisting, "no scenario declares that it writes to the vault"
+    for scenario in persisting:
+        first = scenario.render("http://127.0.0.1:8001")
+        second = scenario.render("http://127.0.0.1:8001")
+        assert first != second, f"{scenario.name} renders to a fixed prompt"
+        assert "{" not in first and "}" not in first, (
+            f"{scenario.name} still has an unsubstituted placeholder: {first[-60:]!r}"
+        )
+
+
+def test_a_replayed_turn_is_reported_as_a_cache_hit():
+    """A replay has to be visible, because it satisfies every other check.
+
+    The stored note is a well-formed answer of a plausible length, so "answered"
+    passes, "no error" passes, and the turn took a millisecond -- which reads as
+    fast rather than wrong. The state the session persisted is the only evidence,
+    so it is the thing asserted on.
+    """
+    replayed = _replayed()
+    ok, detail = scenarios._no_cache_hit(replayed)
+    assert ok is False
+    assert "cache" in detail
+    # ...and every other check is happy with it, which is the point.
+    assert scenarios._no_error(replayed)[0] is True
+    assert scenarios._answered(replayed)[0] is True
+
+    fresh = scenarios.Turn(
+        [
+            {
+                "author": _APP,
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"text": "**Text Summarizer Agent**\n\n- a freshly generated answer of decent length"}
+                    ],
+                },
+                "actions": {"state_delta": {"vault_cache_hit": False}},
+            }
+        ],
+        "a prompt",
+    )
+    assert scenarios._no_cache_hit(fresh)[0] is True
+
+
+def test_every_scenario_guards_against_a_cache_replay():
+    """Structural: no scenario may be satisfied by a note from a previous run.
+
+    A scenario that composes its checks without ``_no_cache_hit`` would pass on a
+    replay, and the only symptom would be that it stopped testing anything while
+    continuing to report PASS.
+    """
+    replayed = _replayed()
+    for scenario in scenarios.SCENARIOS:
+        if not scenario.persists:
+            ok, _ = scenario.check(replayed)
+            assert ok is False, f"{scenario.name} passes on a replayed note"
 
 
 def test_every_scenario_declares_its_tags():
