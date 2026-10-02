@@ -10,6 +10,7 @@ from google.adk.tools import FunctionTool
 from google.genai.types import Content, Part
 from opentelemetry import trace as otel_trace
 
+from . import breaker
 from .ask_user import build_ask_user_tool
 from .clock import build_clock_tools
 from .digest_tools import build_digest_tools
@@ -259,6 +260,58 @@ def _openrouter_llm(model_name: str, api_key: str = "") -> LiteLlm:
     return LiteLlm(model=f"openrouter/{model_name}", api_key=api_key or None)
 
 
+class _BreakerLiteLlm(LiteLlm):
+    """A ``LiteLlm`` that trips the breaker when its account is rate-limited.
+
+    Subclassing rather than wrapping is what makes this safe. A wrapper would have to
+    reimplement ``generate_content_async``, and ``LiteLlm`` merges per-call options
+    into ``llm_request.config`` before dispatch -- re-implementing that is how a
+    timeout or a header set elsewhere silently stops applying. Overriding one method
+    and delegating to ``super()`` cannot drift from it.
+
+    Two behaviours, and the second is the reason this exists at all:
+
+    * **Trip on 429.** The account is out of daily quota until the provider's own
+      reset time. Recorded per *account*, because the budget is per account.
+    * **Refuse immediately when already tripped.** Raises without a network call so
+      ``FallbackModel`` moves on in microseconds instead of paying a round trip to be
+      told the same thing. Measured, that round trip is 0.23s, and with six dead
+      entries it is paid on every turn.
+    """
+
+    def __init__(self, model_name: str, api_key: str) -> None:
+        super().__init__(model=f"openrouter/{model_name}", api_key=api_key or None)
+        # Kept as a plain attribute rather than reaching into `_additional_args`, so
+        # it is available before the pydantic model is built.
+        object.__setattr__(self, "_account_key", api_key or "")
+
+    async def generate_content_async(self, llm_request, stream: bool = False):
+        key = getattr(self, "_account_key", "")
+        if key and breaker.is_spent(key):
+            # Deliberately a plain exception, not a 429-shaped one: this account is
+            # known dead, and `FallbackModel` treats any exception from a delegate
+            # as "try the next", which is the intended outcome. The message carries
+            # the account's fingerprint because that is what appears in a trace.
+            raise RuntimeError(
+                f"openrouter account {breaker._fingerprint(key)} is rate-limited "
+                "until its reset time; skipped without a request"
+            )
+        try:
+            async for response in super().generate_content_async(llm_request, stream):
+                yield response
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 429 and key:
+                cooldown = breaker.trip(key, exc)
+                if cooldown:
+                    print(
+                        f"[text_summarizer] openrouter account "
+                        f"{breaker._fingerprint(key)} rate-limited; skipping it for "
+                        f"{cooldown / 60:.0f} min",
+                        file=sys.stderr,
+                    )
+            raise
+
+
 def _opencode_llm(model_name: str = OPENCODE_MODEL) -> LiteLlm:
     """OpenCode Zen, reached through its OpenAI-compatible endpoint.
 
@@ -312,23 +365,29 @@ def get_model():
     The product is per key rather than per model, so N keys give N times the
     budget: an account's 50/day is shared across its models, so ``key x model``
     pairs would spend the same 50 several times over and look like headroom.
+
+    **Accounts the breaker has already proved spent are left out entirely**, which
+    is the same decision :class:`_BreakerLiteLlm` makes per call, made once instead
+    of N times. Both are needed and they fail differently: this one shrinks the
+    chain, and the other covers an account that runs dry *during* a process's
+    lifetime, which a chain built at import cannot see.
     """
     if MODEL_PROVIDER == "openrouter":
         primary_name = OPENROUTER_MODELS.get(MODEL_ALIAS) or _free_openrouter_models()[0]
         fallback_names = [
             name for name in _free_openrouter_models() if name != primary_name
         ]
-        keys = _openrouter_keys() or [""]
+        keys = [k for k in (_openrouter_keys() or [""]) if not breaker.is_spent(k)]
         ordered = [primary_name, *fallback_names]
-        chain = [_openrouter_llm(name, key) for key in keys for name in ordered]
+        chain = [_BreakerLiteLlm(name, key) for key in keys for name in ordered]
     else:
         # Default provider is Gemini; fall back to free OpenRouter models on quota
         # exhaustion (HTTP 429) or transient 5xx errors, then to Zen.
         chain = [GEMINI_MODEL]
-        keys = _openrouter_keys()
+        keys = [k for k in _openrouter_keys() if not breaker.is_spent(k)]
         if keys:
             chain += [
-                _openrouter_llm(name, key)
+                _BreakerLiteLlm(name, key)
                 for key in keys
                 for name in _free_openrouter_models()
             ]
