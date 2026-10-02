@@ -707,6 +707,41 @@ PYTHONPATH=/tmp/agent-testing-testlibs \
 
 There is no linter or type-checker configured in this repo (no `ruff`/`mypy`/`pyright` config, no `Makefile`). The only automated gate is the pytest run above.
 
+### The renderer — `web_fetch` falls back to a browser
+
+A plain HTTP GET cannot execute JavaScript, and a measurable number of pages build their content with it. The page that set this up:
+
+```
+ingresso.com/filmes?city=osasco
+  94,700 bytes of HTML
+  → 183 characters of visible text after stripping tags and scripts
+  25 external scripts, no __NEXT_DATA__, no __NUXT__
+```
+
+183 characters of navigation for a page whose entire purpose is a list of films. The agent's honest answer to that was *"the titles are rendered dynamically and are not exposed in the static page text"* — true, and useless. Through a browser the same URL yields **2,024 characters naming the actual films in 2.1s**, and the agent now answers with *Verity, Digger, Resident Evil, Homem-Aranha: Um Novo Dia* instead of declining.
+
+A **separate compose project** at `~/Downloads/apps/chromium`, joined to `agent-net` by service name, configured with `RENDERER_URL`. Deliberately not part of this repo: that container executes JavaScript written by whoever published the page, so it holds no vault mount, no API key, no published port, and can be stopped without touching the agent.
+
+**It is a fallback, not a second path.** `web_fetch` does the plain GET first and only renders when what came back is too thin to be the page. `RENDER_BELOW_CHARS = 700` is set from measurement — visible chars from a GET, then from Chromium:
+
+| Page | GET | Browser | |
+|---|---|---|---|
+| `ingresso.com/filmes` | 478 | 2024 | shell → renders |
+| `ingresso.com/cinemas` | 583 | 1511 | shell → renders |
+| `example.com` | 444 | 917 | short but real → renders, and gets more |
+| `ai-act-service-desek…` | 3093 | 2793 | real prose → skipped |
+| `python.org/downloads` | 20301 | 19996 | real prose → skipped |
+
+700 sits above every shell and below every page with prose. It is set **high** on purpose: a false positive costs one ~2s render on a merely-short page, and `example.com` shows that is not a penalty. Nothing here can separate a shell from a genuinely short page by length alone; both are worth rendering, so the ambiguity costs nothing.
+
+Unset `RENDERER_URL` and the tier is byte-for-byte what it was: the gate is not part of `build_web_search_tools`, the fallback is simply never taken, and a thin page is returned as-is rather than failed.
+
+**The renderer's address vetting is per-request and is *weaker* than `check_url`'s.** Every request — document and every subresource — is intercepted before it leaves, resolved, and aborted on loopback/private/link-local/multicast. What cannot be done is **pinning**: `_pinned_transport` makes httpx dial the exact vetted address, and a browser cannot be made to. So the resolve-then-connect gap that gotcha 19 closed is open here, and the renderer says so in its own docstring rather than implying parity. All four probes refuse: `169.254.169.254`, `127.0.0.1`, `file:///etc/passwd`, and the host's own LAN address.
+
+**A side effect of the DNS choice is worth knowing.** The renderer resolves via `192.168.1.137`, this machine's own LAN address where `systemd-resolved` listens, so the browser sees the host's view of DNS. That resolver returns `0.0.0.0` for ad and tracker domains (`1.1.1.1` resolves them normally), so **the browser inherits that filtering for free** — 12 of the requests on the ingresso.com render were refused that way. The refusal message distinguishes it from a genuine non-public address, because "refused: non-public address" on an ad domain reads like a bug.
+
+**Not verified:** no live turn has run with the renderer configured *and* a working model tier. The `web_js_rendered_page_is_not_invented` scenario passed against a rebuilt container (26s, real film names, cited), but the final full-suite run was cut short — see below.
+
 ### Scenario harness — `tools/scenarios.py`
 
 Real prompts against the deployed agent, judged from the **persisted session events**. Not a pytest test and not part of `make check`: it spends Gemini quota, writes to the real vault, and needs both services up.
