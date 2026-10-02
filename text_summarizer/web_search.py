@@ -229,6 +229,38 @@ _DANGLING_LT_TAIL_RE = re.compile(r"<[^<>]*\Z")
 _WS_RE = re.compile(r"[ \t\r\f\v]+")
 _BLANKS_RE = re.compile(r"\n{3,}")
 
+#: ``href``/``src`` values out of a rendered page, and the anchor text beside them.
+#:
+#: Linear in both of the ways that matter: the character class excludes ``<`` and
+#: ``>`` so a match cannot run past a tag boundary, and every quantifier is greedy
+#: rather than lazy, so a hostile body of unterminated tags cannot make one start
+#: position scan to the end of the document. (This is the same lesson as
+#: ``_TAG_RE`` above: "each regex is linear" is not "the pass is linear".)
+_HREF_SRC_RE = re.compile(
+    r"""<a\b[^<>]*?\bhref\s*=\s*(?:"([^"<>]*)"|'([^'<>]*)'|([^\s"'<>`]+))""",
+    re.IGNORECASE | re.DOTALL,
+)
+#: The text of the anchor whose ``href`` we just took. Tempered on ``<`` so a
+#: nested tag ends it rather than being skipped, and bounded so a page with one
+#: enormous anchor cannot turn label extraction into the dominant cost.
+_ANCHOR_TEXT_RE = re.compile(r"[^<>]{0,120}")
+
+#: How many links one page may contribute, and how many characters the whole block
+#: may take. Both are set from measurement on the pages this tier is actually for,
+#: because a cap that truncates is the same dead end as no block at all -- and worse,
+#: because it looks like an answer:
+#!
+#:     ingresso.com/filmes?city=osasco      50 links,  3.4 kB   (16 per-movie)
+#:     ingresso.com/filme/verity?city=osasco 75 links,  5.1 kB   (21 checkout)
+#:
+#: So the numbers are rounded up with room for a busier day (a big multiplex lists
+#: far more sessions than a two-screen one), and the block is appended *after* the
+#: page text is truncated to ``max_chars`` -- see ``render_page_text``. The point of
+#: the block is that the model can follow the promising links; a block that drops
+#: the interesting ones is worse than none, because it reads as complete.
+MAX_LINKS = 120
+_MAX_LINK_BLOCK_CHARS = 8000
+
 
 class _BodyTooLarge(Exception):
     """Raised by :func:`_http_get` when a body passes the streaming ceiling."""
@@ -768,6 +800,129 @@ def _html_to_text(markup: str) -> str:
     return _BLANKS_RE.sub("\n\n", text).strip()
 
 
+#: Schemes a link may carry. Everything else is dropped rather than resolved,
+#: because these three are the only ones ``web_fetch`` can actually follow --
+#: ``mailto:`` and ``tel:`` are not fetchable, and resolving ``javascript:`` or
+#: ``data:`` into a string the model may echo back into a citation is asking for
+#: trouble.
+_LINK_SCHEMES = ("http://", "https://")
+
+
+def _is_followable(url: str) -> bool:
+    """Whether ``web_fetch`` could be pointed at this URL.
+
+    Tested on the *resolved* URL, not the raw ``href``. That distinction is the
+    whole ballgame here: on a real site the interesting links are overwhelmingly
+    **root-relative** (``/filme/verity?city=osasco``), so checking the raw value
+    for an ``http`` prefix throws away exactly the links this block exists to
+    surface. Resolving first also leaves ``mailto:``/``tel:``/``javascript:``
+    identifiable -- ``urljoin`` passes those through unchanged, so the same test
+    still drops them.
+    """
+    lowered = url.lower()
+    return lowered.startswith(_LINK_SCHEMES)
+
+
+def _format_links(markup: str, base_url: str, limit: int = MAX_LINKS) -> str:
+    """A ``[links]`` block of the page's outbound URLs, for the model to follow.
+
+    **Why this exists.** ``_html_to_text`` keeps an anchor's *text* and throws its
+    ``href`` away, so a rendered page reached the model with zero URLs in it. That
+    is invisible on a prose page and fatal on a structured one: asked for session
+    times and checkout links for every movie on a cinema listing, the agent read
+    the listing (titles and ratings only), could not see that the page linked a
+    detail page per movie, and reported -- correctly, from the evidence it had --
+    that no such data existed. It also cannot *cite* a URL it was never shown, so
+    the ``[web]`` source line degrades to nothing.
+
+    Both the text and the links are untrusted, and they arrive inside the same
+    wrapper: :func:`_wrap_untrusted` is applied by the caller to whatever this
+    returns, so a URL cannot smuggle itself out of the "this is data" region.
+    ``_neutralise_marker`` runs on the assembled block for the same reason it runs
+    on page text -- a crafted ``href`` is as good an injection vector as a crafted
+    paragraph.
+
+    Deduplicated and order-preserving: a page repeats the same nav link in header,
+    body and footer, and three copies of one URL is context spent for nothing.
+    """
+    if not markup:
+        return ""
+
+    # Same cap as the text pass, and for the same reason: the regexes are linear
+    # per start position, so an unbounded body is an unbounded number of them.
+    if len(markup) > _SANITISE_INPUT_CAP:
+        markup = markup[:_SANITISE_INPUT_CAP]
+
+    seen: set[str] = set()
+    lines: list[str] = []
+    total = 0
+    truncated = False
+
+    for match in _HREF_SRC_RE.finditer(markup):
+        href = next((g for g in match.groups() if g), "")
+        if not href:
+            continue
+        href = html.unescape(href).strip()
+        if not href:
+            continue
+        # urljoin resolves "relative", "/rooted" and "//protocol-relative" against
+        # the page it was found on, and leaves javascript:/mailto: alone -- so the
+        # scheme test has to come *after*, or every root-relative link (the common
+        # case on a real site) is discarded before it can be resolved.
+        #
+        # Neutralise straight after the unescape, and for the same reason the text
+        # pass does it there: `&#60;/untrusted_content&#62;` carries no `<`, so it
+        # passes the scheme test intact and the unescape then manufactures a real
+        # closing tag out of it -- ending the "this is DATA" region mid-URL and
+        # leaving whatever the attacker appended to it reading as instructions.
+        # Measured: the raw href above returned a block containing a literal
+        # `</untrusted_content>`.
+        href = _neutralise_marker(href)
+        # urljoin resolves "relative", "/rooted" and "//protocol-relative" against
+        # the page it was found on, and leaves javascript:/mailto: alone -- so the
+        # scheme test has to come *after*, or every root-relative link (the common
+        # case on a real site) is discarded before it can be resolved.
+        absolute = urljoin(base_url, href)
+        if not _is_followable(absolute):
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+
+        if len(lines) >= limit:
+            truncated = True
+            break
+
+        # The anchor's own text, so the model can tell a per-movie link from a
+        # cookie-policy link without fetching every one of them. Read from just
+        # after the opening tag's `>` -- starting at the href means the rest of the
+        # attributes (`class="..." target="_blank"`) gets read as the label.
+        tag_end = markup.find(">", match.end())
+        label = ""
+        if tag_end != -1:
+            closer = re.search(r"</a\s*>", markup[tag_end : tag_end + 400], re.IGNORECASE)
+            if closer:
+                inner = markup[tag_end + 1 : tag_end + 1 + closer.start()]
+                found = _ANCHOR_TEXT_RE.search(inner)
+                if found:
+                    label = _neutralise_marker(
+                        _collapse(html.unescape(found.group(0)))
+                    )
+
+        line = f"- {absolute}" + (f" ({label})" if label else "")
+        if total + len(line) > _MAX_LINK_BLOCK_CHARS:
+            truncated = True
+            break
+        lines.append(line)
+        total += len(line) + 1
+
+    if not lines:
+        return ""
+    if truncated:
+        lines.append(f"[showing the first {len(lines)} links; the page has more]")
+    return "[links on this page]\n" + "\n".join(lines)
+
+
 def fetch_page_text(url: str, max_chars: int = 6000) -> str:
     """Fetch one page and return its text, guarded at every hop.
 
@@ -835,18 +990,26 @@ def fetch_page_text(url: str, max_chars: int = 6000) -> str:
                 f"only {'/'.join(_ALLOWED_CONTENT_TYPES)} is fetched"
             )
 
+        decoded = _decode(body, content_type)
         text = (
-            _html_to_text(_decode(body, content_type))
+            _html_to_text(decoded)
             if base_type in ("text/html", "application/xhtml+xml")
-            else _collapse(_decode(body, content_type))
+            else _collapse(decoded)
         )
         if not text:
             raise ValueError(f"{_short(current)} had no readable text")
+
+        links = _format_links(decoded, current)
 
         if len(text) > limit:
             # Cut on a boundary so the model never sees half a word.
             text = text[:limit].rsplit(" ", 1)[0] or text[:limit]
             text += f"\n\n[truncated at {limit} characters]"
+        if links:
+            # Appended *after* the truncation notice, so a page that both overruns
+            # and links gets its links: the links are what let the model fetch the
+            # rest, and cutting them is what produced the original dead end.
+            text = f"{text}\n\n{links}"
         return _wrap_untrusted(current, text)
 
     raise ValueError("too many redirects")
@@ -951,6 +1114,7 @@ def render_page_text(url: str, max_chars: int, *, base_url: str | None = None) -
         raise ValueError(f"the renderer returned no text for {_short(url)}")
 
     limit = max(200, min(int(max_chars), MAX_CHARS_CAP))
+    links = _format_links(payload.get("html") or "", url)
     blocked = payload.get("blocked_requests") or []
     if blocked:
         # Surfaced rather than swallowed. A page that had a dozen requests refused
@@ -964,6 +1128,11 @@ def render_page_text(url: str, max_chars: int, *, base_url: str | None = None) -
         text += (
             f"\n\n[the renderer refused {len(blocked)} sub-request(s), e.g. {first}]"
         )
+    if links:
+        text = f"{text}\n\n{links}"
+    # The cap applies to the *page*, not to the whole return value: the links are
+    # what make the truncated page followable, so cutting them to hit a text budget
+    # would restore exactly the dead end this block exists to remove.
     return text[:limit]
 
 
