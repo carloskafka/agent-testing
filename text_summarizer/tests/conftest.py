@@ -45,6 +45,13 @@ os.environ["GEMINI_API_KEY"] = ""
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ["OPENROUTER_API_BASE"] = ""
 os.environ["MODEL_ALIAS"] = ""
+#: The OpenCode Zen tier. Pinned for the same reason as OPENROUTER_API_KEY above,
+#: and it is not optional bookkeeping: with a developer's real key exported, the
+#: chain gains a `hosted_vllm/space-bunny-free` entry and every test that asserts on
+#: the chain's shape fails -- which is how this was found, by a test that had
+#: nothing to do with model selection.
+os.environ["OPENCODE_API_KEY"] = ""
+os.environ["OPENCODE_API_BASE"] = ""
 
 #: Both Obsidian transports, so the MCP tool list is identical everywhere.
 #: Gotcha 11: with neither set, ``build_obsidian_tools()`` returns ``[]``.

@@ -131,8 +131,15 @@ def test_gemini_leads_and_the_free_models_follow(monkeypatch):
     sequence, so putting a free OpenRouter model first would hand every ordinary
     turn to a tier whose reliability is not under our control (AGENTS.md known gap
     7) and use the primary only when that fails.
+
+    Asserted against a *configured* key, because the chain legitimately differs
+    when none is set: with no OpenRouter key and no Zen key there is nowhere for an
+    unsigned conversation to go, so a signature-free placeholder is appended rather
+    than leaving the chain unbuildable. That path has its own test below.
     """
     monkeypatch.setattr(agent_module, "MODEL_PROVIDER", "gemini")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-" + "a" * 40)
+    monkeypatch.setenv("OPENCODE_API_KEY", "")
 
     names = _chain_names(agent_module.get_model())
 
@@ -357,3 +364,205 @@ def test_the_openrouter_wrapper_is_where_the_prefix_is_added(monkeypatch):
 
     assert isinstance(llm, LiteLlm)
     assert llm.model == "openrouter/some/model:free"
+
+
+# --- multiple accounts, and the Zen tier --------------------------------------
+#
+# Found on 2026-10-02, session `b6f09fca`: Gemini served eight calls of a turn, the
+# ninth 429'd, the chain fell through to OpenRouter, and that account's free tier
+# was already spent -- so the turn wrote its notes and **returned no answer at
+# all**. The quota was the trigger; the missing second account is the defect.
+
+
+def test_several_keys_give_several_times_the_budget(monkeypatch):
+    """Two accounts means two independent 50/day pools, and the chain has both.
+
+    The product is deliberately **per key, not per model**: an account's daily
+    budget is shared across all of that account's models, so `key x model` pairs
+    would spend the same 50 several times and look like headroom.
+    """
+    monkeypatch.setattr(agent_module, "MODEL_PROVIDER", "gemini")
+    monkeypatch.setenv("OPENCODE_API_KEY", "")
+    monkeypatch.setenv(
+        "OPENROUTER_API_KEY", f"sk-or-v1-{'a' * 40};sk-or-v1-{'b' * 40}"
+    )
+
+    names = _chain_names(agent_module.get_model())
+
+    free = list(agent_module._free_openrouter_models())
+    assert names[0] == agent_module.GEMINI_MODEL
+    # Every model reachable from the first key, then every model from the second.
+    assert names[1:] == [OPENROUTER_PREFIX + n for n in free] * 2
+
+
+def test_the_zen_tier_is_added_only_when_a_key_is_configured(monkeypatch):
+    """Unconfigured, the chain is byte-for-byte what it was before Zen existed."""
+    monkeypatch.setattr(agent_module, "MODEL_PROVIDER", "gemini")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-" + "a" * 40)
+    monkeypatch.setenv("OPENCODE_API_KEY", "")
+
+    assert agent_module.opencode_enabled() is False
+    assert not any("space-bunny" in n for n in _chain_names(agent_module.get_model()))
+
+    monkeypatch.setenv("OPENCODE_API_KEY", "oc_sk_test")
+    assert agent_module.opencode_enabled() is True
+    names = _chain_names(agent_module.get_model())
+    assert names[-1] == f"hosted_vllm/{agent_module.OPENCODE_MODEL}"
+
+
+def test_zen_is_reachable_when_it_is_the_only_tier(monkeypatch):
+    """No OpenRouter key is a supported configuration, not a broken one.
+
+    Worth pinning because the alternative is a crash: a Gemini-only chain leaves
+    nowhere for an *unsigned* conversation to go, and `HistorySafeFallbackModel`
+    rejects an empty signature-free list at construction -- so the agent would
+    fail to import rather than merely losing its fallback.
+    """
+    monkeypatch.setattr(agent_module, "MODEL_PROVIDER", "gemini")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    monkeypatch.setenv("OPENCODE_API_KEY", "oc_sk_test")
+
+    names = _chain_names(agent_module.get_model())
+    assert names == [
+        agent_module.GEMINI_MODEL,
+        f"hosted_vllm/{agent_module.OPENCODE_MODEL}",
+    ]
+
+
+# --- ';'-separated keys --------------------------------------------------------
+
+
+def test_keys_split_on_a_semicolon_and_are_trimmed():
+    """The separator is a list, so the number of accounts is not capped by a name."""
+    keys = agent_module._split_keys(" sk-or-v1-aaa ; sk-or-v1-bbb ")
+    assert keys == ["sk-or-v1-aaa", "sk-or-v1-bbb"]
+
+
+def test_an_empty_entry_is_not_a_key():
+    """`a;;b` and a trailing `;` are typing, not configuration."""
+    assert agent_module._split_keys("sk-or-v1-aaa;;sk-or-v1-bbb;") == [
+        "sk-or-v1-aaa",
+        "sk-or-v1-bbb",
+    ]
+    assert agent_module._split_keys("") == []
+    assert agent_module._split_keys(None) == []
+
+
+def test_the_same_key_twice_is_one_key():
+    """Otherwise it doubles a chain entry without adding a single request."""
+    assert agent_module._split_keys("sk-or-v1-aaa;sk-or-v1-aaa") == ["sk-or-v1-aaa"]
+
+
+def test_a_malformed_entry_is_dropped_and_reported(capsys):
+    """Loudly, because the alternative is a 401 much later with no clue why.
+
+    Only the *shape* of the rejected value is printed. It is a credential, and a
+    log line is exactly where credentials end up.
+    """
+    keys = agent_module._split_keys(
+        "sk-or-v1-" + "a" * 40 + ";garbage-not-a-key", pattern=agent_module._OPENROUTER_KEY_RE
+    )
+    assert keys == ["sk-or-v1-" + "a" * 40]
+
+    err = capsys.readouterr().err
+    assert "malformed" in err
+    # The rejected value itself must not appear.
+    assert "garbage-not-a-key" not in err
+    assert "garbag..." in err
+
+
+def test_the_list_length_is_bounded():
+    """A paste accident must not become an unbounded chain of doomed calls."""
+    many = ";".join(f"sk-or-v1-{i:0>40}" for i in range(50))
+    assert len(agent_module._split_keys(many)) == agent_module.MAX_PROVIDER_KEYS
+
+
+def test_a_real_key_survives_validation():
+    """The pattern must accept the shape OpenRouter actually issues.
+
+    Built from the documented shape rather than copied from a live key. An
+    earlier version of this test pasted a real key in as ``real_shape``, which is
+    a secret in the repository and in every clone of it -- and GitHub's push
+    protection blocked the push for exactly that, which is the only reason this
+    was caught before it went anywhere. The length and alphabet are what the
+    regex actually tests, so constructing them tests the same thing.
+    """
+    real_shape = "sk-or-v1-" + "9671d7e5" * 8
+    assert len(real_shape) == len("sk-or-v1-") + 64
+    assert agent_module._OPENROUTER_KEY_RE.match(real_shape)
+    for wrong in ("", "sk-or-v1-", "sk-or-v1-short", "your_openrouter_api_key_here"):
+        assert not agent_module._OPENROUTER_KEY_RE.match(wrong), wrong
+
+
+# --- the Zen timeout ----------------------------------------------------------
+#
+# The number that started this: a first sample of 10 calls had a median of 4.0s,
+# and "median 4.0s" read aloud next to a timeout discussion sounds like a setting.
+# It was not one -- nothing was configured at all.
+
+
+def test_the_zen_timeout_clears_the_measured_tail():
+    """A timeout below the slowest successful call manufactures false errors.
+
+    Measured 40 calls, all HTTP 200: 37 land under 5s, then 17.83s and 46.46s.
+    A timeout set from the *median* (4.0s on the first, smaller sample) would fail
+    10% of calls that succeeded, and each of those sends the chain hunting for a
+    fallback it did not need. So the constant has to clear the tail.
+    """
+    measured = [0.92, 0.97, 0.97, 1.01, 1.07, 1.1, 1.12, 1.12, 1.12, 1.13,
+                1.13, 1.21, 1.22, 1.22, 1.25, 1.27, 1.3, 1.3, 1.33, 1.35,
+                1.5, 1.56, 1.57, 1.65, 1.75, 1.91, 1.96, 1.99, 2.05, 2.06,
+                2.14, 2.26, 2.49, 2.78, 3.26, 3.7, 4.62, 4.98, 17.83, 46.46]
+    assert max(measured) < agent_module.OPENCODE_TIMEOUT_S
+
+    # And the value that would have looked reasonable, asserted to be wrong.
+    failures_at_median = len([x for x in measured if x > 4.0])
+    assert failures_at_median == 4, "the sample changed; re-measure before trusting this"
+
+
+def test_the_zen_client_carries_the_timeout_and_credentials():
+    """The constant is only load-bearing if it reaches the completion call.
+
+    Asserted against ``_additional_args`` rather than a ``timeout`` attribute
+    because `LiteLlm` keeps no such attribute: its ``__init__`` is
+    ``(self, model, **kwargs)`` and everything else is stashed in
+    ``_additional_args`` to be merged into the litellm call. Reading
+    ``llm.timeout`` raises `AttributeError`, which is how this test first failed
+    -- and an assertion that had *silently* passed against a plain attribute would
+    have proved nothing about the value actually reaching the wire.
+    """
+    llm = agent_module._opencode_llm()
+    assert isinstance(llm, LiteLlm)
+    args = llm._additional_args
+    assert args["timeout"] == agent_module.OPENCODE_TIMEOUT_S
+    assert args["api_base"] == agent_module.OPENCODE_API_BASE
+
+
+def test_an_openrouter_entry_binds_its_own_key():
+    """Two chain entries must not resolve to the same account.
+
+    This is the whole point of threading ``api_key`` through: left to litellm
+    reading ``OPENROUTER_API_KEY`` from the environment, *both* entries would use
+    key one, so the second account's 50/day would never be drawn on and the chain
+    would spend the same exhausted budget twice.
+    """
+    keys = [f"sk-or-v1-{c * 40}" for c in ("a", "b")]
+    first = agent_module._openrouter_llm("qwen/qwen3.8-27b:free", keys[0])
+    second = agent_module._openrouter_llm("qwen/qwen3.8-27b:free", keys[1])
+    assert first._additional_args["api_key"] == keys[0]
+    assert second._additional_args["api_key"] == keys[1]
+
+
+def test_the_zen_key_is_bound_when_one_is_configured(monkeypatch):
+    """Separate from the timeout because ``api_key=None`` is a valid state here.
+
+    ``conftest.py`` blanks ``OPENCODE_API_KEY`` for every test, so the unconfigured
+    shape is ``None``. Asserting only that would pass whether the key were wired up
+    or not -- which is the failure this whole change is about.
+    """
+    monkeypatch.setenv("OPENCODE_API_KEY", "oc_sk_test_key")
+    llm = agent_module._opencode_llm()
+    assert llm._additional_args["api_key"] == "oc_sk_test_key"
+
+    monkeypatch.setenv("OPENCODE_API_KEY", "")
+    assert agent_module._opencode_llm()._additional_args["api_key"] is None
