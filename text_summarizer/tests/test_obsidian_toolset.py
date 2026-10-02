@@ -349,10 +349,12 @@ def test_get_tools_rewrites_the_raw_mcp_tool_schema(monkeypatch):
 
     assert tools == [tool]
     assert tool.raw_mcp_tool.inputSchema == sanitized
-    # The union is still a union -- sanitising adds ``items``, it does not
-    # narrow the parameter, which would change what the tool accepts.
+    # The six-way union is narrowed, not merely given an `items`: a top-level
+    # `items` on a parameter that is also a plain string is what OpenRouter's
+    # ModelRun provider refuses ("more than one JSON reading of the same emitted
+    # value"), and that refusal is a dead turn on the fallback path. See
+    # `_require_items`.
     assert tool.raw_mcp_tool.inputSchema["properties"]["value"]["type"] == [
-        "array",
         "boolean",
         "null",
         "number",

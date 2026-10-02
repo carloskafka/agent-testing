@@ -183,11 +183,43 @@ def _inline_refs(node: Any, defs: dict, depth: int = 0) -> Any:
 
 
 def _require_items(node: Any) -> Any:
-    """Give every array-typed subschema an ``items`` keyword, recursing into children.
+    """Give an array-typed parameter an ``items`` keyword, recursing into children.
 
-    ``type`` may be a list (a union). ``array`` anywhere in that list means the
-    parameter also accepts a JSON array, and an array schema without ``items`` is
-    rejected outright by Gemini's request validator.
+    **Only when ``array`` is the parameter's whole non-null type.** This used to
+    inject ``items`` into any subschema whose ``type`` list merely *contained*
+    ``"array"``, and that was wrong in a way that turned a working fallback tier
+    into a dead turn.
+
+    Measured on the real eight-tool payload against the upstreams that constrain
+    the answer (Oct 2026). ``qwen/qwen3.8-27b:free``, which OpenRouter routes to a
+    provider it calls "ModelRun", refuses the request outright:
+
+        folding the request grammar: tool "search_metadata" parameter schema:
+        parameter "value": more than one JSON reading of the same emitted value
+
+    Read literally, that is a complaint about a parameter having *two* valid JSON
+    forms -- and ``search_metadata.value`` is declared
+    ``["array","boolean","null","number","object","string"]``. A top-level
+    ``items`` on that makes it readable as both "a string" and "an array of
+    strings", which is the ambiguity being refused. Dropping ``items`` again is not
+    the answer: a Google AI Studio upstream lowers the union to ``any_of`` and then
+    answers ``any_of[0].items: missing field``, which is the fault this function
+    originally existed to fix. And ``anyOf`` -- the one spelling that could put
+    ``items`` inside the array branch, where JSON Schema wants it -- is refused by
+    that same provider.
+
+    So no spelling satisfies both, and the repair is to narrow the declared type to
+    the members that can be described: ``array`` leaves the union, and with it goes
+    the need for ``items``. Four of the five cases survive, and the one lost is not
+    a real loss -- the server's own description says a JSON-encoded string is
+    compared as a literal string, so an array value was already only reachable as a
+    string.
+
+    A parameter declared *solely* ``array``, or ``["array","null"]`` which is how
+    ``obsidian-mcp`` writes every optional array, is untouched: there ``items`` is
+    unambiguous and every upstream wants it. Of the seventeen unions this server
+    serves, exactly one has more than one non-null member, so this narrows one
+    parameter rather than the toolset.
     """
     if isinstance(node, list):
         return [_require_items(v) for v in node]
@@ -195,12 +227,21 @@ def _require_items(node: Any) -> Any:
         return node
 
     declared = node.get("type")
-    is_array = declared == "array" or (
-        isinstance(declared, list) and "array" in declared
-    )
-    if is_array and "items" not in node:
-        # The original schema left element types unconstrained; the widest schema
-        # that still validates is an empty subschema, so preserve that intent.
+    if isinstance(declared, list):
+        concrete = [t for t in declared if t != "null"]
+        if "array" in concrete and len(concrete) == 1 and "items" not in node:
+            # The original schema left element types unconstrained; the widest
+            # schema that still validates is an empty subschema, so keep that intent.
+            node = {**node, "items": dict(_DEFAULT_ITEMS)}
+        elif "array" in concrete and len(concrete) > 1:
+            # A multi-type union cannot say what an *array element* looks like
+            # without an `anyOf` the fallback provider refuses, so the array member
+            # is dropped rather than described ambiguously. The two upstream errors
+            # that force the choice are in the docstring.
+            narrowed = {k: v for k, v in node.items() if k != "items"}
+            narrowed["type"] = [t for t in declared if t != "array"]
+            node = narrowed
+    elif declared == "array" and "items" not in node:
         node = {**node, "items": dict(_DEFAULT_ITEMS)}
 
     return {k: _require_items(v) for k, v in node.items()}
