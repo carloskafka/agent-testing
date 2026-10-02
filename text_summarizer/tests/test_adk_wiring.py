@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 from _helpers import (
+    MODEL_ANSWER,
     SERVED_MODEL,
     _agent_texts,
     _all_text,
@@ -41,7 +42,9 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import InMemoryRunner
 from google.genai import types
+from google.genai.errors import ServerError
 from text_summarizer import agent as agent_module
+from text_summarizer.model_chain import HistorySafeFallbackModel
 from text_summarizer.second_brain import note_provenance
 from text_summarizer.sources import (
     MODEL_TOKEN,
@@ -598,6 +601,117 @@ def test_the_digest_tool_is_dispatchable_and_its_payload_reaches_the_answer(
     # because the property under test is that the payload reached the model at all, and
     # no earlier text in this turn could depend on it.
     assert _final_model_text(events) == "- 1 notes on 2026-09-30"
+
+
+class _ToolCallingFallbackStub(BaseLlm):
+    """A backup tier that calls a tool on its first turn, then answers.
+
+    Modelled on the live shape: a Gemini turn that 503s, a free model taking over
+    mid-turn, and the *next* model call carrying that model's unsigned
+    ``functionCall`` back to the primary. Drives it with a real runner rather than
+    a stubbed flow, because the fact under test is that ADK accepts the wrapper as
+    a model at all -- which nothing in ``test_model_chain.py`` establishes, since
+    that file calls ``generate_content_async`` directly.
+    """
+
+    tool_name: str = "probe"
+    tool_args: dict = {"label": "from-backup"}
+    calls: int = 0
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        self.calls += 1
+        if self.calls == 1:
+            part = types.Part(
+                function_call=types.FunctionCall(
+                    name=self.tool_name, args=dict(self.tool_args), id="call-1"
+                )
+            )
+        else:
+            # Carries both sentinels, so the renderer has something to substitute
+            # and the assertion can read the served model off the block. A stub
+            # answer without them would render no block at all and the test would
+            # pass on the name stamp alone -- asserting nothing about provenance.
+            part = types.Part(text=MODEL_ANSWER)
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[part]),
+            finish_reason=types.FinishReason.STOP,
+            model_version=self.model,
+        )
+
+
+class _UnavailablePrimaryStub(BaseLlm):
+    """A primary that is down: 503 on every call, so the chain moves on."""
+
+    calls: list = []
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        self.calls.append(llm_request)
+        raise ServerError(503, {"error": {"code": 503, "message": "overloaded"}})
+        yield  # unreachable; makes this an async generator, which ADK drives with `async for`
+
+
+def test_the_wrapped_chain_runs_a_real_turn_through_the_real_flow(monkeypatch):
+    """The wrapper is a model ADK accepts, end to end, with a tool call in the middle.
+
+    Three facts in one test, and each is invisible to the others:
+
+    1. **ADK accepts a ``BaseLlm`` subclass in place of a chain.** The wrapper
+       declares no tool-schema handling of its own, so if the flow needed something
+       from ``FallbackModel`` specifically -- a request shape, a ``capabilities``
+       answer, a model name for the span -- this is where it surfaces.
+    2. **A mid-turn failover really does happen**, and the backup's tool call is
+       dispatched and answered. This is the live turn that died: Gemini 503, a free
+       model takes over, the tool runs, and the next call must not go back to
+       Gemini.
+    3. **Provenance still names the backend that answered**, not the wrapper. The
+       ``**Sources**`` block reads ``LlmResponse.model_version``, so a wrapper
+       that rebuilt the response would render ``- [obsidian][ck][<the wrapper>]``
+       for every answer -- a silent, plausible-looking corruption of the one field
+       the feature exists to report.
+
+    The primary is asserted *absent from the second half* of the call record rather
+    than merely unused, since a chain that never tried it would also pass a weaker
+    check.
+    """
+    monkeypatch.setenv("VAULT_NAME", "ck")
+    served = "openrouter/nvidia/nemotron-3.5-lightning:free"
+    primary = _UnavailablePrimaryStub(model=SERVED_MODEL, calls=[])
+    backup = _ToolCallingFallbackStub(model=served)
+
+    def probe(label: str, tool_context=None) -> str:
+        return f"ok {label}"
+
+    agent = LlmAgent(
+        name="text_summarizer",
+        model=HistorySafeFallbackModel(
+            models=[primary, backup],
+            unsigned_history_models=[backup],
+        ),
+        tools=[agent_module.FunctionTool(probe)],
+        after_model_callback=agent_module.render_sources_after_model,
+    )
+    events = _run(agent, "Summarize: dogs are great.")
+
+    called = [
+        part.function_call.name
+        for event in events
+        for part in (event.content.parts or [] if event.content else [])
+        if getattr(part, "function_call", None) is not None
+    ]
+    assert called == ["probe"], "the backup's tool call was not dispatched"
+    # One attempt on the clean first call, then the backup for the rest. The
+    # unsigned call it produced keeps the primary out of the following call --
+    # which is the whole point of the wrapper, and would otherwise be invisible
+    # here because a stub primary "answering" would look the same.
+    assert len(primary.calls) == 1, [type(c).__name__ for c in primary.calls]
+    assert backup.calls == 2, backup.calls
+    final = _final_model_text(events)
+    assert f"- [obsidian][ck][{served}]" in final, final
+    assert SERVED_MODEL not in final, "the rendered line named the primary instead of the server"
 
 
 @pytest.mark.parametrize("root", ["/", "", ".", "..", "./", "vaults/..", "/vaults/.."])

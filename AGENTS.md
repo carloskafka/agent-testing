@@ -49,6 +49,7 @@ agent-testing/
     |-- eval_scoring.py         # ROUGE-1 (response_match_score) matching eval-set golden answers
     |-- web_search.py           # Optional third retrieval tier: SearXNG search + guarded page fetch
     |-- obsidian_tools.py       # Optional MCP tools for an Obsidian vault
+    |-- model_chain.py          # The model chain, and the guard that keeps a foreign history off Gemini
     |-- gmail_tools.py          # Optional MCP tools for read-only Gmail access
     |-- gmail_mcp_server.py     # Stdio Gmail MCP server spawned by gmail_tools
     |-- gmail_oauth.py          # One-time helper that mints GOOGLE_REFRESH_TOKEN
@@ -72,6 +73,7 @@ agent-testing/
         |-- test_bot_name.py               # The **Name** stamp: derivation, idempotence, and the metrics control
         |-- test_gmail_oauth.py            # The one-time refresh-token mint, and its failure modes
         |-- test_model_selection.py        # Model choice: aliases, the ":free" filter, the fallback chain
+        |-- test_model_chain.py            # The history guard: 3 calls, 1 growing conversation
         |-- test_obsidian_toolset.py       # Toolset gating and the schema sanitiser, per connection
         |-- test_scoring.py                # The quality.* heuristics, computed directly
         |-- test_second_brain_tools.py     # save/log/find as the *model* calls them (arg shapes)
@@ -109,8 +111,20 @@ Import chain (all through `text_summarizer/__init__.py`):
 
 - `MODEL_PROVIDER=gemini` (default) uses `gemini-3.5-flash-lite`.
 - `MODEL_PROVIDER=openrouter` uses a `:free` model chosen by `MODEL_ALIAS` (gemma/qwen/nvidia) — see `OPENROUTER_MODELS`.
-- Both paths return a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors.
+- Both paths return a `HistorySafeFallbackModel` (`model_chain.py`), which *wraps* a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors. Same order, same entries, same failover — the wrapper only decides which models may see a given conversation (see below).
 - Models referenced are the free-tier aliases used by this project; don't "fix" the names to older released models.
+
+#### A conversation is never offered to a provider that will reject it — `model_chain.py`
+
+`FallbackModel` restarts at `models[0]` on **every** model call and keeps no per-turn memory. That is correct for failover and wrong for one thing here: Gemini validates the *entire* conversation on each call, including turns it did not take part in, and rejects any `functionCall` part with no `thought_signature`. So a mid-turn fallback to a free-tier model poisons the history for the primary, and the next call dies on a 400 — which is not in `DEFAULT_STATUS_CODES`, so it propagates instead of failing over. Measured end to end on session `bc4de8b5-535f-41ce-b35b-775b297df039`; the write-up is that module's docstring.
+
+The wrapper holds two chains and picks **per call, from `llm_request.contents`**: a signature-requiring model is only offered a conversation whose `functionCall` parts all carry a signature. Three things about that choice are load-bearing:
+
+- **It is stateless, and that is the point.** There is no turn identity on `LlmRequest` to pin against — `base_llm_flow._run_one_step_async` builds a fresh one per step and `run_async` loops steps — so a pin keyed on the request would silently never fire, which is the gotcha-12 shape this repo has already paid for once. Deriving it from the payload means no turn boundary exists to get wrong: resumed sessions, concurrent turns and live connections are one code path, and no state can leak between them.
+- **It delegates rather than reimplementing.** `FallbackModel`'s loop snapshots and rolls back the request between attempts (`_RequestSnapshot`), restores `llm_request.model` per delegate, and refuses to fail over mid-stream once a response has been yielded. Two chains share their delegate instances, so this costs no second client. The response object is passed through untouched — `model_version` must stay the delegate's, or every `**Sources**` line would name the wrapper.
+- **`retriable_status_codes` is untouched.** Adding 400 would have saved the live turn in one line, but it would also silently re-route the union-type 400 in "Tool-schema sanitisation" — turning a loud schema bug into a slow answer from a different backend. The two defects are unrelated and the fix is scoped to one.
+
+`test_model_chain.py` drives **three successive calls sharing one growing conversation**, because a single-call test cannot show this defect at all: one call has no foreign history to protect. The `test_adk_wiring.py` counterpart runs the wrapper through a real `InMemoryRunner` with a tool call in the middle, since nothing else establishes that ADK accepts the wrapper as a model at all.
 
 The LlmAgent has: name `AGENT_NAME` (`text_summarizer`, also the source of the displayed label — see below), the model above, a description, bullet-point `instruction` rules, and `tools` = `build_clock_tools()` + `build_obsidian_tools()` + `build_gmail_tools()` + `build_web_search_tools()` + `build_digest_tools()`. The clock is the one **ungated** toolset — it always returns its tool, because a missing clock is a silently wrong answer rather than a missing capability; the other four return `[]` when unconfigured, so the tool set is additive and never breaks without the relevant env vars. It also registers `after_model_callback=[tag_current_span, render_sources_after_model]` — the first tags the generation span, the second shapes the answer itself: it rewrites the response's `**Sources**` block with the real vault name and the real served model, then stamps the bot name in bold at the head (see below) — and `after_agent_callback=report_scores_after_agent`, which pushes deterministic `quality.*` scores and, when the incoming prompt matches an eval-set golden answer, a `response_match_score` (protocol-identical ROUGE-1) to Langfuse per call. `before_agent_callback=tag_trace_identity` names the Langfuse trace and attaches `userId`/`sessionId` (see "Trace identity").
 
@@ -646,7 +660,8 @@ PYTHONPATH=/tmp/agent-testing-testlibs \
 ```
 
 - `tests/conftest.py` blanks `LANGFUSE_PUBLIC_KEY` before any import, because importing the package runs `setup_observability()`, which otherwise does a network auth check against an unreachable host.
-- `test_adk_wiring.py` runs a real `LlmAgent` through a real `InMemoryRunner` with a stub `BaseLlm`. That is how the three ADK facts the provenance feature depends on are verified without spending quota. **If you change how the model or tool context is read, keep these tests green — they are the only automated guard on that wiring.**
+- `test_adk_wiring.py` runs a real `LlmAgent` through a real `InMemoryRunner` with a stub `BaseLlm`. That is how the three ADK facts the provenance feature depends on are verified without spending quota. **If you change how the model or tool context is read, keep these tests green — they are the only automated guard on that wiring.** It also carries the one test that proves ADK accepts `HistorySafeFallbackModel` as a model at all: a real turn with a mid-turn failover and a tool call in the middle. Nothing that calls `generate_content_async` directly can establish that, and a wrapper that the flow rejects would otherwise pass every unit test in `test_model_chain.py`.
+- `test_model_chain.py` has no network and no vault. Its tests drive **successive** calls on one growing conversation, because the defect it guards is only observable across a turn: a single-call test has no foreign history to protect and passes against code with no guard at all.
 
 There is no linter or type-checker configured in this repo (no `ruff`/`mypy`/`pyright` config, no `Makefile`). The only automated gate is the pytest run above.
 
@@ -869,6 +884,7 @@ claim, which is how the "documentation is wrong" problem starts.
 | 7 | Durable writes | B | shipped | #21 |
 | 8 | The untested half | C | shipped | #19 |
 | 9 | `doctor` — is this deployment wired up? | C | **remaining** | no `doctor.py` |
+| 9a | The fallback chain never splices providers mid-turn | C | shipped | `model_chain.py`, session `bc4de8b5` |
 | 10 | Turn metrics — cache lookup as its own span | C | **remaining** | cost visible only as a score, never in the waterfall |
 | 11 | Degradation banner | C | **remaining** | three silent failure modes, no signal |
 | 12 | Cache index — O(1) fingerprint lookup | C | deferred | a stale index is a silent wrong answer; the bounded scan measures <1 ms |
@@ -884,9 +900,29 @@ claim, which is how the "documentation is wrong" problem starts.
 defects. **Tier C** is new capability, purely additive. **Tier D** is refactoring:
 the payoff is testability, not behaviour, and it goes last.
 
-Three live defects are not in the catalogue because they were found after it was
+Four live defects are not in the catalogue because they were found after it was
 written, and each is its own PR:
 
+* ~~**a mid-turn fallback poisons the history for the primary.**~~ **Fixed** —
+  `model_chain.HistorySafeFallbackModel`. Measured on session
+  `bc4de8b5-535f-41ce-b35b-775b297df039` (*"What did you learn yesterday?"*):
+  Gemini answered with a **signed** `current_datetime` call, then returned **503**,
+  so nemotron — after gemma and qwen both 429'd — took the next call and emitted a
+  `read_day_digest` `functionCall` **without** a `thought_signature`. The call
+  after that went **back to Gemini**: `FallbackModel.generate_content_async`
+  restarts at `models[0]` on every call and keeps no per-turn memory. Gemini
+  validates the *whole* conversation, so it rejected the *previous* turn's part
+  with `400 INVALID_ARGUMENT`, and 400 is not in `DEFAULT_STATUS_CODES` — it
+  propagated instead of failing over. **No answer, no name stamp, no
+  `**Sources**`, no note written.** The digest tool itself was fine; it had
+  already returned 17 notes. The wrapper holds two chains and picks per call
+  *from the payload*, so a signature-requiring model is only offered a
+  conversation whose `functionCall` parts are all signed. Stateless by
+  construction: `base_llm_flow._run_one_step_async` builds a fresh `LlmRequest`
+  per step, so there is no turn identity to pin against, and a pin keyed on the
+  request would never fire. `retriable_status_codes` is deliberately left alone —
+  adding 400 would have saved this turn but would also silently re-route the
+  union-type 400 below.
 * **the documented SearXNG host does not resolve** — `searxng:8080` vs the real
   service name `searxng-core`. Silent, because `web_search` returns errors as
   data, so the tier degrades to the model's own knowledge with nothing logged.
