@@ -318,6 +318,35 @@ def test_a_cited_url_the_search_never_returned_is_caught():
     assert scenarios._cited_urls_are_real(honest)[0] is True
 
 
+def test_a_citation_shape_named_in_prose_is_not_mistaken_for_a_url():
+    """An instruction-following answer often names the *shape* of a citation.
+
+    Asked to cite exactly one source, the model can write "... using <the exact
+    URL> from the search results". Taking the first ``<...>`` on a ``[web]`` line
+    turned that into a cited URL of ``exact URL``, and the check then reported the
+    agent had invented a URL -- on a turn where it had cited a real one perfectly.
+    """
+    turn = _turn(
+        _text_event("a prompt", author="user"),
+        _event(
+            _APP,
+            [_response("web_search", {"result": json.dumps([{"url": "https://nodejs.org/en/"}])})],
+        ),
+        _text_event(
+            "**Text Summarizer Agent**\n\n"
+            "- Node.js 26 is the current release, per <the exact URL from the search>.\n\n"
+            "**Sources**\n"
+            "- [web][searxng][m]<https://nodejs.org/en/>: the release announcement"
+        ),
+    )
+
+    ok, detail = scenarios._cited_urls_are_real(turn)
+    assert ok is True, detail
+    # ...and the real citation was what got checked, not the prose token.
+    assert turn.web_urls_offered() == {"https://nodejs.org/en/"}
+    assert turn.web_urls_offered() == {"https://nodejs.org/en/"}
+
+
 def test_a_citation_with_no_search_behind_it_fails():
     """A turn where the web tier returned nothing cannot pass the citation check.
 

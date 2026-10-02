@@ -417,9 +417,51 @@ The error reads `GenerateContentRequest.tools[0].function_declarations[6].parame
 
 The transform is two rules, both no-ops on an already-valid schema:
 1. **`$ref` inlined, `$schema`/`$defs` dropped.** Gemini answers `reference to undefined schema` for a dangling ref, and `search_text.fields` points at `#/$defs/SearchField`.
-2. **`items` added to any array-typed subschema that lacks one.** The original left element types unconstrained; `{"type": "string"}` is the schema that survives every backend above. Verified against all three paths.
+2. **`items` added — but only where `array` is the parameter's whole non-null type.** This is the rule that changed, and the reason is the second fault below: the `items` *is* what the next upstream refuses.
 
 Only the schema sent to the model changes — arguments are still forwarded to the MCP server untouched, so no tool's behaviour changes. The rewrite happens in place on the raw tool, which ADK caches per connection, and is idempotent. `test_obsidian_tool_schema.py` pins all of it, including the depth cap that stops a self-referential `$defs` from hanging the process.
+
+**A top-level `items` on a multi-type union is refused by a different upstream.** Found live on 2026-10-02, session `2fe0d9d0-a73b-4d9b-bc13-452658c2d585`, third occurrence of this family. `qwen/qwen3.8-27b:free` — which OpenRouter routes to a provider it calls `ModelRun` — rejects the *repaired* schema outright:
+
+```
+failed to translate request: folding the request grammar: tool "search_metadata"
+parameter schema: parameter "value": more than one JSON reading of the same
+emitted value
+```
+
+Read literally, that is a complaint about a parameter having **two valid JSON forms**, and `search_metadata.value` is declared `["array","boolean","null","number","object","string"]` *with* the `items` rule 2 just added. That makes it readable as both "a string" and "an array of strings". So the original fix was making the parameter ambiguous for the next provider in line.
+
+Every alternative was measured against the **real eight-tool payload** rather than reasoned about, because the upstreams disagree and guessing wrong costs a turn:
+
+| Candidate for `value` | qwen (`ModelRun`) | Google AI Studio upstream |
+|---|---|---|
+| 6-way union + `items` (what shipped) | **AMBIGUOUS** | accepted |
+| multi-type union, no `items` | accepted | **`any_of[0].items: missing field`** |
+| `anyOf` branches | **UNION-REJECTED** | — |
+| property dropped entirely | accepted | — |
+
+`anyOf` is the spelling that could put `items` *inside* the array branch, where JSON Schema wants it, and the same provider refuses that. So there is **no spelling that satisfies both upstreams**, and the two are in direct conflict over one parameter.
+
+The resolution is to narrow rather than describe: a multi-type union loses its `array` member, and with it goes the need for `items`. Four of the five alternatives survive, and the array case is not a capability loss — the server's own description says a JSON-encoded string is compared as a literal string, so an array was already only reachable quoted.
+
+**Scope is one parameter.** `obsidian-mcp` serves **17** nullable unions and 16 are `["T","null"]` with a single non-null member — the shape every optional array uses, untouched, because there `items` is unambiguous. Only `value` has more than one non-null member. That is measured against the live server (`tools/` walk in the commit), not asserted about.
+
+**Not verified:** the narrowing was not re-tested on a Google AI Studio upstream. `gemma`'s `:free` tier was rate-limited for the whole measurement window, so "narrowing does not reintroduce `any_of[0].items`" rests on the reasoning that a union with no `array` member has no array branch to leave bare. The qwen half — the one that was killing turns — is measured and reproducible.
+
+### Tool-argument coercion — the quoted number
+
+`obsidian-mcp` is Rust and deserialises strictly. A free-tier model answered a weather question by searching the vault and quoted both numeric arguments:
+
+```
+{'query': 'São Paulo weather', 'max_results': '5', 'context_length': '50'}
+→ failed to deserialize parameters: invalid type: string "50", expected usize
+```
+
+ADK does not validate tool arguments against the schema before dispatch, so the mismatch surfaces at the far end. `coerce_tool_args` parses a quoted scalar against the declared type — and the *declared* type is always a union here, because `obsidian-mcp` writes every optional parameter as `["integer","null"]`, so a parser that only understood `{"type": "integer"}` would coerce nothing.
+
+It is deliberately narrow, because a permissive coercion is its own defect: only a `str` is touched, only when the declared type names a scalar, and only when the string **parses**. A union that still allows `string` is left alone, and so is `"many"` for an integer — turning unparseable input into a different value would move the failure somewhere it can no longer be seen.
+
+Wired by rebinding `run_async` on the tool *instance*. A subclass would mean re-passing six private `McpTool` constructor arguments a future ADK can rename. The toolset skips the wrap when there is no `run_async`, which is the failure shape worth avoiding: an `AttributeError` in `_fetch_tools` aborts the listing, and that is the one failure `SanitizingMcpToolset` exists to *recover* from, so the turn would die against a perfectly healthy vault.
 
 **Both** MCP toolsets go through it — `sanitizing_mcp_toolset_class()` is shared by `obsidian_tools.py` and `gmail_tools.py`, so a third server cannot reintroduce the bug by omission. The in-repo Gmail server declares no union types today, so it does not strictly need the rewrite; it gets it anyway because the failure is silent until a fallback run happens to route to a Google upstream.
 
@@ -664,6 +706,37 @@ PYTHONPATH=/tmp/agent-testing-testlibs \
 - `test_model_chain.py` has no network and no vault. Its tests drive **successive** calls on one growing conversation, because the defect it guards is only observable across a turn: a single-call test has no foreign history to protect and passes against code with no guard at all.
 
 There is no linter or type-checker configured in this repo (no `ruff`/`mypy`/`pyright` config, no `Makefile`). The only automated gate is the pytest run above.
+
+### Scenario harness — `tools/scenarios.py`
+
+Real prompts against the deployed agent, judged from the **persisted session events**. Not a pytest test and not part of `make check`: it spends Gemini quota, writes to the real vault, and needs both services up.
+
+```bash
+python3 tools/scenarios.py --list
+python3 tools/scenarios.py                  # all 13
+python3 tools/scenarios.py --only web_      # by prefix
+python3 tools/scenarios.py --keep           # do not delete the scenario sessions
+```
+
+**Why the session and not the HTTP response or a trace.** The response to a dead turn is still `200`. A Langfuse trace reports the *last* event, which is the correct text even when the answer was emitted twice (gotcha 13) and looks healthy on a turn that ended on an error. The events are what the session actually holds — every tool call, the served model per step, and the error event a failed turn ends with. A scenario cannot pass by having a plausible answer, because a dead turn has no answer event at all.
+
+**It exists because three separate live failures fell through the unit suite** — a fallback splicing providers mid-turn, a quoted argument the server rejected, and a schema a fallback upstream refused. Each was found by reading a session, not by a failing test. A unit suite can prove a function is correct; it cannot prove that a *prompt* produces the intended tool calls on the deployed code.
+
+Three of the prompts are ones that actually failed in production, run verbatim. A prompt is the only thing that reproduces a failure faithfully: the unit suite tests coercion with a synthetic `"50"`, not a model that decided to search a vault for weather and quoted both its numeric arguments.
+
+**Every scenario asserts `_no_cache_hit`**, and that guard earned its place on the second live run. Rule 8 tells the agent to save *every* summary it writes, so a fixed prompt leaves a note behind — and the next run is answered from disk in about a millisecond, satisfies every other check, and reports PASS without searching anything. The outcome is read from the state ADK persisted, never inferred from a duration. A nonce on every prompt is the second net.
+
+**Every check is also fed a turn that should fail.** `test_scenarios_harness.py` covers the checkers offline, and a check that returns `True` for an empty answer, or that matches a cited URL against an empty allow-list, is green forever while the tier is dead. That is the same shape as `test_a_wrongly_decoding_page_is_reported_rather_than_passed`: something must break on purpose for the comparison to mean anything. `test_every_scenario_has_a_check_that_can_fail` walks the whole table with one dead turn, and a scenario that passes it has a check that cannot fail.
+
+Three harness bugs were found this way and none by writing it — each is a reminder that the fixtures were tidier than reality:
+
+| Bug | Symptom | Why the offline tests missed it |
+|---|---|---|
+| nonce written `{{nonce}}` | every run sent the same prompt; the 2nd was a cache hit | uniqueness was checked on the *template*, which was unique while the render was fixed |
+| citation check read `results[0]` at top level | reported "no URLs" on a turn that returned nine | real payloads are `{"result": "<json string>"}` — ADK wraps a tool's return value |
+| duplication check counted text events | failed a healthy 4-tool turn as duplicated | a model narrating alongside a tool call is legitimate; only *repeated* text is duplication |
+
+`web_js_rendered_page_is_not_invented` is the one worth knowing about: `ingresso.com` builds its listings in JavaScript and `web_fetch` does a plain HTTP GET with an HTML sanitiser, so the page arrives as a title and navigation. The failure there is not a crash — it is a model handed an empty page and a confident instruction writing plausible films and showtimes, every one fiction, with a citation attached. The check fires on a *schedule* claim and not on a bare film name, because a name can legitimately come from a search snippet and firing on those would make "stop citing" the only way to pass.
 
 ### Publishing the documentation (`docs/`)
 
@@ -930,12 +1003,15 @@ written, and each is its own PR:
   web tier could not reach a self-hosted instance at all, and failed silently
   while doing so. `check_url` takes `allow_private`, which `search_web` passes and
   `web_fetch` does not; link-local stays refused either way.
-* **the fallback path still dies on the union-typed parameter** — on the *third*
-  upstream reached. `sanitize_tool_schema` adds `items` to array branches, which
-  fixed the Google AI Studio `any_of[0].items` rejection, but leaves the `type`
-  union itself intact, and OpenRouter's `ModelRun` provider answers
-  `more than one JSON reading of the same emitted value`. Measured, not inferred;
-  see the section on tool-schema sanitisation.
+* ~~**the fallback path still dies on the union-typed parameter.**~~ **Fixed** —
+  and the cause was the previous fix, not the union. `sanitize_tool_schema`'s
+  `items` rule made `search_metadata.value` readable as two JSON forms, and
+  OpenRouter's `ModelRun` provider answers `more than one JSON reading of the same
+  emitted value`. A Google AI Studio upstream needs that `items` and the same
+  provider refuses `anyOf`, so no spelling satisfies both; `items` is now injected
+  only where `array` is the whole non-null type, and a multi-type union loses that
+  member. Three occurrences, all on the fallback path: sessions `8026284f` (Sep 30)
+  and `2fe0d9d0` (Oct 2), plus one on Oct 1. See "Tool-schema sanitisation".
 
 ## Evaluating your changes
 

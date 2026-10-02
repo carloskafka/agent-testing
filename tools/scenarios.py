@@ -407,11 +407,15 @@ def _cited_urls_are_real(turn: Turn) -> tuple[bool, str]:
         return False, "the web tier returned no URLs, so there is nothing to cite"
     cited = set()
     for line in turn.answer.splitlines():
-        if "[web]" in line:
-            start = line.find("<")
-            end = line.find(">", start + 1)
-            if start != -1 and end > start:
-                cited.add(line[start + 1 : end])
+        if "[web]" not in line:
+            continue
+        # Every angle-bracketed token, not just the first, and only ones that are
+        # actually URLs. Taking the first pair unconditionally once made the check
+        # report a cited URL of "exact URL" -- an answer that names the *shape* of a
+        # citation, as an instruction-following model will, e.g. "<the exact URL>".
+        for token in re.findall(r"<([^<>]+)>", line):
+            if token.startswith(("http://", "https://")):
+                cited.add(token.strip())
     if not cited:
         return False, "the answer cited no URL at all"
     invented = cited - offered
