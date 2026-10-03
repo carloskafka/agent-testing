@@ -215,16 +215,23 @@ def ask_user(
     payload = confirmation.payload
     if isinstance(payload, dict):
         raw_choice = payload.get("choice") or payload.get("selection")
-        if raw_choice is None:
-            # The bundled UI sends the whole options list unless the user types
-            # one, so take the first offered option in that shape.
-            offered = payload.get("options")
-            if isinstance(offered, list) and offered:
-                raw_choice = offered[0]
     elif isinstance(payload, str):
         raw_choice = payload
     else:
         raw_choice = None
+
+    # Deliberately absent: a fallback that reads `payload.options[0]` and calls
+    # that the user's choice. It had one, right here, on the reasoning that "the
+    # UI sends the whole options list unless the user types one" -- and that is
+    # backwards. The bundled dev UI prefills its payload textarea with the tool's
+    # own arguments, so `options` arrives as *our* data, echoed back unedited, on
+    # a form the user may have submitted without reading. Taking element zero
+    # would then answer the question on the user's behalf and report
+    # `answered_by: "user"`, which is the one thing this field must never be.
+    # Found live: session `f0842db4-9d42-4911-8b34-255a3731021f`, where the
+    # declined form produced exactly `default_declined` -- by way of
+    # `confirmed: false`, not by way of this branch, which is why it went
+    # unnoticed while the real defect sat in the runner.
 
     choice = str(raw_choice).strip() if raw_choice is not None else ""
     matched = next(

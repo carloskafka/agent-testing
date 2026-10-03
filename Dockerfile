@@ -10,6 +10,7 @@ WORKDIR /workspace
 
 COPY text_summarizer ./text_summarizer
 COPY patch-adk-devui-mobile.py ./patch-adk-devui-mobile.py
+COPY patch-adk-devui-confirm.py adk-confirm-options.js ./
 
 WORKDIR /workspace/text_summarizer
 RUN uv sync --frozen
@@ -19,6 +20,14 @@ RUN uv sync --frozen
 # is idempotent and fails the build if a future google-adk changes the bundle
 # underneath it, so an upgrade cannot silently ship a patch that does nothing.
 RUN python /workspace/patch-adk-devui-mobile.py
+
+# Give tool confirmations clickable options. `ask_user` pauses a turn by
+# requesting one, and the stock UI draws that request as a checkbox plus a raw
+# JSON dump of the options -- so a menu reaches the user as text. Two halves,
+# both required: this rewrites the one expression that builds the confirmation
+# response, and the shim beside it renders the buttons. Same idempotence, and the
+# same fail-the-build guard on vendor drift, as the patch above.
+RUN python /workspace/patch-adk-devui-confirm.py
 
 WORKDIR /workspace
 

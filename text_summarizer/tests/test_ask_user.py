@@ -7,11 +7,22 @@ is about questions that are *refused*, and the single most important test here i
 ``test_a_question_with_an_obvious_default_is_never_asked``.
 
 The pause itself is an ADK primitive rather than anything this code implements,
-which means the parts worth testing are the two ends of it: that
-``request_confirmation`` really produces the ``adk_request_confirmation`` event the
-bundled dev UI knows how to render, and that the answer comes back as data on the
-tool call it interrupted. Both are verified here against a real runner, because a
-mechanism that does not survive contact with the UI is not a mechanism.
+which means the parts worth testing are the two ends of it: that the turn really
+stops, and that the answer comes back as data on the tool call it interrupted.
+Both are verified here against a real runner, because a mechanism that does not
+survive contact with the runner is not a mechanism.
+
+**The runner these tests use is the resumable ``App``, not a bare ``LlmAgent``,
+and that is not a detail.** Requesting a confirmation does not pause a turn: ADK
+emits the ``adk_request_confirmation`` event and, with no resumability config,
+carries straight on to the next model call -- so the agent asks a question and
+answers it itself, and the user is handed a form for a decision already made.
+That is not a hypothesis; it is what session
+``f0842db4-9d42-4911-8b34-255a3731021f`` did, with the confirmation event and the
+next model call eleven milliseconds apart. ``text_summarizer.app`` is what
+``adk web`` loads (``AgentLoader`` checks ``app`` before ``root_agent``), so the
+tests below drive that, and ``test_a_bare_agent_would_not_pause`` pins the
+difference so the wrapper cannot be dropped silently.
 
 Everything here is offline: a stub ``BaseLlm``, ``InMemoryRunner``, no quota.
 """
@@ -20,8 +31,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 from google.adk.agents import LlmAgent
+from google.adk.apps.app import App, ResumabilityConfig
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
@@ -218,10 +231,26 @@ class _AskThenAnswer(BaseLlm):
         yield LlmResponse(content=types.Content(role="model", parts=[part]))
 
 
-def _run_agent():
+def _run_agent(*, resumable: bool = True):
+    """A runner shaped like the deployed one.
+
+    ``resumable=True`` builds the ``App`` that ``text_summarizer`` exports and
+    ``adk web`` loads. ``resumable=False`` builds the bare ``LlmAgent``, which is
+    what the runner would have been before the wrapper existed -- and which does
+    not pause. It is here so the difference can be *demonstrated* rather than
+    asserted from a docstring.
+    """
     session_service = InMemorySessionService()
     agent = LlmAgent(name="a", model=_AskThenAnswer(), tools=[ask_user])
-    runner = InMemoryRunner(agent=agent, app_name="a")
+    if resumable:
+        app = App(
+            name="a",
+            root_agent=agent,
+            resumability_config=ResumabilityConfig(is_resumable=True),
+        )
+        runner = InMemoryRunner(app=app, app_name="a")
+    else:
+        runner = InMemoryRunner(agent=agent, app_name="a")
     runner.session_service = session_service
     return session_service, runner
 
@@ -236,8 +265,8 @@ def _collect(runner, session_service, **kwargs):
     return asyncio.run(_go())
 
 
-def _setup():
-    session_service, runner = _run_agent()
+def _setup(*, resumable: bool = True):
+    session_service, runner = _run_agent(resumable=resumable)
     session_id = "s1"
     asyncio.run(
         session_service.create_session(app_name="a", user_id="u", session_id=session_id)
@@ -245,23 +274,52 @@ def _setup():
     return session_service, runner, session_id
 
 
-def test_the_pause_emits_the_event_the_dev_ui_renders():
-    """``request_confirmation`` must produce ``adk_request_confirmation``.
-
-    This is the load-bearing ADK fact, and it is checked against the runner
-    rather than read off a docstring: the bundled dev UI keys its confirmation
-    form on ``functionCall.name === "adk_request_confirmation"`` and renders
-    nothing for any other name. A pause the UI cannot draw is a turn that hangs
-    with no way to answer it.
-    """
-    session_service, runner, session_id = _setup()
-    events = _collect(
+def _first_run(**setup_kwargs):
+    session_service, runner, session_id = _setup(**setup_kwargs)
+    return session_service, runner, session_id, _collect(
         runner,
         session_service,
         user_id="u",
         session_id=session_id,
         new_message=types.Content(role="user", parts=[types.Part(text="go")]),
     )
+
+
+def _answer_text(events) -> list[str]:
+    return [
+        part.text
+        for event in events
+        for part in (event.content.parts if event.content else []) or []
+        if part.text
+    ]
+
+
+def _confirmation_call(events):
+    return next(
+        part.function_call
+        for event in events
+        for part in (event.content.parts if event.content else []) or []
+        if part.function_call
+        and part.function_call.name == "adk_request_confirmation"
+    )
+
+
+def test_the_turn_stops_at_the_question_and_waits_for_the_user():
+    """The load-bearing test in this file, and the one that was missing.
+
+    ``ask_user`` exists to make the agent *stop*. Emitting a confirmation is not
+    stopping: ADK builds the event, marks it long-running, and -- with no
+    resumability config -- goes on to the next model call in the same invocation.
+    The agent then answers its own question, and the user is shown a form for a
+    decision that has already been taken.
+
+    Asserting the *event* exists, as an earlier version of this test did, cannot
+    catch that: the event is emitted in both cases, so such a test passes against
+    the broken behaviour and the suite reports a working feature while the feature
+    does not work. What differs is whether the agent goes on to answer, so that is
+    what this asserts.
+    """
+    _, _, _, events = _first_run()
 
     confirmations = [
         part.function_call
@@ -270,7 +328,9 @@ def test_the_pause_emits_the_event_the_dev_ui_renders():
         if part.function_call
         and part.function_call.name == "adk_request_confirmation"
     ]
-    assert confirmations, "no adk_request_confirmation event: the UI would not render a prompt"
+    assert confirmations, (
+        "no adk_request_confirmation event: the UI would not render a prompt at all"
+    )
 
     call = confirmations[0]
     # The UI reads `args.originalFunctionCall` to show what is being confirmed,
@@ -280,7 +340,7 @@ def test_the_pause_emits_the_event_the_dev_ui_renders():
     assert original["name"] == "ask_user"
     assert original["args"]["options"] == ["Cinemark Osasco", "Kinoplex Osasco"]
 
-    # `long_running_tool_ids` is how ADK marks the turn as awaiting input.
+    # `long_running_tool_ids` is how ADK marks the request as awaiting input.
     long_running = [
         getattr(event, "long_running_tool_ids", None) for event in events
     ]
@@ -289,31 +349,50 @@ def test_the_pause_emits_the_event_the_dev_ui_renders():
         "not treat the turn as interrupted"
     )
 
+    # ...and the thing that actually matters.
+    assert _answer_text(events) == [], (
+        "the agent kept going after asking: "
+        f"{_answer_text(events)}. It answered its own question and the user was "
+        "never given a chance to answer theirs."
+    )
+
+
+def test_a_bare_agent_would_not_pause():
+    """Why the ``App`` wrapper exists, demonstrated rather than asserted.
+
+    Without this, dropping ``resumability_config`` is a silent regression: every
+    other test in this file still passes, because the confirmation event is still
+    emitted and the resume still works. Only the pause stops happening -- the agent
+    quietly answers its own question again. So the control is asserted here, on the
+    exact same stub model and the exact same runner.
+    """
+    _, _, _, events = _first_run(resumable=False)
+
+    assert any(
+        part.function_call
+        and part.function_call.name == "adk_request_confirmation"
+        for event in events
+        for part in (event.content.parts if event.content else []) or []
+    ), "control is wrong: the bare runner did not even emit the confirmation"
+
+    assert _answer_text(events), (
+        "the bare runner paused too, so resumability is not what causes the pause "
+        "and the App wrapper in text_summarizer/__init__.py is load-bearing for no "
+        "reason -- revisit that claim rather than deleting it"
+    )
+
 
 def test_the_answer_comes_back_as_data_and_the_turn_continues():
     """The whole point: ask, receive the choice, keep going.
 
-    Resumed with the wire shape the bundled dev UI actually sends -- read out of
-    ``main-*.js``, where ``onSend`` posts ``{confirmed, payload}`` against the
-    confirmation call's own id.
+    Driven with the payload an option button in the patched dev UI sends:
+    ``{confirmed: true, payload: {choice: "..."}}`` against the confirmation call's
+    own id. ``patch-adk-devui-confirm.py`` is what produces that button, and the
+    two are pinned to each other in ``test_adk_devui_confirm_patch.py``.
     """
-    session_service, runner, session_id = _setup()
-    events = _collect(
-        runner,
-        session_service,
-        user_id="u",
-        session_id=session_id,
-        new_message=types.Content(role="user", parts=[types.Part(text="go")]),
-    )
-
-    confirmation = next(
-        part.function_call
-        for event in events
-        for part in (event.content.parts if event.content else []) or []
-        if part.function_call
-        and part.function_call.name == "adk_request_confirmation"
-    )
-    invocation_id = events[-1].invocation_id
+    session_service, runner, session_id, first = _first_run()
+    confirmation = _confirmation_call(first)
+    invocation_id = first[-1].invocation_id
 
     resumed = _collect(
         runner,
@@ -350,14 +429,72 @@ def test_the_answer_comes_back_as_data_and_the_turn_continues():
         for r in tool_results
     ), f"the choice never reached the tool: {tool_results}"
 
-    texts = [
-        part.text
-        for event in resumed
-        for part in (event.content.parts if event.content else []) or []
-        if part.text
-    ]
+    texts = _answer_text(resumed)
     assert any("Kinoplex" in t for t in texts), (
         f"the turn did not continue past the question: {texts}"
+    )
+
+
+def test_the_stock_ui_submit_resumes_as_declined_not_as_a_choice():
+    """The payload the **unpatched** dev UI sends, and what it must not become.
+
+    The bundled UI prefills its payload textarea with
+    ``JSON.stringify(originalFunctionCall.args)`` and posts it untouched, so the
+    payload that comes back is the tool's own arguments -- ``question``,
+    ``options``, ``default``, ``consequence`` -- with no ``choice`` in it. An
+    earlier version of this file fed ``{choice: ...}`` by hand and called that the
+    wire shape the UI sends; it is not, and nothing in the suite could tell.
+
+    So the real shape is pinned here. It must resolve to ``default_declined`` --
+    the user pressed Submit without ticking Confirm, which is a decline -- and
+    critically it must **not** resolve to ``answered_by: "user"``, because
+    ``ask_user`` reads ``payload.options[0]`` as a choice when no ``choice`` is
+    present. That fallback is right for a client that sends the options list as
+    its answer, and wrong for one that sends it as an unedited prefilled form:
+    this is the second, and taking the first option would silently answer the
+    question on the user's behalf while reporting that they had.
+    """
+    session_service, runner, session_id, first = _first_run()
+    confirmation = _confirmation_call(first)
+
+    resumed = _collect(
+        runner,
+        session_service,
+        user_id="u",
+        session_id=session_id,
+        invocation_id=first[-1].invocation_id,
+        new_message=types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id=confirmation.id,
+                        name="adk_request_confirmation",
+                        response={
+                            "confirmed": False,
+                            "payload": {
+                                "question": "Which cinema?",
+                                "options": ["Cinemark Osasco", "Kinoplex Osasco"],
+                                "default": "Cinemark Osasco",
+                                "consequence": "every session time belongs to one "
+                                "cinema or the other",
+                            },
+                        },
+                    )
+                )
+            ],
+        ),
+    )
+
+    answers = [
+        part.function_response.response
+        for event in resumed
+        for part in (event.content.parts if event.content else []) or []
+        if part.function_response and part.function_response.name == "ask_user"
+    ]
+    assert answers, "ask_user was not re-executed on resume"
+    assert answers[0]["answered_by"] == "default_declined", (
+        f"the stock UI's submit must read as a decline, not as a choice: {answers[0]}"
     )
 
 
@@ -404,22 +541,27 @@ def test_declining_falls_back_to_the_default():
     assert result["answered_by"] == "default_declined"
 
 
-def test_the_ui_sending_the_options_list_takes_the_first():
-    """The bundled UI posts the whole list unless the user types one.
+def test_echoing_the_options_list_is_not_taken_as_a_choice():
+    """The ``payload.options`` shape is *our* data, not the user's answer.
 
-    Read off ``onSend`` in ``main-*.js``: ``JSON.parse(payload)`` falls back to
-    ``originalFunctionCall.args``, so a user who hits send without typing produces
-    a payload with no ``choice`` in it. Treating that as "no answer" would make
-    the form silently useless.
+    The bundled dev UI prefills its payload textarea with the tool's own
+    arguments, so an unedited submit posts ``{question, options, default,
+    consequence}`` straight back. An earlier version of this file read
+    ``options[0]`` out of that and reported ``answered_by: "user"`` -- inventing an
+    answer and attributing it to the person who was never asked. The whole point
+    of ``answered_by`` is that it distinguishes *the user chose* from *a default
+    was used*, so a shape we cannot interpret has to land on the default.
+
+    This is the control for that: it fails if the fallback is ever reinstated.
     """
 
-    class _WholeList:
+    class _EchoedOptions:
         confirmed = True
         payload = {"options": ["Cinemark Osasco", "Kinoplex Osasco"], "default": "x"}
 
     class _Ctx:
         function_call_id = "fc1"
-        tool_confirmation = _WholeList()
+        tool_confirmation = _EchoedOptions()
 
     result = ask_user(
         question="Which cinema?",
@@ -428,8 +570,34 @@ def test_the_ui_sending_the_options_list_takes_the_first():
         consequence="different session times",
         tool_context=_Ctx(),
     )
+    assert result["answered_by"] == "default_unrecognised_answer"
     assert result["choice"] == "Cinemark Osasco"
+
+
+def test_an_option_button_payload_is_taken_as_the_choice():
+    """The shape the patched dev UI sends when a button is clicked.
+
+    The counterpart to the test above: the honest shape must still work, or
+    "never invent an answer" would have been met by refusing to accept one.
+    """
+
+    class _ButtonClicked:
+        confirmed = True
+        payload = {"choice": "Kinoplex Osasco"}
+
+    class _Ctx:
+        function_call_id = "fc1"
+        tool_confirmation = _ButtonClicked()
+
+    result = ask_user(
+        question="Which cinema?",
+        options=["Cinemark Osasco", "Kinoplex Osasco"],
+        default="Cinemark Osasco",
+        consequence="different session times",
+        tool_context=_Ctx(),
+    )
     assert result["answered_by"] == "user"
+    assert result["choice"] == "Kinoplex Osasco"
 
 
 # --- wiring -------------------------------------------------------------------
@@ -442,6 +610,49 @@ def test_the_tool_is_wired_into_the_agent():
     assert any(
         isinstance(t, FunctionTool) and t.func is ask_user for t in root_agent.tools
     ), "ask_user is not in root_agent.tools"
+
+
+def test_the_package_exports_a_resumable_app_wrapping_the_same_agent():
+    """The ``App`` is what makes the pause happen, so its absence is the bug.
+
+    ``adk web`` resolves an agent through ``AgentLoader``, which checks ``app``
+    before ``root_agent`` -- so this is not decoration on an unused export, it is
+    the object the deployment runs. And ``root_agent`` has to stay the same
+    object, because ``adk eval`` and ``adk run`` still take that path and a
+    wrapped copy would quietly fork the two surfaces.
+    """
+    from text_summarizer import app
+
+    assert app is not None, (
+        "text_summarizer exports no App; adk web falls back to root_agent and "
+        "every ask_user turn answers its own question again"
+    )
+    assert app.root_agent is root_agent
+    assert app.resumability_config is not None
+    assert app.resumability_config.is_resumable is True
+
+
+def test_adk_web_actually_loads_the_resumable_app():
+    """The loader's ``app``-before-``root_agent`` preference, end to end.
+
+    The export test above proves the object exists; this proves the thing that
+    consumes it picks it up. Those are different claims, and only one of them is
+    about production -- ``adk eval`` uses ``root_agent`` and would never notice.
+    An ADK release that reorders that check would leave the export intact and
+    this test would be the only thing that noticed.
+    """
+    import text_summarizer
+    from google.adk.cli.utils.agent_loader import AgentLoader
+
+    agents_dir = str(Path(text_summarizer.__file__).resolve().parents[1])
+    loaded = AgentLoader(agents_dir=agents_dir).load_agent("text_summarizer")
+
+    assert isinstance(loaded, App), (
+        f"adk web would load a {type(loaded).__name__}, not the resumable App; "
+        "confirmations will be emitted but the turn will not pause"
+    )
+    assert loaded.resumability_config is not None
+    assert loaded.resumability_config.is_resumable is True
 
 
 def test_the_instruction_explains_when_to_ask_and_when_not_to():
