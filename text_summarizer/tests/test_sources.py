@@ -14,6 +14,7 @@ Run with::
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -371,14 +372,19 @@ def test_a_pre_existing_note_never_gains_an_invented_model(monkeypatch, tmp_path
     brain.mkdir(parents=True, exist_ok=True)
 
     prompt = "Summarize: dogs are social animals."
+    # Step 1 asserts this note is *reachable by the cache*, and the cache refuses
+    # anything older than `CACHE_MAX_AGE_DAYS`. A hardcoded filename made the
+    # test expire on a calendar rather than on a behaviour -- it passed until the
+    # date rolled past the window, then failed here and in two unrelated files.
+    today = date.today().isoformat()
     legacy = (
-        "---\ntags:\n  - Dogs\ndate: 2026-09-25\n"
+        f"---\ntags:\n  - Dogs\ndate: {today}\n"
         f"source_fingerprint: {second_brain.source_fingerprint(prompt)}\n"
         "aliases:\n  - Dogs\n---\n\n"
         "- Dogs are social animals.\n\n## From the vault\n[[Dogs Overview]]\n"
         "\n## Related\n- [[Dogs]]\n"
     )
-    note = brain / "2026-09-25 - dogs.md"
+    note = brain / f"{today} - dogs.md"
     note.write_text(legacy, encoding="utf-8")
 
     # 1. The real lookup: this note is reachable by the cache.
@@ -402,11 +408,11 @@ def test_a_pre_existing_note_never_gains_an_invented_model(monkeypatch, tmp_path
 
     # 4. Which is exactly what the renderer turns into `unknown`.
     out = render_sources(
-        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[2026-09-25 - dogs]]: pre-existing",
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[{today} - dogs]]: pre-existing",
         vault_name="ck",
         model_name=served_model_from_events(replay_events),
     )
-    assert out.endswith("- [obsidian][ck][unknown][[2026-09-25 - dogs]]: pre-existing")
+    assert out.endswith(f"- [obsidian][ck][unknown][[{today} - dogs]]: pre-existing")
 
     # 5. The anchor. One model event on the session and the same resolver names the
     #    backend, so step 3 is a property of a replay -- not a stub that always
@@ -414,12 +420,12 @@ def test_a_pre_existing_note_never_gains_an_invented_model(monkeypatch, tmp_path
     served_events = replay_events + [_event("- a fresh answer", model_version=SERVED_MODEL)]
     assert served_model_from_events(served_events) == SERVED_MODEL
     backfilled = render_sources(
-        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[2026-09-25 - dogs]]: pre-existing",
+        f"[obsidian][{VAULT_TOKEN}][{MODEL_TOKEN}][[{today} - dogs]]: pre-existing",
         vault_name="ck",
         model_name=served_model_from_events(served_events),
     )
     assert backfilled.endswith(
-        f"- [obsidian][ck][{SERVED_MODEL}][[2026-09-25 - dogs]]: pre-existing"
+        f"- [obsidian][ck][{SERVED_MODEL}][[{today} - dogs]]: pre-existing"
     )
     assert backfilled != out, "the two cases must not render identically"
 
