@@ -186,13 +186,20 @@ def test_the_default_provider_was_pinned_at_import(monkeypatch):
     assert agent_module.MODEL_PROVIDER == "gemini"
 
 
-def test_gemini_leads_and_the_free_models_follow(monkeypatch):
-    """The chain is ``[gemini, *free]``, in that order.
+def test_openrouter_leads_when_no_zen_key_and_gemini_is_last(monkeypatch):
+    """The chain is ``[*free, gemini]`` -- Gemini last, not first.
 
-    Order is the whole behaviour: a ``FallbackModel`` tries each entry in
-    sequence, so putting a free OpenRouter model first would hand every ordinary
-    turn to a tier whose reliability is not under our control (AGENTS.md known gap
-    7) and use the primary only when that fails.
+    **This inverts the order this branch had since the Zen tier existed**, on
+    2026-10-03, and the previous order is recorded here because it was a
+    deliberate decision that has now been deliberately reversed:
+
+    > "putting a free OpenRouter model first would hand every ordinary turn to a
+    > tier whose reliability is not under our control (AGENTS.md known gap 7)"
+
+    That reasoning still holds and is the reason Gemini is now the *last* entry
+    rather than being dropped. OpenCode's Zen model leads instead, which is a
+    configured preference rather than a free-tier default; with no Zen key the
+    free OpenRouter models take that position.
 
     Asserted against a *configured* key, because the chain legitimately differs
     when none is set: with no OpenRouter key and no Zen key there is nowhere for an
@@ -205,8 +212,38 @@ def test_gemini_leads_and_the_free_models_follow(monkeypatch):
 
     names = _chain_names(agent_module.get_model())
 
-    assert names[0] == agent_module.GEMINI_MODEL
-    assert names[1:] == [OPENROUTER_PREFIX + n for n in agent_module._free_openrouter_models()]
+    assert names[-1] == agent_module.GEMINI_MODEL, "Gemini is the floor, not the default"
+    assert names[:-1] == [
+        OPENROUTER_PREFIX + n for n in agent_module._free_openrouter_models()
+    ]
+
+
+def test_zen_leads_when_it_is_configured(monkeypatch):
+    """The order asked for on 2026-10-03: OpenCode, then OpenRouter, then Gemini.
+
+    The reordering is not cosmetic. A ``FallbackModel`` tries entries in sequence,
+    so the first entry serves every ordinary turn and the rest exist only for when
+    it fails. Measured before the change on session
+    ``068f3e5c-3ef2-458e-8926-bbf491312252``: Gemini served all nine generations
+    because it was first and it did not fail -- which is the whole reason nothing
+    else was ever reached.
+
+    The cost is stated rather than discovered later: every turn now goes to a
+    *free* endpoint, which is known gap 7 -- `gemma:free` and its neighbours 429
+    often enough that a quota error was as likely to end in a rate-limit error as
+    in a served turn. Gemini last is what keeps that from being fatal.
+    """
+    monkeypatch.setattr(agent_module, "MODEL_PROVIDER", "gemini")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-" + "a" * 40)
+    monkeypatch.setenv("OPENCODE_API_KEY", "oc_sk_test")
+
+    names = _chain_names(agent_module.get_model())
+
+    assert names[0] == f"hosted_vllm/{agent_module.OPENCODE_MODEL}"
+    assert names[1:-1] == [
+        OPENROUTER_PREFIX + n for n in agent_module._free_openrouter_models()
+    ]
+    assert names[-1] == agent_module.GEMINI_MODEL
 
 
 def test_the_gemini_entry_is_a_name_not_a_litellm(monkeypatch):
@@ -219,11 +256,15 @@ def test_the_gemini_entry_is_a_name_not_a_litellm(monkeypatch):
     it belongs.
     """
     monkeypatch.setattr(agent_module, "MODEL_PROVIDER", "gemini")
+    monkeypatch.setenv("OPENCODE_API_KEY", "")
 
     entries = agent_module.get_model().models
 
-    assert isinstance(entries[0], str)
-    assert all(isinstance(entry, LiteLlm) for entry in entries[1:])
+    # Gemini is the last entry since the 2026-10-03 reorder, so "first" here would
+    # be wrong -- and an assertion left pointing at index 0 would silently start
+    # checking a LiteLlm entry and pass for the wrong reason.
+    assert isinstance(entries[-1], str)
+    assert all(isinstance(entry, LiteLlm) for entry in entries[:-1])
 
 
 def test_the_fallback_list_never_repeats_the_primary(monkeypatch):
@@ -452,9 +493,9 @@ def test_several_keys_give_several_times_the_budget(monkeypatch):
     names = _chain_names(agent_module.get_model())
 
     free = list(agent_module._free_openrouter_models())
-    assert names[0] == agent_module.GEMINI_MODEL
+    assert names[-1] == agent_module.GEMINI_MODEL
     # Every model reachable from the first key, then every model from the second.
-    assert names[1:] == [OPENROUTER_PREFIX + n for n in free] * 2
+    assert names[:-1] == [OPENROUTER_PREFIX + n for n in free] * 2
 
 
 def test_the_zen_tier_is_added_only_when_a_key_is_configured(monkeypatch):
@@ -469,7 +510,8 @@ def test_the_zen_tier_is_added_only_when_a_key_is_configured(monkeypatch):
     monkeypatch.setenv("OPENCODE_API_KEY", "oc_sk_test")
     assert agent_module.opencode_enabled() is True
     names = _chain_names(agent_module.get_model())
-    assert names[-1] == f"hosted_vllm/{agent_module.OPENCODE_MODEL}"
+    # First, since the 2026-10-03 reorder -- it serves every ordinary turn.
+    assert names[0] == f"hosted_vllm/{agent_module.OPENCODE_MODEL}"
 
 
 def test_zen_is_reachable_when_it_is_the_only_tier(monkeypatch):
@@ -485,9 +527,12 @@ def test_zen_is_reachable_when_it_is_the_only_tier(monkeypatch):
     monkeypatch.setenv("OPENCODE_API_KEY", "oc_sk_test")
 
     names = _chain_names(agent_module.get_model())
+    # Zen first, Gemini last. Both entries are still required: dropping Gemini
+    # would leave the chain ending on a signature-free model for a conversation
+    # that *does* carry signatures, which is the history guard's whole subject.
     assert names == [
-        agent_module.GEMINI_MODEL,
         f"hosted_vllm/{agent_module.OPENCODE_MODEL}",
+        agent_module.GEMINI_MODEL,
     ]
 
 
