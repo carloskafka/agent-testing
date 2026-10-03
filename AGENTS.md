@@ -115,9 +115,21 @@ Import chain (all through `text_summarizer/__init__.py`):
 
 ### Model selection — `agent.py`
 
-- `MODEL_PROVIDER=gemini` (default) uses `gemini-3.5-flash-lite`.
-- `MODEL_PROVIDER=openrouter` uses a `:free` model chosen by `MODEL_ALIAS` (gemma/qwen/nvidia) — see `OPENROUTER_MODELS`.
-- Both paths return a `HistorySafeFallbackModel` (`model_chain.py`), which *wraps* a `FallbackModel`: Gemini first, then free OpenRouter models on 429/quota/5xx errors. Same order, same entries, same failover — the wrapper only decides which models may see a given conversation (see below).
+- `MODEL_PROVIDER=gemini` (default) builds the chain **OpenCode Zen first, then the
+  free OpenRouter models, then Gemini** — reordered 2026-10-03. Gemini is last because
+  it is the only tier that needs no key and so is the floor: without it a quota error
+  ends the turn instead of degrading. The cost is on the hot path, and it is real:
+  every turn now goes to a *free* endpoint, which is known gap 7. Measured before the
+  change on session `068f3e5c`: Gemini served all nine generations because it was first
+  and it did not fail.
+- `MODEL_PROVIDER=openrouter` is unchanged and still means *OpenRouter-led*: the
+  `:free` model named by `MODEL_ALIAS` first, then the other free models. It contains
+  no Gemini at all.
+- Both paths return a `HistorySafeFallbackModel` (`model_chain.py`), which *wraps* a
+  `FallbackModel`: it tries each entry in sequence, so the first entry serves every
+  ordinary turn and the rest exist only for when it fails (429 / quota / 5xx). The
+  wrapper only decides which models may see a given conversation (see below) — it does
+  not reorder or add anything.
 - Models referenced are the free-tier aliases used by this project; don't "fix" the names to older released models.
 
 #### A conversation is never offered to a provider that will reject it — `model_chain.py`
@@ -657,6 +669,88 @@ present, 6 × `100dvh`, correct meta, vendor rule intact, injected exactly once 
 - `agent-testing` service: builds from `Dockerfile`, runs `text_summarizer/serve.py` (the `adk web` app plus the read-only `/vault` mount) on host port **8001 → 8000**, reads `.env`, points Langfuse at `http://host.docker.internal:3099` via `extra_hosts`.
 - The vault's **parent** is mounted into both containers at `/vaults` (not the vault itself), so the real vault directory name survives in the path. The host path defaults to `./vaults` and is overridable via `OBSIDIAN_VAULT_PARENT_HOST` in `.env`; an empty mount auto-creates the `agent-vault` folder on first boot, so a fresh clone-and-run needs zero vault setup. `SECOND_BRAIN_VAULT: /vaults` points at the same place. The MCP container resolves the actual vault at startup via `resolve-vault.sh`, which mirrors `second_brain.resolve_vault_root()`; the two must never disagree about which vault is in use, so the script **fails loudly** on an ambiguous mount (>1 child directory) rather than picking one, and the agent surfaces the same ambiguity as `unknown` provenance instead of a wrong name.
 
+## How to land a change here
+
+`main` is **protected**: it requires the `check` job (ruff + mypy + pytest) and
+enforces it for admins, so a direct push is refused. Everything lands as a branch and
+a PR, merged with a merge commit — which is what every previous merge in this
+repository's history looks like (`Merge pull request #N from …`).
+
+### One slice per PR
+
+The unit of work is an **independently mergeable slice**: it depends on nothing else
+and can be reverted alone. That is the same rule the MVP table below is built on, and
+it is why defects found in one session usually become separate PRs — the wrong-typed
+tool argument (#42), the option count cap (#43) and the age gate (#44) shared one
+investigation and shipped as three, because each one reverts without the others.
+
+Split on the **defect**, not the file. Two PRs that both edit one module are fine as
+long as neither needs the other; put the shared edit in one of them rather than
+extracting a shared base nobody asked for.
+
+### Branch names
+
+`fix/…`, `feat/…`, `docs/…` followed by a short kebab-case description of the
+*behaviour* that changed — `fix/booking-links-and-conversation-notes`, not
+`fix/web-search`. The history is read with `git log --oneline`, so the name is a
+second chance to say something useful.
+
+### Conventional commits
+
+```
+<type>(<scope>): <subject in the imperative, describing behaviour>
+
+<why — the session id, the measurement, or the failure it prevents>
+```
+
+| Type | For |
+|---|---|
+| `fix` | a live defect, however small |
+| `feat` | new capability |
+| `docs` | documentation only |
+| `test` | tests only |
+| `refactor` | no behaviour change |
+| `chore` | deps, config, build |
+
+**Scope is the job, not the filename.** A defect in the persistence path is
+`fix(second-brain):` even when three files change; a change to what the web tier
+*does* is `fix(web):` even when the edit lands in `web_search.py`.
+
+**The subject says what changed; the body says why.** Almost every interesting
+defect in this repository was found by reading a session's events or measuring a
+page, and that evidence is the only thing a later reader can check. Put it in the
+commit: the session id, the before/after, the count. `git blame` will point at the
+commit a year from now, and *"it felt wrong"* will not help.
+
+Type `refactor` is the one that earns its keep by being rare — a commit with that
+type should move no score and no behaviour, and if you cannot say why it deserves
+that type, it is probably a `fix`.
+
+### Before you open it
+
+- `make check` — ruff, mypy, pytest. The node suite is driven from pytest, so one
+  command covers it.
+- **Mutation-test every safety property you added.** A test that has never been seen
+  to fail may not be testing anything. Two examples that earned their place here:
+  removing `MAX_OPTIONS` from `ask_user` while leaving it in the shim, and deleting
+  the form-submit guard from the renderer. Both failed exactly one test.
+- **Confirm the mutation landed** before believing the result. A mutation that
+  silently fails to apply reports "all pass", which reads exactly like a robust
+  suite and means the opposite.
+- **Rebuild the container and compare `md5sum`** against your tree before claiming a
+  live fix — gotcha 17. `docker exec agent-testing md5sum /workspace/<file>`.
+- **Update the docs in the same change**: `docs/*.md`, `README.md` (when it
+  describes the capability), `AGENTS.md` (when the architecture moved), and
+  `docs/index.html` for anything a user can hit. A walkthrough or a card is
+  documentation too, and a wrong one is worse than none.
+
+### Two things not to do
+
+- **Do not push to `main`.** It is refused, deliberately.
+- **Do not merge a PR whose CI you have not watched go green.** The required check
+  reports `pending` until it finishes, and a red run leaves the *previous* site
+  published, which looks like success.
+
 ## Common commands
 
 All `text_summarizer` paths assume `cd /home/vboxuser/Downloads/apps/agent-testing` (the repo root) unless noted.
@@ -1165,7 +1259,7 @@ run leaves the previously published site up, which looks like success.
 
 | Var | Purpose |
 |---|---|
-| `MODEL_PROVIDER` | `gemini` (default) or `openrouter` |
+| `MODEL_PROVIDER` | `gemini` (default) or `openrouter`. **The default value no longer means "Gemini first"** — that branch builds OpenCode → free OpenRouter → Gemini since 2026-10-03, and `gemini` names the *tier that is always present*, not the one that leads. Use `openrouter` for an OpenRouter-led chain. |
 | `GEMINI_API_KEY` | Required for Gemini |
 | `OPENROUTER_API_KEY` / `OPENROUTER_API_BASE` | Required for OpenRouter |
 | `MODEL_ALIAS` | `gemma` / `qwen` / `nvidia` (OpenRouter free models) |

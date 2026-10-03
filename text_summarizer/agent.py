@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import time
+from typing import Any
 
 from google.adk.agents import LlmAgent
 from google.adk.models import LlmResponse
@@ -381,26 +382,32 @@ def get_model():
         ordered = [primary_name, *fallback_names]
         chain = [_BreakerLiteLlm(name, key) for key in keys for name in ordered]
     else:
-        # Default provider is Gemini; fall back to free OpenRouter models on quota
-        # exhaustion (HTTP 429) or transient 5xx errors, then to Zen.
-        chain = [GEMINI_MODEL]
+        # OpenCode first, then the free OpenRouter models, then Gemini.
+        #
+        # **Gemini moved from first to last on 2026-10-03**, which inverts the order
+        # this branch had since the tier existed. The trade is real and worth stating
+        # plainly: every turn now goes to a *free* endpoint, and the free tier is what
+        # known gap 7 describes -- `gemma:free` 429s often enough that a Gemini quota
+        # error was as likely to end in a rate-limit error as in a served turn. So this
+        # buys a preferred provider at the cost of reliability on the hot path, and
+        # Gemini becomes the *stability* tier rather than the default one.
+        #
+        # The signature rule is unaffected by the reordering: `HistorySafeFallbackModel`
+        # drops any signature-requiring model from the unsigned chain wherever it sits,
+        # so Gemini being last does not weaken that guard -- it is the reason Gemini is
+        # only ever reachable on a conversation no fallback model has touched.
+        chain: list[Any] = []
         keys = [k for k in _openrouter_keys() if not breaker.is_spent(k)]
-        if keys:
-            chain += [
-                _BreakerLiteLlm(name, key)
-                for key in keys
-                for name in _free_openrouter_models()
-            ]
         if opencode_enabled():
             chain.append(_opencode_llm())
         elif not keys:
-            # A Gemini-only chain cannot be built: `signature_free_chain` returns
-            # an empty list, and `HistorySafeFallbackModel` rejects that, because an
-            # unsigned conversation would have nowhere to go. Reporting it is the
-            # honest response -- but it must not take the import down, since the
-            # previous behaviour (no key configured at all) was to start anyway and
-            # rely on Gemini. So this keeps a signature-free entry it can fall back
-            # *to*, and says plainly that the tier is not there.
+            # A chain with nothing in it cannot be built: `signature_free_chain`
+            # returns an empty list, and `HistorySafeFallbackModel` rejects that,
+            # because an unsigned conversation would have nowhere to go. Reporting it is
+            # the honest response -- but it must not take the import down, since the
+            # previous behaviour (no key configured at all) was to start anyway and rely
+            # on Gemini. So this keeps a signature-free entry it can fall back *to*, and
+            # says plainly that the tier is not there.
             print(
                 "[text_summarizer] no fallback tier configured: set "
                 "OPENROUTER_API_KEY (one or more, ';'-separated) or "
@@ -409,6 +416,16 @@ def get_model():
                 file=sys.stderr,
             )
             chain.append(_opencode_llm())
+        if keys:
+            chain += [
+                _BreakerLiteLlm(name, key)
+                for key in keys
+                for name in _free_openrouter_models()
+            ]
+        # Gemini last, and unconditionally: it is the only tier here that needs no key,
+        # so it is also the floor. A chain without it would end the turn outright on a
+        # quota error rather than degrading.
+        chain.append(GEMINI_MODEL)
     return HistorySafeFallbackModel(
         models=chain,
         unsigned_history_models=signature_free_chain(chain),
