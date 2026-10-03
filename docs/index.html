@@ -1380,6 +1380,39 @@ breeds, varying in size, color, and temperament.</code></pre>
         amount of prompt editing is.
       </p>
     </div>
+    <div class="card">
+      <p class="card__title">A page behind an age gate reads as empty</p>
+      <p class="card__body">
+        <code>web_fetch</code> returns a refusal naming the gate rather than a page of
+        nothing, and the agent is supposed to stop and ask you. If it reports the page
+        as unreadable instead, the gate markers did not match &mdash; they are checked
+        against the visible text with accents folded out, so a site that phrases its
+        notice differently from the built-in list needs its wording added to
+        <code>AGE_GATE_MARKERS</code>.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">The agent asked you to confirm an age, then refused to go on</p>
+      <p class="card__body">
+        The second call needs <code>attested=true</code>, and that flag is refused unless
+        <code>ask_user</code> recorded a real answer in this session. So a page that stays
+        behind its gate usually means the agent asked in prose, or asked and then ignored
+        what came back &mdash; the question has to be the <code>ask_user</code> tool, and
+        the answer has to say <code>answered_by: user</code>. Declining, or answering with
+        something that was not on the list, deliberately does not count.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">The gate cleared but the page is still thin</p>
+      <p class="card__body">
+        The dismiss primitive is <b>off unless you turn it on</b>, and it is configured on
+        the <i>renderer</i>, not on the agent &mdash; it is the process that runs a
+        stranger's JavaScript, so what it may click is your decision rather than the
+        model's. Set <code>RENDERER_DISMISS_HOSTS</code> and
+        <code>RENDERER_DISMISS_TEXT</code> in the renderer project and restart it. Both
+        blank is the intended default, not a bug.
+      </p>
+    </div>
   </section>
 
 </main>

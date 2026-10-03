@@ -35,6 +35,7 @@ Two things this must not become:
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 #: How many options are worth showing. Past this the question has stopped being a
@@ -261,6 +262,13 @@ def ask_user(
             "consequence": prepared["consequence"],
         }
 
+    # The one branch that can record an attestation. This is what makes
+    # ``web_fetch(attested=True)`` something the code will act on rather than a
+    # flag a model sets when it wants a page: only an answer a human actually gave
+    # gets here, and the other three branches -- declined, unrecognised, and no
+    # turn context to pause on -- are all the agent choosing for itself.
+    _record_user_attestation(tool_context)
+
     return {
         "status": "answered",
         "answered_by": "user",
@@ -268,6 +276,21 @@ def ask_user(
         "question": prepared["question"],
         "consequence": prepared["consequence"],
     }
+
+
+def _record_user_attestation(tool_context: Any) -> None:
+    """Tell the web tier that a human answered, if the web tier is present.
+
+    Imported lazily and by module name rather than at the top, because
+    ``web_search`` is optional -- it needs ``httpx`` and a configured SearXNG --
+    and ``ask_user`` has to keep working in a deployment with neither. A missing
+    web tier is the normal case for a deployment without one, so the import
+    failing must not turn a user's answer into an exception.
+    """
+    with contextlib.suppress(ImportError):
+        from .web_search import record_user_attestation
+
+        record_user_attestation(tool_context)
 
 
 def build_ask_user_tool():

@@ -23,6 +23,7 @@ it was written for.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import pytest
@@ -105,6 +106,58 @@ def test_the_rule_that_governs_the_digest_is_protected():
     assert 14 in auto_optimize.missing_required_rules(_drop_rule(REAL, 14))
 
 
+def test_rule_16_is_required_and_cannot_be_dropped():
+    """Same reason as 14, and the failure it guards against is worse.
+
+    Rule 16 is what stops the agent setting ``attested=True`` on its own and what
+    stops it claiming a purchase it did not make. Nothing observes either: no eval
+    case involves an age gate or a checkout, and ROUGE-1 is word overlap, so a
+    rewrite that dropped the rule would score *better* for being shorter -- the
+    exact dynamic the guard exists to resist.
+
+    The assertion that matters is the second one. Being in ``REQUIRED_RULES`` is a
+    constant; being in the set a dropped rule is *reported* against is the wiring,
+    and a constant nobody reads protects nothing.
+    """
+    assert 16 in auto_optimize.REQUIRED_RULES
+
+    assert 16 in auto_optimize.missing_required_rules(_drop_rule(REAL, 16))
+
+
+def test_dropping_rule_16_is_refused_before_the_file_is_written():
+    """The outcome that matters, not the function.
+
+    ``missing_required_rules`` returning ``[16]`` proves the arithmetic. This
+    proves the file on disk is unchanged, which is the thing gotcha 1 is about --
+    ``agent.py`` *is* the graded path, and a rewrite that reaches it has already
+    happened. Same reasoning as
+    ``test_a_rule_dropping_rewrite_is_never_written_to_agent_py``.
+    """
+    import inspect
+    import textwrap
+
+    src = inspect.getsource(auto_optimize.main)
+    # The *call* forms, not the bare names. The comment explaining the ordering
+    # mentions ``set_instructions`` before ``missing_required_rules``, so indexing
+    # on the names finds the comment and reads the order backwards -- the same
+    # mistake as ``test_a_rule_mentioned_mid_sentence_does_not_count_as_present``,
+    # committed by a test written alongside it.
+    guard = src.index("missing_required_rules(")
+    write = src.index("set_instructions(")
+    assert guard < write, (
+        "the guard runs after the write, so a process killed between the two leaves "
+        "agent.py holding instructions the guard would have refused"
+    )
+    # The reject path has to *stop* before the write. `break` and `return` are both
+    # fine -- what is not fine is the write being reachable with `dropped` non-empty,
+    # which is what "checked before the write" has to mean in code.
+    gap = textwrap.dedent(src[guard:write])
+    assert re.search(r"\b(break|return|continue)\b", gap), (
+        "the dropped-rule branch does not exit before set_instructions, so a "
+        "refused rewrite still reaches agent.py"
+    )
+
+
 # --- failing safe --------------------------------------------------------------
 
 
@@ -143,7 +196,7 @@ def test_a_renumbered_block_fails_closed():
 
     dropped = auto_optimize.missing_required_rules(renumbered)
 
-    assert dropped == [11, 12, 13, 14], "only the numbers the compacted block lacks"
+    assert dropped == [11, 12, 13, 14, 16], "only the numbers the compacted block lacks"
     assert 8 not in dropped, "rule 8 is still numbered 8 and must be found"
 
 
@@ -221,7 +274,10 @@ def _drive_loop(monkeypatch, tmp_path, rewrite, *, scores=(0.50, 0.60)):
     return writes, kept
 
 
-ORIGINAL_MARKER = "1. one\n7. seven\n8. eight\n9. nine\n11. eleven\n12. twelve\n13. thirteen\n14. fourteen\n"
+ORIGINAL_MARKER = (
+    "1. one\n7. seven\n8. eight\n9. nine\n11. eleven\n12. twelve\n"
+    "13. thirteen\n14. fourteen\n16. sixteen\n"
+)
 EVAL_STUB = pathlib.Path(__file__).parent / "eval" / "simple_test.test.json"
 
 
@@ -237,7 +293,7 @@ def test_a_rule_dropping_rewrite_is_never_written_to_agent_py(monkeypatch, tmp_p
     agent_file.write_text(before)
 
     writes, kept = _drive_loop(
-        monkeypatch, tmp_path, "1. one\n7. seven\n9. nine\n11. eleven\n12. twelve\n13. thirteen\n14. fourteen\n"
+        monkeypatch, tmp_path, "1. one\n7. seven\n9. nine\n11. eleven\n12. twelve\n13. thirteen\n14. fourteen\n16. sixteen\n"
     )
 
     assert writes == [], "the rule-dropping rewrite was written to agent.py"
@@ -253,7 +309,10 @@ def test_a_compliant_rewrite_is_still_applied(monkeypatch, tmp_path):
     unless something proves an accepted rewrite still gets through. Without this,
     "delete the guard" and "make the guard too strict" would be the same commit.
     """
-    compliant = "1. one\n7. seven\n8. eight\n9. nine\n11. eleven\n12. twelve\n13. thirteen\n14. fourteen\n15. extra\n"
+    compliant = (
+        "1. one\n7. seven\n8. eight\n9. nine\n11. eleven\n12. twelve\n"
+        "13. thirteen\n14. fourteen\n15. extra\n16. sixteen\n"
+    )
 
     writes, kept = _drive_loop(monkeypatch, tmp_path, compliant)
 

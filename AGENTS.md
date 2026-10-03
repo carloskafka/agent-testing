@@ -94,6 +94,8 @@ agent-testing/
         |-- test_adk_devui_patch.py       # The mobile patch + its guards against ADK drift
         |-- test_gmail.py                 # Gmail MCP server logic + the toolset that spawns it
         |-- test_tools_gif.py             # tools/: generator-artifact sync + the decoder round trip
+        |-- test_age_gate.py                 # Age gates: detection, the attestation that is *enforced*, fallbacks
+        |-- test_citable_links.py             # A URL the model was shown is a URL it may cite
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
             |-- summarizer_eval_set.evalset.json # 4 eval cases
@@ -500,6 +502,10 @@ The pinning is unchanged: `allow_private` alters which addresses are *acceptable
 
 **And a URL that was fetched has to survive.** When a fact came from a page, the rule now requires the URL *on the fact itself* as a markdown link, and in the `summary_content` passed to `save_summary_to_second_brain` — because a note that records times but no URLs cannot answer the same question from the vault tomorrow, which is how the next turn ends up citing a page nobody can click. Every one of the 13 `ingresso.com` notes in the live vault contains **zero** URLs, which is the shape of the problem.
 
+**The citation allow-list was a list of pages *fetched*, and that made the useful citation the forbidden one.** `record_returned_urls` registered the URL the tool was called with; the `[links on this page]` block then handed the model a page full of *other* URLs. So the model read a link, cited it, and had the line silently dropped by the renderer — the same rule that drops a note title matching no file, applied to a URL the model was looking at. On Ingresso.com that is not an edge case: the page the agent fetches is the films listing, and the thing a reader needs is the per-session checkout link *inside* it. `_format_links` now takes a `shown` out-param and every fetch path registers it.
+
+**The converse matters as much, which is why `test_a_url_dropped_by_the_cap_is_not_citable` exists.** The allow-list is what the model was *shown*, so a URL cut by `MAX_LINKS` or `_MAX_LINK_BLOCK_CHARS` must stay uncitable — registering every href found before capping would let the model cite a link it never saw, which is the fabrication the whole mechanism exists to prevent. And `test_web_fetch_actually_registers_the_links_it_shows` drives the real `web_fetch` rather than the helper: the first four tests in that file all passed against the *old* defect, because they call `record_returned_urls` by hand and so never touch the call site that was wrong.
+
 **Nothing observes any of this**, which is why `test_web_rule_precedence.py` exists. No eval case asks for an exhaustive listing; `response_match_score` is ROUGE-1 over words and cannot see a tool call; `tool_trajectory_avg_score` grades rules 8 and 9 only. A rewrite that demoted the exceptions back to advice would move neither score in either direction. That file also asserts the rule still refuses to search "for no reason", because the failure mode of the fix is over-correction — and it checks the URL-fidelity clause appears exactly once, since two copies of an instruction the model must follow exactly is one copy too many.
 
 **Web pages are untrusted input, unlike the user's text, the vault or their mail.** Anyone can publish a page that ranks for a query, and its text lands verbatim in the model's context. Three independent defences, all required:
@@ -750,6 +756,82 @@ Unset `RENDERER_URL` and the tier is byte-for-byte what it was: the gate is not 
 
 **A side effect of the DNS choice is worth knowing.** The renderer resolves via `192.168.1.137`, this machine's own LAN address where `systemd-resolved` listens, so the browser sees the host's view of DNS. That resolver returns `0.0.0.0` for ad and tracker domains (`1.1.1.1` resolves them normally), so **the browser inherits that filtering for free** — 12 of the requests on the ingresso.com render were refused that way. The refusal message distinguishes it from a genuine non-public address, because "refused: non-public address" on an ad domain reads like a bug.
 
+### The renderer can dismiss an overlay — and stops there
+
+The one write that service has. A page behind a button — a cookie banner, a consent
+wall, an **age gate** — hides its content until something is clicked, and for an
+18+ rating that content is the whole reason the user asked. `POST /dismiss` in
+`~/Downloads/apps/chromium/renderer/renderer.py` clears one such layer.
+
+**The safety is structural, not a phrase list.** That distinction is the whole
+design, and it is what makes the primitive general-purpose rather than
+Ingresso-specific:
+
+| Property | Where | Why it is the load-bearing one |
+|---|---|---|
+| **must not navigate** | URL compared before/after; a move is returned as an error | *Accept all cookies* does not navigate, *Buy ticket* does. No allow-listed phrase reaches a checkout, because clearing a layer is not permitted to advance the page. |
+| **not a form submit** | `el.closest('form')` in `_FIND_DISMISS_JS` | A purchase button on a real checkout *is* a form submit. This is checked in the pass that **decides**, before the click exists. |
+| **no free-form selector** | `/dismiss` reads exactly `url` and `attested` | A selector parameter would make this a general clicker wearing a name, and the allow-list advisory. |
+
+Every refusal happens **before** anything is clicked; there is no undo, so the
+navigation check is *reporting* and the form check is *prevention*.
+
+**Which sites, and which labels, are operator lists and not model choices** —
+`RENDERER_DISMISS_HOSTS` (suffix match on the registrable name) and
+`RENDERER_DISMISS_TEXT`. **Both empty means the primitive is off**, and that is the
+state a fresh deployment should be in: a write that is live on install is a write
+nobody chose. `attested` is read as `is True`, so anything but JSON `true` is not
+attested.
+
+**The one place a human is required is an age or eligibility gate.** If the page's
+visible text carries a rating marker, `/dismiss` refuses and tells the caller to ask
+the user. On the agent side that is `web_fetch(attested=True)`, and the flag is
+**checked, not trusted**:
+
+- `ask_user` writes `ATTESTATION_STATE_KEY` into session state on **one** branch —
+  `answered_by: "user"`. Declined, unrecognised and no-turn-context are all the
+  agent choosing for itself and record nothing.
+- `web_fetch` refuses `attested=True` unless that key is present.
+
+The reasoning is the shape of the bug: a model that reads the refusal learns exactly
+what the flag does, so **a boolean the model supplies is a boolean the model
+supplies**. Four mutations confirm each half is load-bearing (drop the check, record
+on the declined branch, fall back on every refusal, broaden the markers to match
+anything).
+
+**A wrong guess must not strand the page.** Detection is a marker list on *every*
+page the model reads, and a false positive is not free — the model is told to ask a
+question nobody needs to answer. So two of the renderer's refusals are answered by
+**reading the page the ordinary way**: `nothing to dismiss` (there was no overlay)
+and `disabled` (the operator has not opted in). Without the second, turning this
+feature on would be a *regression* for anyone who had not configured it.
+
+**Accents are folded** (`_fold`, NFKD + drop combining marks) on both sides, so
+`entrada será permitida` and `entrada sera permitida` are one list entry rather than
+two to remember. The vocabulary is nonetheless **duplicated** — the two processes
+cannot share a module, because one runs pages a stranger wrote and the other holds
+the vault's keys — and `test_the_marker_list_agrees_with_the_renderers` compares the
+two *sets*, which caught real drift the first time it ran (`16 anos` was in one and
+not the other).
+
+**Where a purchase stops: at the checkout.** Rule 16 requires the agent to read the
+page and hand over the exact URL, and forbids buying, paying, reserving or claiming
+anything it did not do. Ingresso.com requires an account to buy and the renderer
+holds no credentials **by design** — it is the container with no vault, no API key,
+no access to anything else in the deployment. Verified that the checkout URL cannot
+report payment status either: it identifies a *cart* (`sessionId`), not an order —
+zero hits for `payment`, `paid`, `pago`, `receipt`, `confirmed`.
+
+Rule 16 is in `auto_optimize.REQUIRED_RULES` for the same reason rule 14 is: no eval
+case involves a gate or a checkout, and ROUGE-1 rewards the shorter instructions, so
+a rewrite dropping it would let the agent attest on the user's behalf and would score
+*better*.
+
+**Not verified in a browser:** the click path was exercised through
+`renderer.dismiss()` over HTTP against the real Ingresso gate (clicked
+`estou ciente, quero continuar`, `navigated: False`, seat map reachable) and through
+the agent's own `web_fetch` end to end, but no human saw the page change.
+
 **Not verified:** no live turn has run with the renderer configured *and* a working model tier. The `web_js_rendered_page_is_not_invented` scenario passed against a rebuilt container (26s, real film names, cited), but the final full-suite run was cut short — see below.
 
 ### Scenario harness — `tools/scenarios.py`
@@ -971,6 +1053,7 @@ run leaves the previously published site up, which looks like success.
 | `OBSIDIAN_MCP_URL` | Optional MCP over HTTP, e.g. `http://127.0.0.1:37842/mcp` |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN` | Optional read-only Gmail MCP. All three must be set; mint the refresh token once with `text_summarizer/gmail_oauth.py` |
 | `SEARXNG_URL` | Optional web-search tier. Unset means no web tools. Under Docker the agent reaches a self-hosted SearXNG (a **separate** compose project) as a service name over the shared `agent-net` bridge — here `http://searxng-core:8080`, and **the host must be your SearXNG container's service name**. See below. |
+| `RENDERER_DISMISS_HOSTS` / `RENDERER_DISMISS_TEXT` | What the renderer may click, for `POST /dismiss`. **Both blank means the primitive is OFF**, which is the intended default. Set on the **renderer** project, not the agent — it is the process that runs a stranger's JavaScript. Suffix match on the registrable name (`ingresso.com` covers `checkout.ingresso.com`); phrases are matched against a whole button label. See "The renderer can dismiss an overlay". |
 | `RENDERER_URL` | Optional headless-browser renderer, for pages a plain GET cannot read. Unset means `web_fetch` never falls back and the tier is byte-for-byte what it was. A **separate** compose project at `~/Downloads/apps/chromium`, reached as a service name over `agent-net`. Read the host off `docker network inspect agent-net`, not out of any document — including this one. |
 | `WEB_SEARCH_ENABLED` | `false` removes the web tools while leaving `SEARXNG_URL` in place. Eval runs want this: live results change daily, so they would make `response_match_score` measure the day |
 | `SECOND_BRAIN_VAULT` | Absolute path of the directory holding the vault(s) for direct writes; defaults to `/vault`. Under Docker point this at the vault's **parent** (`/vaults`) so the real name survives — see "Which vault is active" |
