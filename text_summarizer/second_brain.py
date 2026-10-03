@@ -752,6 +752,53 @@ def _provenance_lines(provenance: dict[str, str]) -> str:
     return "".join(lines)
 
 
+#: Errors these tools return instead of raising.
+#:
+#: **ADK validates a *missing* argument and returns it as data** -- it did exactly
+#: that in session ``f89fcd02``, telling the model ``topics`` was absent and that it
+#: could retry. That is the behaviour that lets a model recover. What ADK does *not*
+#: do is look at an argument that is present but the wrong shape: it passes it
+#: straight through, so ``topics.split(",")`` on a JSON array raised
+#: ``AttributeError: 'list' object has no attribute 'split'`` and **ended the turn**.
+#:
+#: The consequence was disproportionate to the mistake. This is the persistence
+#: path -- rule 8, one of the ``REQUIRED_RULES``, the one ``tool_trajectory_avg_score``
+#: grades at threshold 1.0 -- so the agent wrote no note, logged no conversation and
+#: gave the user no answer, over a parameter a free-tier model naturally sends as an
+#: array.
+#:
+#: Every other tool in this package already follows the rule these two did not:
+#: ``web_search._error``, ``digest_tools`` and ``gmail_mcp_server`` all return
+#: failures as data for exactly this reason. The fix is to make the first-party
+#: tools match, not to invent a new convention.
+
+
+def _tool_error(message: str) -> str:
+    """A refusal the model can read and correct, in the shape every tool here uses."""
+    return json.dumps({"error": message}, ensure_ascii=False)
+
+
+def _as_text(value: object, argument: str) -> tuple[str, str]:
+    """``(text, error)`` -- the argument as a string, or a refusal to read it.
+
+    **Only scalars are accepted, and that is deliberate.** ``topics`` is coerced
+    because a list *is* what it means (see :func:`_split_topics`). A list is not
+    what a title or a summary body means, and ``str(["a", "b"])`` would put
+    ``"['a', 'b']"`` in a note the user reads and a filename on disk. Refusing is
+    the honest answer: the model can retry, and a retry costs a turn while a
+    garbage note costs a correction the user has to find.
+    """
+    if isinstance(value, str):
+        return value, ""
+    if isinstance(value, (int, float, bool)) or value is None:
+        return ("" if value is None else str(value)), ""
+    return "", (
+        f"{argument} must be a string, and it arrived as "
+        f"{type(value).__name__} ({json.dumps(value, ensure_ascii=False)[:120]}). "
+        f"Send it as plain text."
+    )
+
+
 def _split_topics(topics: str) -> tuple[list[str], list[str]]:
     """Split the model's topic list into usable topics and ones with no file name.
 
@@ -767,9 +814,20 @@ def _split_topics(topics: str) -> tuple[list[str], list[str]]:
     filed" when nothing was written, and a stub with a meaningless name is worse
     than an absent one because it is indistinguishable from a real topic later.
     """
+    # A list is what "topics" means, so a list is what a model sends. Measured on
+    # session f89fcd02: `liquid/lfm-2.5-2.6b:free` sent
+    # `["Filmes", "Osasco", "Cinema"]` for a parameter whose docstring said
+    # "comma-separated", and the turn died. Joining is not a workaround for a bad
+    # model; the wire format is the arbitrary half of this pair and the model is
+    # not wrong about the other half.
+    if isinstance(topics, (list, tuple, set)):
+        raw_topics = [str(item) for item in topics]
+    else:
+        raw_topics = str(topics or "").split(",")
+
     kept: list[str] = []
     dropped: list[str] = []
-    for raw in (topics or "").split(","):
+    for raw in raw_topics:
         topic = raw.strip()
         if not topic:
             continue
@@ -805,6 +863,13 @@ def save_summary_to_second_brain(
         tool_context: Injected by ADK; used to read live provenance and the cache
             key. Not for the model.
     """
+    title, title_error = _as_text(title, "title")
+    if title_error:
+        return _tool_error(title_error)
+    summary_content, body_error = _as_text(summary_content, "summary_content")
+    if body_error:
+        return _tool_error(body_error)
+
     today = date.today().isoformat()
     slug = _safe_name(title)
     note_title = f"{today} - {slug}" if slug else f"{today} - summary"
@@ -1042,6 +1107,13 @@ def log_conversation(user_message: str, agent_response: str) -> str:
         user_message: What the user said.
         agent_response: What the agent replied (markdown, bullets included).
     """
+    user_message, user_error = _as_text(user_message, "user_message")
+    if user_error:
+        return _tool_error(user_error)
+    agent_response, response_error = _as_text(agent_response, "agent_response")
+    if response_error:
+        return _tool_error(response_error)
+
     today = date.today().isoformat()
     now = datetime.now().strftime("%H:%M")
     chat_path = os.path.join(VAULT_ROOT, CHAT_LOG_DIR, f"{today}.md")

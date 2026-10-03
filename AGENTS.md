@@ -85,6 +85,7 @@ agent-testing/
         |-- test_web_wiring.py             # The web tier reaching the answer only the permitted way
         |-- test_web_rule_precedence.py # Rule 13's exceptions override rule 7, and the links rule
         |-- test_sources_web.py            # The [web] line in the Sources block, and its allow-list
+        |-- test_tool_arg_types.py         # A wrong-typed tool argument is data, never a dead turn
         |-- test_digest.py                # The vault reader: provenance, damage, determinism, no-quota
         |-- test_digest_tools.py          # read_day_digest: gating, date validation, bounds, stdout purity
         |-- test_prompt_name_span.py       # after_model_callback: Langfuse prompt-name tagging
@@ -362,6 +363,55 @@ Two details that are load-bearing:
 
 - **`strip_bot_name` runs before anything is scored.** A presentation artefact must not move a score — the same reasoning as `sources.summary_only` removing the Sources block. `quality.bullet_score` is indifferent either way (its regex is `(?m)^\s*-\s+`, and a bold name is not a bullet), but `lexical_recall`/`format_and_recall` compare the response against the *user's* words, and `text_summarizer` is not one of them — so an unstripped stamp is a small permanent downward bias on **every scored turn**, which is exactly the kind of drift that makes `response_match_score` useless for the instruction edits it exists to measure (gotcha 4). Only a *leading* stamp is removed, and only the one this module writes, so a bold word the model happened to open with is left alone.
 - **`prepend_bot_name` is idempotent**, because a name printed twice at the head of one answer is precisely the duplication gotcha 16 exists to prevent, and because the same text can legitimately pass through twice (a cache hit replays, and the callback does not run on that path, but the guard is what makes the two independent).
+
+### A wrong-typed tool argument must not end the turn — `second_brain.py`
+
+Found live, session `f89fcd02-3961-43e9-91d4-7296a9e397cf`, asked *"Liste os filmes
+para hoje em osasco"* and served by the OpenRouter fallback
+`liquid/lfm-2.5-2.6b:free`:
+
+```
+event 14  save_summary_to_second_brain(..., themes="Filmes, Osasco, ...")
+event 15  {"error": "...mandatory input parameters are not present: topics ... you could retry"}
+event 16  save_summary_to_second_brain(..., topics=["Filmes", "Osasco", "Cinema", "Programacao"])
+event 17  AttributeError: 'list' object has no attribute 'split'      <- turn over
+```
+
+**The instructive part is that event 15 worked.** ADK reports a **missing** argument
+as data and the model retried — the mechanism worked exactly as designed. What it
+does not do is inspect an argument that is *present* and the wrong shape, so the
+retry, which fixed the **name**, died on the **type**. Recoverable and fatal differ
+only in whether the value was there, not in whether it was right.
+
+**The cost was disproportionate to the mistake.** This is rule 8 — persistence, one
+of the `REQUIRED_RULES`, the one `tool_trajectory_avg_score` grades at threshold
+1.0. So the agent wrote **no note, logged no conversation, and gave the user no
+answer**, over a parameter a free-tier model naturally sends as an array.
+
+Two halves to the fix, and both were already the convention everywhere else —
+`web_search._error`, `digest_tools` and `gmail_mcp_server` all return failures as
+data for precisely this reason, so this was an inconsistency rather than a new idea:
+
+- **`topics` is coerced, not rejected.** A list *is* what "topics" means; the wire
+  format being a comma-separated string is the arbitrary half of that pair. The
+  coercion is invisible to the vault: `test_a_list_and_the_equivalent_string_agree_exactly`
+  pins that the note is byte-identical either way.
+- **`title` / `summary_content` / `user_message` / `agent_response` are refused as
+  data**, and only because they are *not* coerced — `str(["a", "b"])` would put
+  `"['a', 'b']"` in a filename and in a note a person reads.
+
+`log_conversation` had the identical exposure (`.strip()` on both arguments) and was
+found by reading rather than by waiting for a second live failure — same file, one
+function away, and it is the other half of rule 9.
+
+`test_tool_arg_types.py` replays the **arguments as persisted in the event log**
+rather than a synthetic case, and **8 of its 10 tests fail against `main`**. The
+tenth that passes on both is the control (`test_the_string_path_is_untouched`),
+because a guard that refused everything would otherwise pass the other nine.
+
+Verified live by replaying event 16's exact call through the deployed container:
+a note is written, 4 topics linked, the index updated, no exception. (Both the note
+and its index line were removed afterwards — that replay writes to the real vault.)
 
 ### Langfuse scoring — `agent.py` + `eval_scoring.py`
 
