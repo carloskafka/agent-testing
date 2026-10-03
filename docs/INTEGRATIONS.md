@@ -162,6 +162,29 @@ cannot search does not merely get worse at searching, it stops offering to.
 `WEB_SEARCH_ENABLED=false` removes the tools while leaving `SEARXNG_URL` alone, which
 is the control to use when measuring.
 
+### When the vault is not allowed to end the question
+
+The tier is a *last resort* by design: rule 7 searches the vault first, and a note
+on the topic normally settles the matter. Two things override that, because a note
+is a record of an earlier fetch and it does not carry what the reader came for:
+
+- **Exhaustive requests** — "all movies", "each one", "todos os filmes". A note
+  that summarises a listing is itself an index, not the answer; each item usually
+  has its own page.
+- **Live facts** — today's session times, prices, opening hours, stock. These change
+  within the day, so a note written this morning is a wrong answer rather than a
+  cached one.
+
+Found live: asked *"todos os filmes disponíveis pra hoje à noite"*, the agent found a
+vault note titled almost exactly that, stopped, and answered from it with **zero** web
+calls — and therefore not one clickable link in the answer. See
+[the web tier](ARCHITECTURE.md#the-web-tier).
+
+When a fact does come from a page, the URL travels with it: on the fact itself as a
+markdown link, and into the saved note. A note that records times but no URLs
+cannot answer the same question from the vault tomorrow, which is how a follow-up
+turn ends up citing a page nobody can click.
+
 Under Docker, SearXNG runs as a **separate compose project** reached over a shared
 external docker network (`agent-net`) by service name rather than a published port, so
 nothing is exposed on the LAN for the agent's sake. `run.sh` creates that network
