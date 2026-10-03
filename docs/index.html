@@ -1468,7 +1468,9 @@ breeds, varying in size, color, and temperament.</code></pre>
         them is right; <b>choosing</b> one for you is not, and needs a question. If it never
         asks, the turn is not broken so much as unanswered: check the session for a
         <code>ask_user</code> call. Nothing in the eval loop can see this either way, so
-        it will not show up as a score change.
+        it will not show up as a score change. Measured on 2026-10-03: on the same
+        prompt with the same instructions, Gemini calls <code>ask_user</code> and the free
+        OpenCode model never does &mdash; so this is the model, not the wording.
       </p>
     </div>
     <div class="card">

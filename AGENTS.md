@@ -909,6 +909,44 @@ Unset `RENDERER_URL` and the tier is byte-for-byte what it was: the gate is not 
 
 **A side effect of the DNS choice is worth knowing.** The renderer resolves via `192.168.1.137`, this machine's own LAN address where `systemd-resolved` listens, so the browser sees the host's view of DNS. That resolver returns `0.0.0.0` for ad and tracker domains (`1.1.1.1` resolves them normally), so **the browser inherits that filtering for free** — 12 of the requests on the ingresso.com render were refused that way. The refusal message distinguishes it from a genuine non-public address, because "refused: non-public address" on an ad domain reads like a bug.
 
+### `ask_user` fires on Gemini and not on the free tier
+
+Measured 2026-10-03, and it was **assumed to be an instruction problem for three
+sessions before it was measured at all**. It is not.
+
+Same prompt, same instructions, same tool description, one process, two models:
+
+| Model | `ask_user` |
+|---|---|
+| `gemini-3.5-flash-lite` | **called** — plus `adk_request_confirmation` |
+| `space-bunny-free` (OpenCode Zen, the deployed primary) | never called |
+
+**The prompt is the whole experiment, and getting it wrong invalidates the result.**
+The first version asked *"Qual sessão você me recomenda? Escolha por mim"* — and
+"Escolha por mim" tells the model not to ask. Both models chose, and it read as a
+confirmation of the original belief. The working version gives a constraint that leaves
+several sessions viable and says nothing about deciding:
+
+> *Quero assistir Resident Evil hoje em Osasco, mas só consigo ir depois das 19h. Qual
+> sessão serve e onde compro o ingresso?*
+
+**Three separate prompts were not forks at all**, which is how the belief survived so
+long: *"liste os filmes"*, *"quais sessões tem"* and *"quero a sessão das 15:20"* are all
+listing requests, and the last names the session itself. The model was right not to ask
+every time. The absence of `ask_user` in those sessions was never evidence of anything.
+
+**The friction was deliberately not reduced.** `ask_user` requires four arguments, two
+of which the model must invent, and dropping `default` would make the call cheaper. That
+is a regression: forcing the model to state its default is what makes a *declined*
+question resolve to a considered choice instead of an arbitrary first option. Paying a
+little friction for correct fallbacks is the better trade than a higher call rate.
+
+So there is no fix in the instructions, and claiming one would be dishonest. **The lever
+is which model leads the chain** — see [Model selection](#model-selection--agentpy), and
+the reorder on 2026-10-03 that put a free endpoint first. `tools/scenarios.py` carries
+`ask_user_fires_on_a_real_fork`, tagged `known-failing`, so the next person sees the
+difference instead of re-deriving it.
+
 ### The turn ends on a stub, not on the answer — `tools/scenarios.py`
 
 Found live on session `flow-r5`, 2026-10-03, on **every turn** of a three-turn
