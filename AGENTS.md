@@ -98,6 +98,8 @@ agent-testing/
         |-- test_age_gate.py                 # Age gates: detection, the attestation that is *enforced*, fallbacks
         |-- test_citable_links.py             # A URL the model was shown is a URL it may cite
         |-- test_web_sessions.py              # Booking links joined to their time, cinema and URL
+        |-- test_final_answer_not_stub.py     # The turn must end on an answer, not a stub
+        |-- test_citations_in_answer.py       # Answer and citations are one message
         |-- test_conversation_not_notes.py     # Rules 8 and 15: do not persist or ask wrongly
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
@@ -906,6 +908,57 @@ Unset `RENDERER_URL` and the tier is byte-for-byte what it was: the gate is not 
 **The renderer's address vetting is per-request and is *weaker* than `check_url`'s.** Every request — document and every subresource — is intercepted before it leaves, resolved, and aborted on loopback/private/link-local/multicast. What cannot be done is **pinning**: `_pinned_transport` makes httpx dial the exact vetted address, and a browser cannot be made to. So the resolve-then-connect gap that gotcha 19 closed is open here, and the renderer says so in its own docstring rather than implying parity. All four probes refuse: `169.254.169.254`, `127.0.0.1`, `file:///etc/passwd`, and the host's own LAN address.
 
 **A side effect of the DNS choice is worth knowing.** The renderer resolves via `192.168.1.137`, this machine's own LAN address where `systemd-resolved` listens, so the browser sees the host's view of DNS. That resolver returns `0.0.0.0` for ad and tracker domains (`1.1.1.1` resolves them normally), so **the browser inherits that filtering for free** — 12 of the requests on the ingresso.com render were refused that way. The refusal message distinguishes it from a genuine non-public address, because "refused: non-public address" on an ad domain reads like a bug.
+
+### The turn ends on a stub, not on the answer — `tools/scenarios.py`
+
+Found live on session `flow-r5`, 2026-10-03, on **every turn** of a three-turn
+booking flow against the deployed chain:
+
+```
+  8. TEXT len=2701  "Hoje é sábado, 03/10/2026…"   + CALL save_summary_to_second_brain
+ 10. CALL log_conversation
+ 12. TEXT len= 500  "**Text Summarizer Agent**\n\n**Sources**\n- [web]…"
+```
+
+The answer was real — session time, seat map, age-gate notice, checkout URL — and it
+sat on the event that also carried a tool call. The turn then **ended on a stub**: the
+renderer faithfully wrapping a response the model had used for nothing but its citation
+lines.
+
+**The stub wins everywhere it matters.** The trace reports the last event, so does
+`response_match_score`; `_answered`, `_cited_web_source` and `_single_answer` all pass
+it; and so does any UI that collapses tool-call turns. The turn looked healthy in every
+one of those places while the reader saw a Sources block with nothing above it.
+
+**Gotcha 16's family, inverted.** That one was two copies of the answer; this is one
+copy and a stub after it. The general rule worth keeping: *a property of the **last**
+event is what almost everything downstream reads*, so "the answer exists somewhere in
+this turn" is not a sufficient thing to assert.
+
+**The model did it because rule 13 invited it.** It said to cite "at the very END of
+your answer", while rules 8 and 9 put `save_summary_to_second_brain` and
+`log_conversation` *after* the answer — so the citation lines came after a tool call and
+"the very end" was available to be read as "a final message of its own". Rule 13 now
+says the source lines go **in the same message** as the bullets, and the old wording is
+gone rather than supplemented: leaving both readings gives the model a choice and it
+takes the one it was already following.
+
+**The fix is in the instruction and not in the ordering**, because moving
+`save_summary_to_second_brain` earlier would open a worse hole — the name stamp is
+applied by `after_model_callback`, so an answer passed to the save tool after the stamp
+lands `**Text Summarizer Agent**` in the user's vault.
+
+`_final_answer_has_a_body` is applied by `run_scenario` **rather than composed into each
+scenario**, and that is not tidiness: scenarios that assert on tool calls pass a stub
+turn perfectly well, so a per-scenario `check=` could not have carried this.
+`test_no_scenario_passes_a_stub_on_its_own_but_the_runner_catches_every_one` walks the
+table to prove the fixture still represents the defect — without that, a stub that
+stopped being a stub would leave the test passing for the wrong reason.
+
+Verified live on session `flow-r6` after the change: the model calls both persistence
+tools **without narrating**, and the answer and its citations arrive in one message
+(2,376 and 1,161 characters). Three tests fail against `main`'s rule 13, ten against
+`main`'s `tools/scenarios.py`.
 
 ### A booking link the model cannot tie to a time — `web_search.py`
 
