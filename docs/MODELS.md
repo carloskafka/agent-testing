@@ -99,6 +99,21 @@ escape hatch describes** — `Connection timed out` means the request never reac
 service — so the fix is to surface that one provider's timeouts as `504` rather than
 blanket-adding 408 for a paid tier where the double-charge risk is real.
 
+## One thing the free tier does not do
+
+`ask_user` — the human-in-the-loop fork — **fires on Gemini and not on the free
+tiers.** Measured 2026-10-03, same prompt, same instructions, same tool description,
+one process:
+
+| Model | `ask_user` |
+|---|---|
+| `gemini-3.5-flash-lite` | **called**, then `adk_request_confirmation` |
+| `space-bunny-free` | never called |
+
+If the agent must be able to stop and ask, **lead the chain with a model that does**.
+That is the trade at the top of this page, stated in the currency that matters: a free
+tier is free until the thing you need from it is something it will not do.
+
 ## Environment
 
 | Variable | Meaning |

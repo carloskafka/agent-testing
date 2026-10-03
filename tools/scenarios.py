@@ -658,6 +658,27 @@ def _cached_turn(turn: Turn) -> tuple[bool, str]:
 
 
 SCENARIOS: list[Scenario] = [
+    # --- the human-in-the-loop fork: currently FAILS on the free tier ---------
+    # Measured 2026-10-03, same prompt, same instruction, same tool description:
+    # Gemini 3.5 Flash Lite calls ask_user; space-bunny-free never does. So this
+    # scenario is a *measurement*, not a passing check -- it is here so the next
+    # person sees the difference immediately instead of re-deriving it. See
+    # AGENTS.md, "ask_user fires on Gemini and not on the free tier".
+    Scenario(
+        name="ask_user_fires_on_a_real_fork",
+        prompt=(
+            "Quero assistir Resident Evil hoje em Osasco, mas so consigo ir depois "
+            "das 19h. Qual sessao serve e onde compro o ingresso? {nonce}"
+        ),
+        check=_all([_no_error, _no_cache_hit, _called("ask_user")]),
+        note=(
+            "KNOWN FAILING on space-bunny-free, passing on Gemini. A constraint that "
+            "leaves several sessions viable is the fork; do not add 'escolha por mim' "
+            "to this prompt -- that tells the model not to ask, which is the "
+            "confound the first version of this experiment had."
+        ),
+        tags=["ask_user", "known-failing"],
+    ),
     # --- the web tier: the focus --------------------------------------------
     # These two prompts are the user's, and the second is the one that died on
     # session 2fe0d9d0 -- it is worth running verbatim, because a prompt is the
