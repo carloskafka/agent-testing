@@ -56,12 +56,20 @@
     return 'confirmed-checkbox-standalone-' + functionCallId;
   }
 
-  /* How many options are worth a button row. Matches ask_user.MAX_OPTIONS: below
-   * two there is no fork (ask_user refuses those), and above five it is a form
-   * rather than a decision. A confirmation from some other tool carrying six is
-   * left as the checkbox-and-JSON the stock UI gives it. */
+  /* Below two there is no fork -- ask_user refuses those, so a card that reached
+   * here with one option is not a menu and is left as the stock checkbox.
+   *
+   * There is deliberately NO upper bound here, and there used to be: this was a
+   * hardcoded 5 mirroring ask_user.MAX_OPTIONS. That coupling was a silent-failure
+   * trap rather than a guard -- if the two ever disagreed, a question the tool had
+   * accepted would render no buttons at all, and the user would see the stock
+   * form and conclude the agent had not asked. So the cap is gone on both sides;
+   * `test_every_option_is_drawable_however_many_there_are` fails if either half
+   * grows one back on its own.
+   *
+   * A long list costs a taller card. That is a much better failure than the one
+   * the cap produced, which was answering the question for the user. */
   var MIN_OPTIONS = 2;
-  var MAX_OPTIONS = 5;
 
   /* --- pure: reading ADK's own payloads ---------------------------------- */
 
@@ -116,7 +124,6 @@
      * agent originally offered, not what is sitting in the textarea. */
     var options = toolArgs.options;
     if (!Array.isArray(options) || options.length < MIN_OPTIONS) return null;
-    if (options.length > MAX_OPTIONS) return null;
     if (options.some(function (o) { return typeof o !== 'string' || !o; })) return null;
 
     /* Once submitted the card is a transcript entry, not a menu. The bundle's own
@@ -330,7 +337,6 @@
     MARKER: MARKER,
     CHOICE_GLOBAL: CHOICE_GLOBAL,
     MIN_OPTIONS: MIN_OPTIONS,
-    MAX_OPTIONS: MAX_OPTIONS,
     checkboxId: checkboxId,
     buttonBarId: buttonBarId,
     cardFromEvent: cardFromEvent,

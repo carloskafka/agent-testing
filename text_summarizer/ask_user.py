@@ -37,15 +37,18 @@ from __future__ import annotations
 
 from typing import Any
 
-#: How many options are worth showing. Past this the question has stopped being a
-#: decision and become a form, and a long list in a chat bubble is worse than a
-#: sensible default. Five cinemas or five payment methods is a real fork; twenty
-#: is a search box.
-MAX_OPTIONS = 5
-
 #: Longest option string kept. An option is a label a human reads in a chat
 #: bubble, not a paragraph; anything longer is a sign the agent is asking the
 #: wrong question.
+#:
+#: This is the only bound on how many options a question may carry, and it is on the
+#: *label* rather than the count on purpose. A cap of five was here and it was
+#: wrong in both directions: it refused a genuinely exhaustive question -- "which of
+#: these nine cinemas?" -- that the agent was in a better position to answer than
+#: the user, and it did nothing at all about the thing that actually made a long
+#: list unreadable, which is a list of long labels. Counting is also the wrong axis
+#: for the failure it was meant to prevent: the answer does not become harder to
+#: read at option six, it becomes harder at option one if the option is a paragraph.
 MAX_OPTION_CHARS = 80
 
 
@@ -62,14 +65,16 @@ def worth_asking(
     and one that silently proceeds is indistinguishable from never having
     considered it.
 
-    The three refusals, each for a different reason:
+    The two refusals, each for a different reason:
 
     * **No real fork** -- fewer than two distinct options, or the default is
       already among them and nothing else is implied. There is no decision here.
     * **Not consequential** -- ``consequence`` is empty. A question whose answer
       changes nothing is a question about the agent's confidence, not the user's
       preference, and the agent should answer it itself.
-    * **Too many options** -- past :data:`MAX_OPTIONS`. See its docstring.
+
+    There is deliberately no upper bound on the *number* of options. See
+    :data:`MAX_OPTION_CHARS` for why counting was the wrong axis.
     """
     distinct = [o.strip() for o in options if o and o.strip()]
     # Case-insensitive, because "Cinemark" and "cinemark" are one cinema and a
@@ -80,12 +85,6 @@ def worth_asking(
         return False, "only one option, so there is no decision to make"
     if not consequence.strip():
         return False, "the answer would not change anything, so guessing is safe"
-    if len(unique) > MAX_OPTIONS:
-        return (
-            False,
-            f"{len(unique)} options is too many to choose between in a chat "
-            f"message; pick the most likely and say so",
-        )
     if default.strip().lower() not in unique:
         return (
             False,
