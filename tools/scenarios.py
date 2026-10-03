@@ -580,6 +580,73 @@ def _single_answer(turn: Turn) -> tuple[bool, str]:
     return True, f"{len(texts)} text event(s), {len(set(texts))} distinct"
 
 
+#: The bold name stamp the agent puts at the head of every answer, stripped before
+#: the body is judged. ``agent.bot_name`` owns the format; this only has to recognise
+#: the one shape it writes, and only at the head.
+_STAMP_RE = re.compile(r"^\*\*[^*]+\*\*\s*")
+
+#: The Sources block the renderer writes. Its bullets are added in code, never by the
+#: model, so a turn whose final text is *only* a stamp and this block is a turn whose
+#: answer went somewhere else.
+_SOURCES_RE = re.compile(r"\n?\**Sources\**\n(?:[-*]\s.*\n?)*", re.IGNORECASE)
+
+
+def answer_body(text: str) -> str:
+    """What the reader is actually left with: a text minus its furniture.
+
+    The name stamp and the Sources block are both *added by this repo*, in
+    ``after_model_callback``. Neither is the answer, and a checker that counted them
+    as content would pass a turn that told the user nothing.
+    """
+    body = _STAMP_RE.sub("", (text or "").strip(), count=1)
+    return _SOURCES_RE.sub("", body).strip()
+
+
+def _final_answer_has_a_body(turn: Turn) -> tuple[bool, str]:
+    """The last text event must be an answer, not just the name stamp and Sources.
+
+    **Found live on session ``flow-r5``, 2026-10-03**, on every turn of a three-turn
+    booking flow::
+
+         8. TEXT len=2701  "Hoje é sábado, 03/10/2026…"  + CALL save_summary_to_second_brain
+        10. CALL log_conversation
+        12. TEXT len= 500  "**Text Summarizer Agent**\n\n**Sources**\n- [web]…"
+
+    The answer was real, complete, carried the checkout URL and the seat map, and sat
+    on the event that also carried a tool call. The turn then *ended* on a stub:
+    the renderer had faithfully wrapped a response the model had used for nothing but
+    its citation lines.
+
+    This is gotcha 16's family, inverted. That one was two copies of the answer; this
+    is one copy of the answer and a stub after it -- and the stub wins, because the
+    last event is what the trace reports, what ``response_match_score`` scores, and
+    what a UI that collapses tool-call turns draws. The turn looked healthy in every
+    one of those places while the user read a Sources block with no content above it.
+    """
+    texts = [
+        p["text"]
+        for event in turn.events
+        if event.get("author") == APP
+        for p in _parts(event)
+        if p.get("text")
+    ]
+    if not texts:
+        return False, "no answer text at all"
+    final = texts[-1]
+    if answer_body(final):
+        return True, f"final answer carries {len(answer_body(final))} characters of body"
+
+    earlier = [t for t in texts[:-1] if answer_body(t)]
+    if earlier:
+        return False, (
+            "the turn ends on a stub -- a name stamp and a Sources block with no "
+            f"answer -- while {len(earlier)} earlier text event(s) carry "
+            f"{len(earlier[-1])} characters of body. The answer and its citations "
+            "must be one message, not two."
+        )
+    return False, "the answer is only a name stamp and a Sources block"
+
+
 def _cached_turn(turn: Turn) -> tuple[bool, str]:
     """A repeat of the same prompt must cost zero model calls.
 
@@ -785,6 +852,15 @@ def run_scenario(scenario: Scenario, base_url: str) -> tuple[bool, str, str]:
         turn = Turn(read_events(session_id), prompt)
 
     ok, detail = scenario.check(turn)
+
+    # Universal, like `_no_cache_hit` and for the same reason: every other check
+    # here can pass on a turn that told the user nothing, because a name stamp and a
+    # Sources block are text, and "there is an answer" is satisfied by text that
+    # carries no answer. Applied here rather than composed into each scenario so a
+    # new scenario cannot opt out of it by forgetting.
+    body_ok, body_detail = _final_answer_has_a_body(turn)
+    if not body_ok:
+        return False, f"{detail} | BUT {body_detail}", session_id
     return ok, detail, session_id
 
 
