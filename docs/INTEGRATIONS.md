@@ -190,6 +190,25 @@ external docker network (`agent-net`) by service name rather than a published po
 nothing is exposed on the LAN for the agent's sake. `run.sh` creates that network
 idempotently, and only when `SEARXNG_URL` is set.
 
+### Booking links come with the time they belong to
+
+When a page publishes screenings as schema.org `ScreeningEvent` records — cinemas, airlines and event listings all do — `web_fetch` lists each one with **its time, its venue and its booking URL** on one line:
+
+```
+[sessions on this page]
+- 21:15 Kinoplex Osasco  https://checkout.ingresso.com/?sessionId=87210684&partnership=home
+- 15:20 Cinemark Osasco  https://checkout.ingresso.com/?sessionId=87205315&partnership=home
+```
+
+This is not a nicety. Without it the page's own anchors reach the model as bare session IDs — `?sessionId=87210684&partnership=home` — with no way to tell which is which, and the model cites the page it fetched instead of the session you asked about. Found live: asked for one screening, given the film's page URL.
+
+Two details worth knowing:
+
+- **A record missing any of the three fields is dropped.** Half a record is the defect rather than the fix, so an offer with no venue, or a venue with no `startDate`, does not appear at all.
+- **The date is stripped from the line.** Printing `2026-10-03T21:15` beside every session invites reading a timestamp as a time of day.
+
+Not every venue publishes it. A listing page may carry no sessions at all, in which case the block is absent and per-film pages are the route to a booking link.
+
 ### Pages behind a gate, and where a purchase stops
 
 Some pages hide their content behind a button: an 18+ rating, a region lock, an

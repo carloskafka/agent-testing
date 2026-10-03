@@ -97,6 +97,8 @@ agent-testing/
         |-- test_tools_gif.py             # tools/: generator-artifact sync + the decoder round trip
         |-- test_age_gate.py                 # Age gates: detection, the attestation that is *enforced*, fallbacks
         |-- test_citable_links.py             # A URL the model was shown is a URL it may cite
+        |-- test_web_sessions.py              # Booking links joined to their time, cinema and URL
+        |-- test_conversation_not_notes.py     # Rules 8 and 15: do not persist or ask wrongly
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
             |-- summarizer_eval_set.evalset.json # 4 eval cases
@@ -556,6 +558,11 @@ The pinning is unchanged: `allow_private` alters which addresses are *acceptable
 
 **The converse matters as much, which is why `test_a_url_dropped_by_the_cap_is_not_citable` exists.** The allow-list is what the model was *shown*, so a URL cut by `MAX_LINKS` or `_MAX_LINK_BLOCK_CHARS` must stay uncitable — registering every href found before capping would let the model cite a link it never saw, which is the fabrication the whole mechanism exists to prevent. And `test_web_fetch_actually_registers_the_links_it_shows` drives the real `web_fetch` rather than the helper: the first four tests in that file all passed against the *old* defect, because they call `record_returned_urls` by hand and so never touch the call site that was wrong.
 
+**Two instruction changes came out of `fae42db3` as well, and neither is observable.** `test_conversation_not_notes.py` pins both:
+
+- **Rule 8 gained a clause about *what* to write.** Two of seven notes in that session recorded the conversation rather than the world — *"O usuário confirmou a escolha da sessão"*, *"Conversa finalizada…"*. Both carry valid fingerprints, so they are now reachable by the vault cache: re-asking replays the acknowledgement as a fact. A prohibition is the only form that works here, because both notes were formatted exactly as summaries — title, bullets, topics. What distinguishes them is the *subject*, so the rule names the subject.
+- **Rule 15 gained "listing is not choosing".** The model reported every session correctly, fetched live per rule 13, and simply answered. It was not incapable of asking; it never occurred to. Naming *screenings, seats, dates and times* is what makes the clause fire, and `test_rule_15_does_not_demand_asking_when_there_is_no_fork` guards the over-correction — "always ask before choosing" would turn every summarizer turn into a question.
+
 **Nothing observes any of this**, which is why `test_web_rule_precedence.py` exists. No eval case asks for an exhaustive listing; `response_match_score` is ROUGE-1 over words and cannot see a tool call; `tool_trajectory_avg_score` grades rules 8 and 9 only. A rewrite that demoted the exceptions back to advice would move neither score in either direction. That file also asserts the rule still refuses to search "for no reason", because the failure mode of the fix is over-correction — and it checks the URL-fidelity clause appears exactly once, since two copies of an instruction the model must follow exactly is one copy too many.
 
 **Web pages are untrusted input, unlike the user's text, the vault or their mail.** Anyone can publish a page that ranks for a query, and its text lands verbatim in the model's context. Three independent defences, all required:
@@ -805,6 +812,70 @@ Unset `RENDERER_URL` and the tier is byte-for-byte what it was: the gate is not 
 **The renderer's address vetting is per-request and is *weaker* than `check_url`'s.** Every request — document and every subresource — is intercepted before it leaves, resolved, and aborted on loopback/private/link-local/multicast. What cannot be done is **pinning**: `_pinned_transport` makes httpx dial the exact vetted address, and a browser cannot be made to. So the resolve-then-connect gap that gotcha 19 closed is open here, and the renderer says so in its own docstring rather than implying parity. All four probes refuse: `169.254.169.254`, `127.0.0.1`, `file:///etc/passwd`, and the host's own LAN address.
 
 **A side effect of the DNS choice is worth knowing.** The renderer resolves via `192.168.1.137`, this machine's own LAN address where `systemd-resolved` listens, so the browser sees the host's view of DNS. That resolver returns `0.0.0.0` for ad and tracker domains (`1.1.1.1` resolves them normally), so **the browser inherits that filtering for free** — 12 of the requests on the ingresso.com render were refused that way. The refusal message distinguishes it from a genuine non-public address, because "refused: non-public address" on an ad domain reads like a bug.
+
+### A booking link the model cannot tie to a time — `web_search.py`
+
+Found live on session `fae42db3-3955-4abe-8fd1-b2003e84749d`. The user narrowed to
+one screening (Resident Evil, 21:15, Kinoplex Osasco) and the agent answered with
+`<https://www.ingresso.com/filme/resident-evil?city=osasco>` — the **film page** —
+when the answer wanted was the checkout URL for that session.
+
+**The page had it; the model could not use it.** `_format_links` reads an anchor's
+*inner text* as its label, and these anchors have none — the session lives in a
+sibling JSON-LD block — so what reached the model was five opaque session IDs with
+a wall of times beside them and **nothing joining them**:
+
+```
+- https://checkout.ingresso.com/?sessionId=87205315&partnership=home
+- https://checkout.ingresso.com/?sessionId=87206124&partnership=home
+- https://checkout.ingresso.com/?sessionId=87210538&partnership=home
+```
+
+The model cited the page it fetched because that was the only URL it could
+*attribute*. Five bare URLs look like a working links block, which is why this
+survived a test suite that had already verified links were **citable** and never
+asked whether they were **usable**. The two are different properties and the PR
+that added citable-links had only proved the first.
+
+`_format_sessions` reads schema.org **`ScreeningEvent`** instead, where each record
+is a complete booking unit in three separate fields — `startDate`, `location.name`,
+`offers.url`:
+
+```
+- 21:15 Kinoplex Osasco  https://checkout.ingresso.com/?sessionId=87210684&partnership=home
+```
+
+Measured 5/5 on the live page. **`ScreeningEvent` is the standard vocabulary** for
+exactly this — cinemas, airlines and event listings all publish it — so the labels
+are a consequence of the page already publishing them rather than a scraper that
+breaks on the next redesign. A **record missing any of the three fields is
+dropped**: half a record is the defect, not the fix.
+
+Three things are load-bearing:
+
+- **The date is stripped** from every line. `2026-10-03T21:15` beside each line
+  invites reading a timestamp as a time of day, which is how a listing of *today's*
+  sessions becomes an answer about the 3rd.
+- **Absolute offer URLs only.** A relative one would need joining against a guess
+  about the page's base, and a booking link that resolves somewhere wrong is worse
+  than none, because it looks actionable.
+- **`shown=None` suppresses the block entirely.** The allow-list is what makes a
+  URL *sayable* — `sources.py` drops a `[web]` line naming a URL outside it — so
+  printing booking URLs a caller cannot register would produce an answer that
+  silently loses the link the user asked for. "Never show what you cannot
+  substantiate."
+
+**One helper for three call sites, and that is not tidiness.** The first version
+wired the block into `fetch_page_text` (plain HTTP) and left `render_page_text`
+alone. It looked correct in both places by inspection and did **nothing on the only
+site that publishes `ScreeningEvent`** — which is a JavaScript-rendered page, and
+therefore exactly what the renderer exists for. `_links_and_sessions` is the single
+point, and `test_the_renderer_path_emits_sessions_not_just_the_plain_http_path`
+asserts all three paths route through it rather than trusting a read.
+
+**The listing page publishes no sessions at all** (0 checkout URLs of 50 links), so
+an "all films" flow can only ever hand over per-film pages. That is structural, not
+a parser gap, and it bounds what the flow can promise.
 
 ### The renderer can dismiss an overlay — and stops there
 
