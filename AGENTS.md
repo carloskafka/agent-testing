@@ -83,6 +83,7 @@ agent-testing/
         |-- test_obsidian_tool_schema.py   # MCP JSON-Schema sanitiser (the fallback-path 400)
         |-- test_web_search.py             # SSRF guards, bounded sanitiser, injection framing
         |-- test_web_wiring.py             # The web tier reaching the answer only the permitted way
+        |-- test_web_rule_precedence.py # Rule 13's exceptions override rule 7, and the links rule
         |-- test_sources_web.py            # The [web] line in the Sources block, and its allow-list
         |-- test_digest.py                # The vault reader: provenance, damage, determinism, no-quota
         |-- test_digest_tools.py          # read_day_digest: gating, date validation, bounds, stdout purity
@@ -491,6 +492,15 @@ The failure was **silent**, which is what made it worth fixing rather than worki
 `check_url` therefore takes `allow_private`, and the two callers genuinely differ: `search_web` passes it, `web_fetch` does not, and both verdicts are asserted against the *same* private address so the pair cannot be collapsed into one rule by a later refactor. **Link-local stays refused either way** — that is the cloud-metadata range, no search engine lives there, and the flag is a boundary rather than a switch-off. `test_allow_private_does_not_allow_link_local` fails if that check is dropped, which was verified by deleting it.
 
 The pinning is unchanged: `allow_private` alters which addresses are *acceptable*, not how many lookups happen, so a self-hosted host is still resolved once and dialled by literal address. `test_an_allowlisted_address_is_still_what_gets_pinned` asserts the vetted list is exactly `['172.30.0.2']`, so the DNS-rebinding defence cannot be reopened by this change.
+
+**The order is the point, and the vault is not always allowed to end the question.** Rule 13 is a *gate*: rule 7 searches the vault first and the web is a last resort for facts the vault cannot supply. Two exceptions override that, and rule 13 now says **so explicitly** — the old exhaustive exception lived *inside* "only as a last resort", so it was never reached. Found live on session `f0842db4`, asked *"todos os filmes disponíveis pra hoje à noite"*: `search_text` returned a note titled almost exactly that, the agent stopped, and answered from it with **zero** web calls — and so not one clickable link in the answer.
+
+  - **Exhaustive** ("all movies", "each one", "todos os filmes"): a note summarising a listing is itself an index, not the answer, and each item usually has its own page.
+  - **Live**: today's session times, prices, opening hours, stock. A note is a record of an earlier fetch; answering "tonight" from this morning's note is a wrong answer, not a cached one.
+
+**And a URL that was fetched has to survive.** When a fact came from a page, the rule now requires the URL *on the fact itself* as a markdown link, and in the `summary_content` passed to `save_summary_to_second_brain` — because a note that records times but no URLs cannot answer the same question from the vault tomorrow, which is how the next turn ends up citing a page nobody can click. Every one of the 13 `ingresso.com` notes in the live vault contains **zero** URLs, which is the shape of the problem.
+
+**Nothing observes any of this**, which is why `test_web_rule_precedence.py` exists. No eval case asks for an exhaustive listing; `response_match_score` is ROUGE-1 over words and cannot see a tool call; `tool_trajectory_avg_score` grades rules 8 and 9 only. A rewrite that demoted the exceptions back to advice would move neither score in either direction. That file also asserts the rule still refuses to search "for no reason", because the failure mode of the fix is over-correction — and it checks the URL-fidelity clause appears exactly once, since two copies of an instruction the model must follow exactly is one copy too many.
 
 **Web pages are untrusted input, unlike the user's text, the vault or their mail.** Anyone can publish a page that ranks for a query, and its text lands verbatim in the model's context. Three independent defences, all required:
 
@@ -1048,6 +1058,17 @@ written, and each is its own PR:
   only where `array` is the whole non-null type, and a multi-type union loses that
   member. Three occurrences, all on the fallback path: sessions `8026284f` (Sep 30)
   and `2fe0d9d0` (Oct 2), plus one on Oct 1. See "Tool-schema sanitisation".
+* ~~**a vault note ended a web question the note could not answer.**~~ **Fixed** —
+  session `f0842db4-9d42-4911-8b34-255a3731021f`, and the third complaint on it:
+  asked *"todos os filmes disponíveis pra hoje à noite"*, the agent did `search_text`,
+  found a note titled almost exactly that, stopped, and answered from it with
+  **zero** web calls and so not one clickable link. Rule 13's exhaustive exception
+  was real but lived *inside* "only as a last resort", so it was never reached.
+  Rule 13 now has two exceptions that state they **override rule 7** —
+  exhaustive-per-item, and live facts — plus a requirement to put the URL on the
+  fact as a markdown link and in the saved note. Nothing observes this: no eval
+  case asks for an exhaustive listing and neither criterion can see whether the web
+  tier was used, so `test_web_rule_precedence.py` pins it on the instruction text.
 
 ## Evaluating your changes
 

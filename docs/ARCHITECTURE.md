@@ -204,6 +204,29 @@ Two first-party `FunctionTool`s, `web_search` and `web_fetch`, over a self-hoste
 SearXNG. Gated on `SEARXNG_URL`; unset means no web tools and the agent is
 byte-for-byte unchanged.
 
+The order is the point, and it is a *gate*: the vault is searched first, and the web
+is a last resort for facts the vault cannot supply. Two things override that, and
+rule 13 says so explicitly because implication was not enough — found live on
+session `f0842db4`, where the agent searched the vault, found a note titled almost
+exactly what was asked, stopped, and answered from it with zero web calls and
+therefore not one clickable link:
+
+- **Exhaustive requests** ("all movies", "todos os filmes"). A note summarising a
+  listing is itself an index, not the answer; each item usually has its own page.
+- **Live facts** — today's session times, prices, opening hours, stock. These change
+  within the day, so a note is a record of an earlier fetch. Answering "tonight"
+  from this morning's note is a wrong answer, not a cached one.
+
+And when a fact does come from a page, the URL travels with it: on the fact itself
+as a markdown link, and into the saved note. A note that records times but no URLs
+cannot answer the same question from the vault tomorrow, which is how a follow-up
+turn ends up citing a page nobody can click.
+
+Nothing observes any of this. No eval case asks for an exhaustive listing, and
+neither criterion can see whether the web tier was used at all — `response_match_score`
+is ROUGE-1 over words, `tool_trajectory_avg_score` grades rules 8 and 9 — so
+`tests/test_web_rule_precedence.py` asserts it on the instruction text instead.
+
 Deliberately **not** a third MCP server. The two existing MCP toolsets wrap servers
 we do not own; this is two HTTP GETs against a URL *we* configure, so there is no
 subprocess and no session pool. It copies their gating discipline instead — including
