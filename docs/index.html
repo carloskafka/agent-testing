@@ -1038,11 +1038,23 @@ td code { white-space: nowrap; }
           </div>
           <div class="var">
             <dt><code>OPENROUTER_API_KEY</code> <span class="tag">optional</span></dt>
-            <dd>Free models as a fallback when Gemini rate-limits you. <a href="https://openrouter.ai/keys" rel="noopener">Create a key on OpenRouter</a>.</dd>
+            <dd>Free models, used when the tier ahead of them fails. Several keys separated by <code>;</code> give several times the daily budget. <a href="https://openrouter.ai/keys" rel="noopener">Create a key on OpenRouter</a>.</dd>
+          </div>
+          <div class="var">
+            <dt><code>OPENCODE_API_KEY</code> <span class="tag">optional</span></dt>
+            <dd>OpenCode Zen, which <b>leads the default chain</b>. Unset and the tier is simply absent, not broken.</dd>
           </div>
           <div class="var">
             <dt><code>MODEL_PROVIDER</code> <span class="tag">optional</span></dt>
-            <dd>Set to <code>openrouter</code> to use the key above; defaults to <code>gemini</code>. See <a href="https://github.com/carloskafka/agent-testing/blob/main/docs/MODELS.md" rel="noopener">Models</a>.</dd>
+            <dd>The default builds <code>OpenCode &rarr; free OpenRouter &rarr; Gemini</code> &mdash; Gemini is last because it needs no key, so it is the floor. <code>openrouter</code> builds an OpenRouter-led chain with no Gemini at all. See <a href="https://github.com/carloskafka/agent-testing/blob/main/docs/MODELS.md" rel="noopener">Models</a>.</dd>
+          </div>
+          <div class="var">
+            <dt><code>RENDERER_URL</code> <span class="tag">optional</span></dt>
+            <dd>A headless-browser renderer for pages that build their content in JavaScript. Unset and those pages come back as navigation only.</dd>
+          </div>
+          <div class="var">
+            <dt><code>RENDERER_DISMISS_HOSTS</code> / <code>RENDERER_DISMISS_TEXT</code> <span class="tag">optional</span></dt>
+            <dd>Which sites the renderer may click, and which button labels count as a dismissal. <b>Both blank means the primitive is off</b>, which is the intended default &mdash; a live write on install is one nobody chose. Set them on the <i>renderer</i> project, not the agent.</dd>
           </div>
         </dl>
       </li>
@@ -1286,15 +1298,15 @@ breeds, varying in size, color, and temperament.</code></pre>
     </div>
     <div class="card">
       <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/ARCHITECTURE.md" rel="noopener">Architecture</a></p>
-      <p class="card__body">How a turn flows, source provenance, vault selection, the cache, Docker topology.</p>
+      <p class="      <p class="card__body">Vault, web and renderer tiers, <code>**Sources**</code> provenance, and the model chain.</p></p>
     </div>
     <div class="card">
       <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/MODELS.md" rel="noopener">Models</a></p>
-      <p class="card__body">Switching between Gemini and free OpenRouter models.</p>
+      <p class="card__body">The chain: OpenCode, then free OpenRouter, then Gemini as the floor.</p>
     </div>
     <div class="card">
       <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/TESTING.md" rel="noopener">Testing</a></p>
-      <p class="card__body">Prompt examples for the web UI: good, bad, and edge cases.</p>
+      <p class="card__body">Prompt examples for the web UI &mdash; including the booking flow, which is the one that finds real defects.</p>
     </div>
   </section>
 
@@ -1435,6 +1447,28 @@ breeds, varying in size, color, and temperament.</code></pre>
         what came back &mdash; the question has to be the <code>ask_user</code> tool, and
         the answer has to say <code>answered_by: user</code>. Declining, or answering with
         something that was not on the list, deliberately does not count.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">A turn died with "litellm.Timeout" and nothing retried</p>
+      <p class="card__body">
+        The fallback chain only advances on a failure that carries an HTTP status
+        &mdash; 429, 5xx. A <b>client-side timeout carries none</b>, so it ends the turn
+        with every remaining model untried. This is deliberate on ADK's part: a timed-out
+        request may have been processed, and failing over risks paying for and acting on
+        one prompt twice. It bites hardest now that the chain leads with a free endpoint.
+        Read <code>docs/MODELS.md</code> for the open fix.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">The agent answered instead of asking which one</p>
+      <p class="card__body">
+        Rule 15 says to <code>ask_user</code> when a choice is a genuine fork, and names
+        screenings, seats, dates and times &mdash; the things a note goes stale on. Listing
+        them is right; <b>choosing</b> one for you is not, and needs a question. If it never
+        asks, the turn is not broken so much as unanswered: check the session for a
+        <code>ask_user</code> call. Nothing in the eval loop can see this either way, so
+        it will not show up as a score change.
       </p>
     </div>
     <div class="card">

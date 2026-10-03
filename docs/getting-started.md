@@ -17,6 +17,14 @@ Everything is optional except one model key. The interesting part of this repo i
 | Gmail | read-only inbox tools | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
 | Obsidian | retrieval tools over your vault | set automatically by `run.sh` |
 | Web search | falls back to SearXNG when the vault has nothing | `SEARXNG_URL` |
+| Renderer | reads pages that build their content in JavaScript | `RENDERER_URL` |
+| Age gates | asks *you* to confirm, then reads past the gate — it never attests for you | `RENDERER_DISMISS_HOSTS`, `RENDERER_DISMISS_TEXT` |
+
+The last one is deliberately **off unless you set it**. Clearing an age gate is a real
+click, so what the renderer may click is your decision rather than the model's: set the
+hosts to enable it and the phrases to say what counts as a dismissal. A dismiss can
+never advance the page or submit a form, so no phrase list reaches a checkout — see
+[AGENTS.md](https://github.com/carloskafka/agent-testing/blob/main/AGENTS.md).
 
 `.env` holds real keys and is git-ignored. Never commit it.
 
@@ -116,6 +124,9 @@ which traps are easy to fall into again. Read it before changing anything in
 | `obsidian-mcp` restarting | the MCP server exits rather than serve a wrong vault — read its error, it names the candidates |
 | No Gmail tools in the UI | all three `GOOGLE_*` vars must be set; see [Gmail setup](INTEGRATIONS.md#gmail-read-only) |
 | No web tools in the UI | `SEARXNG_URL` must be set (and `WEB_SEARCH_ENABLED` not `false`) |
+| A page behind an age gate will not open | `RENDERER_DISMISS_HOSTS` / `RENDERER_DISMISS_TEXT` are blank, which means the dismiss primitive is **off**. Set both on the renderer project and restart it. |
+| The agent gave a page URL instead of a booking link | Look for `[sessions on this page]` in the tool result. No block means the venue does not publish schema.org `ScreeningEvent`, and the per-film page is the route. |
+| An answer is a `**Sources**` block with nothing above it | The turn ended on a stub rather than the answer. Check an earlier event in the session — the answer is usually there. |
 | Answer has no `**Sources**` block | normal when nothing in the vault is relevant — the model lists nothing rather than inventing a citation |
 | Answer dated wrongly on a "today" question | the agent has no clock; it must call `current_datetime` first. A wrong date is a prompt problem, not a cache problem |
 | Eval scores look great but nothing is being tested | run evals with `CACHE_ENABLED=false` — see [AGENTS.md gotcha 10](../AGENTS.md) |

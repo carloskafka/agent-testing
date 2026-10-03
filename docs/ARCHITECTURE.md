@@ -39,11 +39,15 @@ agent-testing/
 `-- text_summarizer/            # The ADK agent package (Python)
     |-- __init__.py             # Entrypoint: loads .env, inits observability, exposes root_agent
     |-- agent.py                # The LlmAgent definition: model DI + instructions + callbacks
+    |-- ask_user.py             # A turn that pauses: the HITL fork, with the attestation recorded
+    |-- model_chain.py          # The model chain, and the guard that keeps a foreign history off Gemini
+    |-- breaker.py              # Marks an OpenRouter account spent, per key rather than per model
     |-- clock.py                # current_datetime: the model has no clock of its own
     |-- digest.py               # What the agent learned on a day, read off the vault (CLI)
     |-- digest_tools.py         # read_day_digest: the same reader as a model-callable tool
     |-- eval_scoring.py         # ROUGE-1 (response_match_score) matching eval-set golden answers
-    |-- web_search.py           # Optional third retrieval tier: SearXNG search + guarded page fetch
+    |-- web_search.py           # Optional third retrieval tier: SearXNG search + guarded page fetch,
+    |                          # plus the renderer fallback, age-gate advisories and session extraction
     |-- obsidian_tools.py       # Optional MCP tools for an Obsidian vault
     |-- gmail_tools.py          # Optional MCP tools for read-only Gmail access
     |-- gmail_mcp_server.py     # Stdio Gmail MCP server spawned by gmail_tools
@@ -259,14 +263,136 @@ A `[web]` source line renders in the same canonical block as `[obsidian]`, with 
 slot two means "where this came from", which is the honest answer for a web page. A
 `[web]` line citing a URL the search never returned is **dropped** — the rule the
 vault already applies to note titles. That allow-list is recorded by the tool at the
-moment it returns the URLs, because reconstructing it later by scanning session
+moment it shows the URLs, because reconstructing it later by scanning session
 events does not work: `session.events` is unpopulated under `adk web`'s database
 session service, so every `[web]` citation was silently dropped in the one deployment
 that matters, while unit tests that supplied events by hand passed.
 
+The list must be what the model was **shown**, not what was fetched — a distinction
+that was wrong until a live session proved it. The tool was registering the page it was
+called with, while the `[links on this page]` block handed the model a page full of
+*other* URLs, so the model read a link, cited it, and had the line silently dropped. On
+a cinema listing that made the useful citation the forbidden one: the page the agent
+fetches is the film index, and the thing a reader needs is the per-session checkout
+link inside it. The converse holds too — a URL cut by the link cap was never shown, so
+it stays uncitable, or the model could cite a link it never saw.
+
 `WEB_SEARCH_ENABLED=false` removes the tools while leaving `SEARXNG_URL` alone —
 which is what eval runs want, since live results change daily and would make
 `response_match_score` measure the day rather than the instruction edit.
+
+### Pages that need JavaScript — the renderer
+
+A plain HTTP GET cannot run JavaScript, and a measurable number of pages build their
+content with it. One of them returned 94,700 bytes of HTML that reduced to **183
+characters** of visible text — a navigation shell with none of the data the user asked
+for. Through a headless browser the same URL yielded 2,024 characters naming the actual
+films, in 2.1s.
+
+So `web_fetch` falls back to a browser when one is configured (`RENDERER_URL`) and the
+page came back nearly empty. It is **a fallback, not a second path** — the plain GET
+runs first and the browser is only used when what came back is too thin to be the page.
+
+The renderer is a **separate compose project** (`~/Downloads/apps/chromium`) joined to
+the shared bridge by service name. Deliberately outside this repository: it executes
+JavaScript written by whoever published the page, so it holds no vault mount, no API key
+and no published port, and can be stopped without touching the agent. Its per-request
+address vetting is *weaker* than `check_url`'s — every request is resolved and aborted on
+a private address, but a browser cannot be made to dial the vetted literal, so the
+resolve-then-connect gap stays open and its docstring says so rather than implying
+parity.
+
+Unset `RENDERER_URL` and the tier is byte-for-byte what it was: the gate is not part of
+`build_web_search_tools`, the fallback is simply never taken.
+
+### Pages behind a gate, and where a purchase stops
+
+Some pages hide their content behind a button — a cookie banner, a consent wall, an
+**age gate**. `web_fetch` recognises one and names it, appending an advisory to the page
+rather than replacing it.
+
+**The advisory is appended, never substituted, and that is a correction rather than a
+preference.** Measured: a cinema's 18+ overlay is *visual*, and `innerText` reads
+straight through it, so a plain render already carried the session, the room and the
+seat map. Refusing on the marker match alone hid a page the model could read and cost
+the user a question nobody needed to answer — the exact false positive the design was
+meant to avoid, and it passed every test, because the tests asserted the behaviour
+instead of measuring the page. So the page is returned whole, the gate is named, and
+the model asks only if it finds something missing.
+
+Clearing the gate is a real click, so it runs in the renderer, which treats it as the
+one write it has. The safety is **structural, not a phrase list**:
+
+| Property | Why it holds |
+|---|---|
+| **a dismiss must not navigate** | *Accept all cookies* does not navigate, *Buy ticket* does. No allow-listed phrase reaches a checkout, because clearing a layer is not permitted to advance the page. |
+| **a dismiss is not a form submit** | A purchase button on a real checkout *is* a form submit, so it is refused in the pass that **decides**, before the click exists. |
+
+Which sites it may act on, and which labels count as a dismissal, are **operator lists**
+(`RENDERER_DISMISS_HOSTS`, `RENDERER_DISMISS_TEXT`) on the renderer, not the agent —
+the renderer is the process that runs a stranger's JavaScript. Both blank means the
+primitive is **off**, which is the intended default: a write that is live on install is a
+write nobody chose. Two of its refusals fall back to reading the page normally, so being
+wrong about a gate never costs the reader the page.
+
+**The one place a human is required.** An age gate is an attestation, and that is the
+user's statement. On the agent side `web_fetch(attested=True)` is **checked, not
+trusted**: `ask_user` records the attestation on one branch (`answered_by: "user"`) and
+declined, unrecognised and no-turn-context record nothing, because all three are the
+agent choosing for itself. A model that reads the refusal learns exactly what the flag
+does — a boolean the model supplies is a boolean the model supplies.
+
+**Where a purchase stops is at the checkout.** The agent reads the page — session,
+room, seat rows, price — and hands over the exact URL. It does not buy, pay, reserve or
+claim anything it did not do. Ingresso.com requires an account to buy and the renderer
+holds no credentials *by design*; verified separately, the checkout URL cannot report
+payment status either, because it identifies a **cart** (`sessionId`), not an order.
+
+### Booking links carry their time
+
+A page's own anchors reach the model as bare session IDs when the session data lives in
+a sibling JSON-LD block, so the model cannot tell which link is which and cites the page
+it fetched instead. `_format_sessions` reads schema.org **`ScreeningEvent`**, where each
+record is a complete booking unit in three separate fields:
+
+```
+- 21:15 Kinoplex Osasco  https://checkout.ingresso.com/?sessionId=87210684&partnership=home
+```
+
+`ScreeningEvent` is the standard vocabulary for exactly this — cinemas, airlines and
+event listings all publish it — so the labels are a consequence of the page already
+publishing them rather than a scraper that breaks on the next redesign. A record
+missing any of the three fields is **dropped**: half a record is the defect, not the fix.
+
+A **citable** URL is not a **usable** one, and the two were tested separately by
+mistake. Five bare URLs look like a working links block; the failure is invisible until
+someone asks for one specific session.
+
+### The answer and its citations are one message
+
+A turn that ends on a stub is the failure mode worth designing around. Found live on
+session `flow-r5`, on every turn of a booking flow: the answer was real — session time,
+seat map, age-gate notice, checkout URL — and sat on the event that also carried a tool
+call, while the turn **ended** on a response holding only the name stamp and the Sources
+block.
+
+The stub wins everywhere it matters. The trace reports the last event, so does
+`response_match_score`; `_answered`, `_cited_web_source` and `_single_answer` all pass
+it; so does any UI that collapses tool-call turns. So the general rule is:
+
+> **A property of the last event is what almost everything downstream reads.** "The
+> answer exists somewhere in this turn" is not a sufficient thing to assert.
+
+It is the same family as gotcha 16, inverted — that one was two copies of the answer,
+this is one copy and a stub after it. **Rules 7 and 13 both caused it**, by saying to
+cite "at the very END of your answer" while rules 8 and 9 put the persistence tools
+*after* the answer; the citation lines landed after a tool call and "the very end" was
+readable as a final message of its own. Both now require the source lines **in the same
+message** as the bullets.
+
+The fix is in the instruction and not in the ordering: moving `save_summary_to_second_brain`
+earlier would put the `**Text Summarizer Agent**` stamp into the user's vault, since the
+stamp is applied by `after_model_callback`.
 
 ## `**Sources**` Provenance
 
