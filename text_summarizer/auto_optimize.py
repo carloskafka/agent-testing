@@ -53,13 +53,17 @@ HISTORY_FILE = AGENT_DIR / "optimization_history.json"
 #: 12 know the date before answering
 #: 13 web search as a last resort
 #: 14 answer "what did you learn" from the vault, and cite it
+#: 16 a page behind an age gate, and where a purchase stops
 #:
 #: Rule 10 is deliberately absent: its closing sentence ("saved to the second
-#: brain as ...") is in every golden answer, so ROUGE-1 does see its loss. Rule 14
-#: is present precisely because nothing observes it -- the digest answers it
-#: governs are not in the eval set at all, so a rewrite dropping it would silently
-#: un-cite every digest turn, which is a bug this repo had once already.
-REQUIRED_RULES = (7, 8, 9, 11, 12, 13, 14)
+#: brain as ...") is in every golden answer, so ROUGE-1 does see its loss. Rules
+#: 14 and 16 are present precisely because nothing observes them -- the digest and
+#: booking turns they govern are not in the eval set at all. Rule 14's loss was a
+#: bug this repo had once already (every digest answer came back uncited); rule
+#: 16's would be the mirror image and no less silent. A rewrite that dropped it
+#: would leave the agent setting ``attested=true`` on its own, or claiming a
+#: purchase it did not make, and ROUGE-1 would prefer the shorter instructions.
+REQUIRED_RULES = (7, 8, 9, 11, 12, 13, 14, 16)
 
 
 def missing_required_rules(instructions):

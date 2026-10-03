@@ -223,7 +223,7 @@ def test_tool_schemas_are_plain():
 
     for func, expected in (
         (ws.web_search, {"query", "max_results"}),
-        (ws.web_fetch, {"url", "max_chars"}),
+        (ws.web_fetch, {"url", "max_chars", "attested"}),
     ):
         schema = FunctionTool(func)._get_declaration().parameters_json_schema or {}
         properties = schema.get("properties", {})

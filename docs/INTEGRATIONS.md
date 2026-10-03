@@ -190,6 +190,51 @@ external docker network (`agent-net`) by service name rather than a published po
 nothing is exposed on the LAN for the agent's sake. `run.sh` creates that network
 idempotently, and only when `SEARXNG_URL` is set.
 
+### Pages behind a gate, and where a purchase stops
+
+Some pages hide their content behind a button: an 18+ rating, a region lock, an
+"are you over 18?" modal. `web_fetch` recognises that and returns a refusal naming
+the gate rather than a page of nothing. The agent then calls `ask_user`, and only
+if **you actually answered** may it re-fetch with `attested=true`.
+
+That flag is **checked, not trusted**. It is refused unless `ask_user` recorded a
+real answer in the session, because a boolean the model supplies is a boolean the
+model supplies — a model that reads the refusal learns exactly what the flag does.
+Only the branch where a human picked an option records it; declined, unrecognised
+and "no turn context" all leave the default, and all three are the agent choosing.
+
+Clearing the gate is a real click, so it runs in the **renderer**, and the renderer
+treats it as the one write it has:
+
+- **A dismiss must not navigate.** The URL is compared before and after; a click
+  that moves the page is reported as an error rather than as success.
+- **A dismiss is not a form submit.** An element inside a `<form>` is refused before
+  anything is clicked.
+
+Those two properties are what make it general-purpose rather than Ingresso-specific,
+and they are what a purchase cannot get past: *Accept all cookies* does not
+navigate, *Buy ticket* does. No allow-listed phrase reaches a checkout.
+
+Which pages it may act on, and which labels count as a dismissal, are operator
+lists in the **renderer's** environment rather than the agent's — the renderer is
+the process that executes a stranger's JavaScript, so that choice is not the
+model's to make. Both blank means the primitive is **off**.
+
+```env
+RENDERER_DISMISS_HOSTS=ingresso.com
+RENDERER_DISMISS_TEXT=I'm aware,I agree,I accept,Accept all,Got it,Continue,Allow all
+```
+
+**Where the flow stops is a purchase, and it stops at the checkout.** The agent
+reads the page — session, room, seat rows, price — and hands you the exact URL to
+act on. It does not buy, pay, reserve or complete anything, and there is no tool
+that would let it. A payment link you are given is a payment you make yourself.
+
+This is not a missing feature. Ingresso.com requires an account to buy, and the
+renderer holds no credentials by design: it is the container with no vault, no API
+key and no access to anything else in the deployment. It is also the only thing
+here that would spend your money on a page written by a stranger.
+
 ### Retrieved pages are treated as untrusted
 
 Anyone can publish a page that ranks for a query, and its text reaches the model
