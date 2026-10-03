@@ -32,6 +32,8 @@ from __future__ import annotations
 import pathlib
 import re
 
+import pytest
+
 AGENT = pathlib.Path(__file__).resolve().parents[1] / "agent.py"
 
 
@@ -50,48 +52,61 @@ def _rule(number: int) -> str:
 
 # --- the instruction that caused it -------------------------------------------
 
+#: Both rules that emit source lines. **Both, and that is the point.**
+#:
+#: The first version of this fix corrected rule 13 only, and the split then shipped
+#: live on the vault path unchanged. Rule 7 is the *primary* path -- retrieve before
+#: summarizing -- so a vault-sourced answer was the one most likely to end on a stub,
+#: and it was the one left inviting it. Parameterised rather than duplicated so a
+#: third source-emitting rule cannot be added without appearing here.
+SOURCE_RULES = (7, 13)
 
-def test_rule_13_puts_the_source_lines_in_the_answer_message():
+
+@pytest.mark.parametrize("number", SOURCE_RULES)
+def test_the_source_lines_go_in_the_answer_message(number):
     """The clause has to be a positive instruction, not a prohibition.
 
     "Do not send the citations separately" leaves the model to work out what
-    *instead*; "they go in the same message as your bullets" is the shape.
+    *instead*; "in the same message as your bullets" is the shape.
     """
-    rule = _rule(13)
-    assert "IN THE SAME MESSAGE as your bullets" in rule
+    rule = _rule(number)
+    assert "IN THE SAME MESSAGE" in rule, f"rule {number} does not say where the lines go"
 
 
-def test_rule_13_no_longer_says_the_very_end():
+@pytest.mark.parametrize("number", SOURCE_RULES)
+def test_no_rule_says_the_very_end(number):
     """The phrase that caused the split must be gone, not merely supplemented.
 
     Leaving it in place alongside the new clause gives the model two readings of one
     instruction, and the old one is the one it was already following.
     """
-    rule = _rule(13)
+    rule = _rule(number)
     assert "at the very END of your answer" not in rule, (
-        "'at the very END of your answer' is what a model reads as 'a final message "
-        "of its own'; it has to be removed, not just joined by a second reading"
+        f"rule {number} still says 'at the very END of your answer', which is what a "
+        "model reads as 'a final message of its own'"
     )
 
 
-def test_rule_13_still_demands_the_citations():
+@pytest.mark.parametrize("number", SOURCE_RULES)
+def test_the_citations_are_still_required(number):
     """The control: the clause must not have turned into "skip the sources"."""
-    rule = _rule(13)
-    assert "[web][@@ADK_WEB@@][@@ADK_MODEL@@]" in rule
-    assert "@@ADK_WEB@@" in rule
+    rule = _rule(number)
+    assert "@@ADK_VAULT@@" in rule or "@@ADK_WEB@@" in rule
+    assert "EXACTLY" in rule, f"rule {number} must still demand the template verbatim"
 
 
-def test_rules_8_and_9_still_run_after_the_answer():
-    """Why the split was possible, recorded so a future fix knows the constraint.
+def test_no_rule_at_all_says_the_very_end():
+    """The sweep, so a future rule cannot reintroduce it unnoticed.
 
-    Persistence and logging are required to happen *after* the answer is produced, so
-    there is always a tool call between the answer and the final model response. The
-    instruction has to survive that rather than the ordering being changed -- a
-    ``save_summary`` carrying the answer would also put the name stamp in the note.
+    The tests above cover the rules that exist today. This one reads the whole block,
+    which catches the case they cannot: a *new* rule emitting source lines with the
+    old wording, which would ship the defect with no test failing.
     """
-    for number in (8, 9):
-        rule = _rule(number)
-        assert "ALWAYS" in rule, f"rule {number} must still require its tool"
+    offenders = re.findall(r"^(\d+)\. [^\n]*very END", _instructions(), re.M)
+    assert not offenders, (
+        f"rule(s) {offenders} say 'very END of your answer', which invites the "
+        "citations into a message of their own"
+    )
 
 
 # --- the shape it must not regress into ---------------------------------------

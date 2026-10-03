@@ -9,6 +9,10 @@ uses ADK's default <http://127.0.0.1:8000>.
 with `**Text Summarizer Agent**`, which is rendered in code and is not part of the
 summary. `BOT_NAME=` (empty) turns it off.
 
+The stamp is also **not an answer**: it is added in code, alongside the `**Sources**`
+block. An answer consisting of those two and nothing else is a turn that ended in the
+wrong place.
+
 ## Good Examples (Expected Behavior)
 
 These inputs should produce clean, accurate bullet-point summaries.
@@ -172,6 +176,60 @@ Summarize this text and go online to add more detail.
 
 The agent is explicitly told never to search to enrich text you gave it — the text
 and the vault are the source there. Expect it to decline the search and summarise.
+
+## The Booking Flow (the one that finds real defects)
+
+This is the flow to run when you want to know whether the web tier is genuinely working.
+Each turn depends on the last, and the prompts are the ones that found three separate
+defects live — so run them **in order**, in one session.
+
+**Turn 1 — a listing.**
+
+```
+Liste os filmes para assistir hoje em osasco
+```
+
+Expect bullet points per film, each with the session times, and every time carrying the
+page it came from as a markdown link.
+
+**Turn 2 — one cinema.**
+
+```
+Quais sessões tem hoje no Cinemark Osasco?
+```
+
+**Turn 3 — the fork.**
+
+```
+Quero a sessão das 15:20 no Cinemark Osasco. Me passe o link de compra.
+```
+
+Expect `https://checkout.ingresso.com/?sessionId=...` **as a link on the fact itself**,
+not just the cinema's page URL, plus the room and the seat map — and an explicit
+statement that the seat choice and the payment are yours.
+
+### How to judge it
+
+**Do not judge by whether you can see an answer.** The failure mode this flow found is
+invisible in the UI: the answer was on an *earlier* event and the turn **ended** on a
+response containing only the name stamp and the `**Sources**` block. The trace, the
+score, and any UI that collapses tool-call turns all report that stub.
+
+Two things to look for instead:
+
+- **A `**Sources**` block with nothing above it.** That is the defect.
+- **The checkout URL on the fact**, not only in the sources.
+
+`tools/scenarios.py` checks both, from the persisted session rather than the UI.
+
+### What it found, so you know what to look for
+
+| Symptom | What it meant |
+|---|---|
+| Answer present, session times and checkout URL "missing" | The turn ended on a stub — the answer was on an earlier event |
+| A cinema page URL instead of a `checkout.ingresso.com` link | The links reached the model as bare session IDs with nothing tying one to a time |
+| The turn died after several tool calls | A wrong-typed tool argument raised instead of returning data, so no note and no answer |
+| Notes titled *"Confirmacao Sessao…"* or *"Conversa finalizada…"* | The agent summarised the conversation instead of the world |
 
 ## Edge Cases (Interesting to Test)
 

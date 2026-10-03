@@ -935,13 +935,21 @@ copy and a stub after it. The general rule worth keeping: *a property of the **l
 event is what almost everything downstream reads*, so "the answer exists somewhere in
 this turn" is not a sufficient thing to assert.
 
-**The model did it because rule 13 invited it.** It said to cite "at the very END of
-your answer", while rules 8 and 9 put `save_summary_to_second_brain` and
-`log_conversation` *after* the answer — so the citation lines came after a tool call and
-"the very end" was available to be read as "a final message of its own". Rule 13 now
-says the source lines go **in the same message** as the bullets, and the old wording is
-gone rather than supplemented: leaving both readings gives the model a choice and it
-takes the one it was already following.
+**The model did it because the instructions invited it — and *both* of them did.**
+Rule 13 said to cite "at the very END of your answer", while rules 8 and 9 put
+`save_summary_to_second_brain` and `log_conversation` *after* the answer — so the
+citation lines came after a tool call and "the very end" was available to be read as "a
+final message of its own". Both now say the source lines go **in the same message** as
+the bullets, and the old wording is gone rather than supplemented: leaving both readings
+gives the model a choice and it takes the one it was already following.
+
+**Rule 7 was missed on the first pass, and it is the worse of the two.** It carries the
+identical wording for the `[obsidian]` lines, and it is the *primary* path — retrieve
+before summarizing — so a vault-sourced answer was the one most likely to end on a stub
+and the one left inviting it. A single-rule test passed the whole time it took. The
+tests are now parameterised over `SOURCE_RULES = (7, 13)` and a sweep asserts that **no**
+rule says "very END of your answer", which is what catches the case a per-rule list
+cannot: a *new* source-emitting rule carrying the old wording.
 
 **The fix is in the instruction and not in the ordering**, because moving
 `save_summary_to_second_brain` earlier would open a worse hole — the name stamp is
