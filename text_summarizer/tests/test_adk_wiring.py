@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncGenerator
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -235,7 +236,14 @@ def test_cache_hit_replays_the_stored_note_verbatim(monkeypatch, tmp_path):
     stored = "- Known summary line one.\n\n## From the vault\n[[Old Note]]"
     brain = os.path.join(vault, "Second Brain")
     os.makedirs(brain, exist_ok=True)
-    with open(os.path.join(brain, "2026-09-25 - known.md"), "w", encoding="utf-8") as fh:
+    # Today's date, not a literal. ``find_cached_summary`` refuses a note older
+    # than ``CACHE_MAX_AGE_DAYS`` (7), and this fixture used to be written as a
+    # hardcoded ``2026-09-25 - known.md``. That made the test expire: it passed
+    # until the calendar crossed the window, then failed on a machine that had
+    # changed nothing, three tests in three unrelated files at once.
+    today = date.today().isoformat()
+    note = os.path.join(brain, f"{today} - known.md")
+    with open(note, "w", encoding="utf-8") as fh:
         fh.write(
             "---\nsource_fingerprint: "
             + source_fingerprint(prompt)
@@ -260,7 +268,7 @@ def test_cache_hit_replays_the_stored_note_verbatim(monkeypatch, tmp_path):
     assert SOURCES_HEADING not in final
     # ...and absent from the note, which is what keeps a replay byte-identical
     # on disk and keeps the stamp out of every note ever written.
-    with open(os.path.join(brain, "2026-09-25 - known.md"), encoding="utf-8") as fh:
+    with open(note, encoding="utf-8") as fh:
         assert "Text Summarizer Agent" not in fh.read()
     # The renderer is registered but never reached: the short-circuit in
     # before_model_callback returns before the model is called, so no

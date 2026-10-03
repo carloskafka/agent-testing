@@ -26,6 +26,7 @@ import asyncio
 import os
 import pathlib
 from collections.abc import AsyncGenerator
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -375,7 +376,10 @@ def test_a_cache_hit_carries_the_name_and_leaves_the_note_untouched(monkeypatch,
     stored = "- Known summary line one.\n\n## From the vault\n[[Old Note]]"
     brain = os.path.join(vault, "Second Brain")
     os.makedirs(brain, exist_ok=True)
-    path = os.path.join(brain, "2026-09-25 - known.md")
+    # Today's date: `find_cached_summary` refuses a note older than
+    # `CACHE_MAX_AGE_DAYS`, so a hardcoded filename made this test expire on a
+    # calendar rather than on a behaviour. See the same fix in test_adk_wiring.
+    path = os.path.join(brain, f"{date.today().isoformat()} - known.md")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(
             "---\nsource_fingerprint: "
