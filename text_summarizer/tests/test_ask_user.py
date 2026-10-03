@@ -43,7 +43,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from text_summarizer import ask_user as mod
 from text_summarizer.agent import root_agent
-from text_summarizer.ask_user import ask_user, worth_asking
+from text_summarizer.ask_user import _clean, ask_user, worth_asking
 
 # --- the gate -----------------------------------------------------------------
 
@@ -94,16 +94,74 @@ def test_options_differing_only_in_case_are_one_option():
     assert allowed is False
 
 
-def test_too_many_options_is_refused_rather_than_asked():
-    """Past MAX_OPTIONS this stops being a decision and becomes a form."""
-    options = [f"Cinema {i}" for i in range(mod.MAX_OPTIONS + 1)]
+def test_a_long_list_is_still_a_question():
+    """The cap is gone, and this is what holds it gone.
+
+    There used to be a five-option ceiling, on the reasoning that past a handful a
+    question stops being a decision. That reasoning was about the agent's
+    judgement and it produced the worst outcome available for a real list: asked
+    *"all the films showing tonight"*, ``ask_user`` **refused the question**, took
+    its own ``default``, and answered with one film. It looked like an answer.
+
+    So the gate is now on the *shape* of the question, not its length. What a long
+    list costs is a taller card; what the cap cost was a wrong answer.
+
+    ``MAX_OPTION_CHARS`` still bounds each label, which is the bound that was doing
+    the real work.
+    """
+    options = [f"Film {i}" for i in range(11)]
     allowed, reason = worth_asking(
         options=options,
         default=options[0],
-        consequence="different session times",
+        consequence="each one is a film the user might actually want to see",
     )
-    assert allowed is False
-    assert "too many" in reason
+    assert allowed is True, reason
+    assert len(options) == 11
+
+    # And it reaches the UI rather than being answered for the user: an
+    # eleven-button card is the whole point, so the option list is not truncated
+    # anywhere between the model and the screen.
+    cleaned = _clean(
+        question="Which film?",
+        options=options,
+        default=options[0],
+        consequence="different showtimes",
+    )
+    assert cleaned["allowed"] is True
+    assert cleaned["options"] == options
+
+
+def test_a_label_is_still_bounded():
+    """What does the bounding, now that the count is not.
+
+    An option is a label in a chat bubble, not a paragraph. Without this, a model
+    that pastes a page into an option produces a card nobody can read and a
+    default that cannot be matched back.
+    """
+    long_label = "A" * (mod.MAX_OPTION_CHARS + 200)
+
+    asked: list = []
+
+    class _Ctx:
+        function_call_id = "fc1"
+        tool_confirmation = None
+
+        def request_confirmation(self, **kwargs):
+            asked.append(kwargs)
+
+    result = ask_user(
+        question="Which?",
+        options=[long_label, "B"],
+        default="B",
+        consequence="different showtimes",
+        tool_context=_Ctx(),
+    )
+    assert result["status"] == "asked"
+    assert asked, "no confirmation requested, so nothing was drawn"
+    assert len(result["options"][0]) == mod.MAX_OPTION_CHARS
+    assert result["options"][1] == "B"
+    # Truncated on the way out, so the label the user reads is the bounded one.
+    assert asked[0]["payload"]["options"][0] == "A" * mod.MAX_OPTION_CHARS
 
 
 def test_a_default_outside_the_options_is_refused():

@@ -129,11 +129,40 @@ test('one option is not a menu', () => {
   assert.strictEqual(api.cardFromEvent(event), null);
 });
 
-test('too many options is left to the stock checkbox, not given nine buttons', () => {
-  const event = clone(REAL_CONFIRMATION_EVENT);
-  event.content.parts[0].functionCall.args.originalFunctionCall.args.options =
-    ['a', 'b', 'c', 'd', 'e', 'f'];
-  assert.strictEqual(api.cardFromEvent(event), null);
+test('every option is drawable, however many there are', () => {
+  /** The cap is gone on both sides, and this is what holds them there.
+   *
+   *  Both halves used to carry the same hardcoded 5 -- `ask_user.MAX_OPTIONS`
+   *  and a private copy in this file. That looked like a guard and was a trap:
+   *  if either moved alone, the tool would accept a question the shim refused to
+   *  draw, and the user would see the stock checkbox-and-Submit form and conclude
+   *  the agent had never asked. Nothing failed; the feature was just quietly
+   *  absent, which is the shape of the bug this file's own camelCase test is
+   *  about.
+   *
+   *  A long list costs a taller card. The cap it replaced cost an answer: the
+   *  tool refused "all the films showing tonight" and picked one itself.
+   */
+  for (const n of [2, 3, 5, 6, 9, 11, 20, 47]) {
+    const event = clone(REAL_CONFIRMATION_EVENT);
+    event.content.parts[0].functionCall.args.originalFunctionCall.args.options =
+      Array.from({ length: n }, (_, i) => `Option ${i + 1}`);
+
+    const card = api.cardFromEvent(event);
+    assert.ok(card, `${n} options must still be drawable`);
+    assert.strictEqual(card.options.length, n);
+
+    // ...and the buttons really are rendered, not just described.
+    const { doc, row } = makeConfirmationDoc(card.id);
+    assert.strictEqual(api.render(doc, { document: doc }, { [card.id]: card }), 1);
+    const bar = doc.getElementById(api.buttonBarId(card.id));
+    assert.strictEqual(bar.children.length, n, `${n} buttons expected`);
+    assert.deepStrictEqual(
+      bar.children.map((b) => b.attrs['data-choice']),
+      Array.from({ length: n }, (_, i) => `Option ${i + 1}`)
+    );
+    assert.strictEqual(bar.parentNode, row);
+  }
 });
 
 test('a non-string option is not renderable', () => {
