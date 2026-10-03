@@ -273,6 +273,8 @@ _ANCHOR_TEXT_RE = re.compile(r"[^<>]{0,120}")
 #: the interesting ones is worse than none, because it reads as complete.
 MAX_LINKS = 120
 _MAX_LINK_BLOCK_CHARS = 8000
+#: Total characters across the ``[sessions on this page]`` block.
+_MAX_SESSION_BLOCK_CHARS = 4000
 
 
 class _BodyTooLarge(Exception):
@@ -914,6 +916,175 @@ def _link_rank(url: str, label: str, base_url: str) -> int:
     return 0
 
 
+#: How many sessions one page may list. A cinema's day is bounded in practice; the
+#: cap is here so a page carrying a whole franchise's schedule cannot spend the
+#: context window, and because an unbounded list is an invitation to truncate in the
+#: wrong place.
+MAX_SESSIONS = 40
+
+#: Longest a single session line may be. Same reasoning as ``_MAX_LINK_BLOCK_CHARS``.
+_MAX_SESSION_LINE_CHARS = 160
+
+#: JSON-LD carrying structured data. schema.org calls this
+#: ``application/ld+json``; the attribute order and quoting vary, so both are matched
+#: rather than assuming a canonical spelling.
+_LD_JSON_RE = re.compile(
+    r"<script[^>]*type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _iter_ld_nodes(doc: object, depth: int = 0):
+    """Every dict in a parsed JSON-LD document, however it is nested.
+
+    JSON-LD has three shapes in the wild and all three are common: a bare object, a
+    top-level array, and an object with the real content under ``@graph``. Walking
+    the whole structure rather than pattern-matching the three is what keeps this
+    working on the next site that nests one level differently.
+
+    ``depth`` is a bound, not decoration: a hostile page can nest JSON to whatever
+    depth it likes, and an unbounded recursion on attacker-controlled input is a
+    crash the model reads as "the page was broken".
+    """
+    if depth > 6:
+        return
+    if isinstance(doc, list):
+        for item in doc:
+            yield from _iter_ld_nodes(item, depth + 1)
+    elif isinstance(doc, dict):
+        yield doc
+        for value in doc.values():
+            if isinstance(value, (dict, list)):
+                yield from _iter_ld_nodes(value, depth + 1)
+
+
+def _format_sessions(markup: str) -> tuple[str, list[str]]:
+    """Screenings a page publishes as structured data, each with its booking link.
+
+    Returns ``(block, urls)`` -- the block for the model, and every URL it shows so
+    the caller can register it as citable. Returning them together is deliberate:
+    the allow-list is "what the model was shown" (``_format_links`` does the same),
+    and a URL printed here but absent from that list would be one the model could
+    read and not cite.
+
+    **Why this exists, and why it is not an Ingresso special case.** A cinema page
+    carries schema.org ``ScreeningEvent`` records, and each one is a complete
+    booking unit in three separate fields -- ``startDate``, ``location.name`` and
+    ``offers.url``. Measured on ``ingresso.com/filme/resident-evil?city=osasco``:
+    5 of 5 records parsed, and they carried every session time with its cinema and
+    its ``checkout.ingresso.com?sessionId=...`` URL.
+
+    Without this, ``_format_links`` emitted those URLs as five bare session IDs --
+    ``- https://checkout.ingresso.com/?sessionId=87205315&partnership=home`` -- with
+    nothing tying an ID to a time or a cinema. The page text carried all the times
+    and the links carried none of them, so the model could not tell which link was
+    the 21:15 at Kinoplex and cited the film page instead. Found live on session
+    ``fae42db3``, where the user asked for the chosen session and got a page URL.
+
+    ``ScreeningEvent`` is the standard vocabulary for this -- cinemas, airlines and
+    event listings all use it -- so the labels are a side effect of the page already
+    publishing them, not a scraper that will break on the next redesign.
+    """
+    if not markup:
+        return "", []
+
+    if len(markup) > _SANITISE_INPUT_CAP:
+        markup = markup[:_SANITISE_INPUT_CAP]
+
+    sessions: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for raw in _LD_JSON_RE.findall(markup):
+        raw = raw.strip()
+        # A hostile or merely enormous script tag must not be able to spend the
+        # process; a JSON-LD block on a real page is small.
+        if not raw or len(raw) > _SANITISE_INPUT_CAP:
+            continue
+        try:
+            doc = json.loads(html.unescape(raw))
+        except Exception:
+            # Malformed JSON-LD is a normal thing to find, not an error worth
+            # reporting: the page still renders and `_format_links` still works.
+            continue
+
+        for node in _iter_ld_nodes(doc):
+            if node.get("@type") != "ScreeningEvent":
+                continue
+            offer = node.get("offers")
+            offer = offer[0] if isinstance(offer, list) and offer else offer
+            url = (offer or {}).get("url") if isinstance(offer, dict) else None
+            if not isinstance(url, str) or not url:
+                continue
+            url = _neutralise_marker(url.strip())
+            # Absolute only. Every site measured publishes an absolute offer URL, and
+            # a relative one would have to be joined against a guess about the page's
+            # own base -- and a booking link that resolves somewhere wrong is worse
+            # than no booking link, because it looks actionable.
+            if not _is_followable(url) or url in seen:
+                continue
+
+            when = _session_time(node.get("startDate"))
+            venue = _session_venue(node.get("location"))
+            if not when or not venue:
+                # Half a record is worse than none: a URL with no time beside it is
+                # exactly the opaque sessionId this function exists to replace.
+                continue
+            seen.add(url)
+            sessions.append((when, venue, url))
+
+    if not sessions:
+        return "", []
+
+    sessions.sort(key=lambda s: s[0])
+    lines: list[str] = []
+    total = 0
+    shown: list[str] = []
+    for when, venue, url in sessions:
+        if len(lines) >= MAX_SESSIONS:
+            break
+        # The venue and time are page-controlled, so they go through the same
+        # treatment as any other untrusted text before reaching the model.
+        label = _neutralise_marker(_collapse(f"{when}  {venue}"))
+        line = f"- {label}  {url}"
+        if total + len(line) > _MAX_SESSION_BLOCK_CHARS:
+            break
+        lines.append(line)
+        shown.append(url)
+        total += len(line) + 1
+
+    if not lines:
+        return "", []
+    if len(lines) < len(sessions):
+        lines.append(f"[showing {len(lines)} of {len(sessions)} sessions]")
+    return "[sessions on this page]\n" + "\n".join(lines), shown
+
+
+def _session_time(value: object) -> str:
+    """The wall-clock part of an ISO ``startDate``, or nothing.
+
+    The date is dropped deliberately. A session belongs to a day, and the day is
+    the page's own subject -- printing ``2026-10-03T21:15`` beside every line makes
+    the model read a timestamp as a *time of day*, which is how an 11:20 listing
+    turns into an answer about the 3rd.
+    """
+    if not isinstance(value, str) or "T" not in value:
+        return ""
+    clock = value.split("T", 1)[1]
+    return clock[:5] if re.match(r"^\d{2}:\d{2}", clock) else ""
+
+
+def _session_venue(location: object) -> str:
+    """The cinema's name, flattened from whatever shape the page used."""
+    if isinstance(location, list):
+        location = location[0] if location else None
+    if isinstance(location, str):
+        return _collapse(location)[:60]
+    if isinstance(location, dict):
+        name = location.get("name")
+        if isinstance(name, str):
+            return _collapse(name)[:60]
+    return ""
+
+
 def _format_links(
     markup: str,
     base_url: str,
@@ -1035,6 +1206,32 @@ def _format_links(
     return "[links on this page]\n" + "\n".join(lines)
 
 
+def _links_and_sessions(markup: str, base: str, shown: list[str] | None) -> str:
+    """The page's link block, prefixed by its session block when it publishes one.
+
+    **One function for two call sites, deliberately.** The invariant that matters
+    is that every URL printed here is also registered as citable, and the way that
+    was broken the first time is instructive: the session block was wired into the
+    plain-HTTP path and not the renderer path, so it silently did nothing on the
+    only site that publishes ``ScreeningEvent`` -- while the block looked correct in
+    both places by inspection. A page that renders its sessions in JavaScript *is*
+    the case the renderer exists for.
+
+    So ``shown`` is not optional in spirit: when it is ``None`` there is nowhere to
+    register the booking URLs, and printing an uncitable one is the original defect
+    one layer down -- the citation renderer drops a ``[web]`` line naming a URL
+    outside the allow-list, so the answer silently loses the link the user asked for.
+    """
+    links = _format_links(markup, base, shown=shown)
+    if shown is None:
+        return links
+    sessions, session_urls = _format_sessions(markup)
+    if not sessions:
+        return links
+    shown.extend(session_urls)
+    return f"{sessions}\n\n{links}" if links else sessions
+
+
 def fetch_page_text(url: str, max_chars: int = 6000, shown: list[str] | None = None) -> str:
     """Fetch one page and return its text, guarded at every hop.
 
@@ -1111,7 +1308,7 @@ def fetch_page_text(url: str, max_chars: int = 6000, shown: list[str] | None = N
         if not text:
             raise ValueError(f"{_short(current)} had no readable text")
 
-        links = _format_links(decoded, current, shown=shown)
+        links = _links_and_sessions(decoded, current, shown)
 
         if len(text) > limit:
             # Cut on a boundary so the model never sees half a word.
@@ -1232,7 +1429,7 @@ def render_page_text(
         raise ValueError(f"the renderer returned no text for {_short(url)}")
 
     limit = max(200, min(int(max_chars), MAX_CHARS_CAP))
-    links = _format_links(payload.get("html") or "", url, shown=shown)
+    links = _links_and_sessions(payload.get("html") or "", url, shown)
     blocked = payload.get("blocked_requests") or []
     if blocked:
         # Surfaced rather than swallowed. A page that had a dozen requests refused
@@ -1453,7 +1650,7 @@ def dismiss_page_text(
         raise ValueError("the renderer returned no text after dismissing")
 
     limit = max(200, min(int(max_chars), MAX_CHARS_CAP))
-    links = _format_links(payload.get("html") or "", url, shown=shown)
+    links = _links_and_sessions(payload.get("html") or "", url, shown)
     parts = [text[:limit]]
     if links:
         parts.append(links)

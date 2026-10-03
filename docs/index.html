@@ -1381,6 +1381,30 @@ breeds, varying in size, color, and temperament.</code></pre>
       </p>
     </div>
     <div class="card">
+      <p class="card__title">The agent gave a page URL where a booking link was wanted</p>
+      <p class="card__body">
+        It read the page and cited the page, which is the correct answer when the
+        page's own links are opaque &mdash; a bare
+        <code>checkout.ingresso.com/?sessionId=…</code> cannot be tied to a time, so
+        there is nothing to attribute. A venue publishing schema.org
+        <code>ScreeningEvent</code> gets each session listed with its time, cinema and
+        booking URL together; look for a <code>[sessions on this page]</code> block in
+        the tool result. No block means the venue does not publish them, and the
+        per-film page is the route.
+      </p>
+    </div>
+    <div class="card">
+      <p class="card__title">A note says the user confirmed something</p>
+      <p class="card__body">
+        A summary of the <i>conversation</i> rather than of the world &mdash;
+        &ldquo;the user confirmed the session&rdquo;, &ldquo;the conversation is
+        finished&rdquo;. Those are events in the chat, not things to remember, and each
+        carries a valid fingerprint, so it can be replayed from the cache as though it
+        were a fact. Delete them; rule 8 now names the subject explicitly, because both
+        were formatted exactly like real summaries.
+      </p>
+    </div>
+    <div class="card">
       <p class="card__title">A page behind an age gate reads as empty</p>
       <p class="card__body">
         <code>web_fetch</code> returns a refusal naming the gate rather than a page of
