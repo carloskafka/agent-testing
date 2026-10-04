@@ -833,6 +833,7 @@ td code { white-space: nowrap; }
       <li class="chip chip--accent">Obsidian</li>
       <li class="chip chip--accent">Daily digest</li>
       <li class="chip">Web search</li>
+      <li class="chip">Weather</li>
     </ul>
 
     <div class="btn-row">
@@ -864,6 +865,15 @@ td code { white-space: nowrap; }
     <p class="muted">
       <code>--json</code> pipes cleanly into <code>jq</code>: every diagnostic goes to
       stderr, so stdout is nothing but the document.
+    </p>
+    <p>
+      Ask <b>"me fala a temperatura para osasco amanhã"</b> and it reports every
+      daily metric for that place and day — humidity, rain chance, wind and gusts,
+      UV, sunrise, evapotranspiration — from a keyless API. A name that is genuinely
+      ambiguous is <b>asked about rather than guessed</b>: <i>Springfield</i> matches
+      eight US cities, so the agent offers them instead of picking one, and the city,
+      state and population it did resolve travel with the numbers so a wrong match is
+      visible rather than confident.
     </p>
 
     <h3>Why it is built this way</h3>
@@ -1141,6 +1151,20 @@ breeds, varying in size, color, and temperament.</code></pre>
             </dd>
           </div>
           <div class="var">
+            <dt><code>WEATHER_ENABLED</code><br><code>WEATHER_LANGUAGE</code></dt>
+            <dd>
+              The weather for any place you name — max/min and apparent temperature,
+              humidity, rain chance, wind and gusts, UV, sunshine, sunrise/sunset,
+              radiation and evapotranspiration — from Open-Meteo, which needs
+              <b>no API key</b>. <b>On by default</b>; set
+              <code>WEATHER_ENABLED=false</code> to remove the tool. The agent asks
+              when a name is genuinely ambiguous ("Springfield" matches eight US
+              cities) instead of guessing, and reports the city, state and population
+              it resolved so a wrong match is visible. Weather is never written to the
+              vault: a forecast goes stale and the cache would replay it tomorrow.
+            </dd>
+          </div>
+          <div class="var">
             <dt><code>BOT_NAME</code></dt>
             <dd>
               The bold label stamped at the head of every answer. Unset derives it
@@ -1210,6 +1234,12 @@ breeds, varying in size, color, and temperament.</code></pre>
             <td><b>SearXNG</b></td>
             <td>Web search and a guarded page fetch, behind the vault</td>
             <td><code>SEARXNG_URL</code></td>
+          </tr>
+          <tr>
+            <td><b>Open-Meteo</b></td>
+            <td>Every daily weather metric for a named place, keyless. <b>On by
+              default</b></td>
+            <td>nothing — <code>WEATHER_ENABLED=false</code> to remove</td>
           </tr>
           <tr>
             <td><b>Obsidian</b></td>
@@ -1294,7 +1324,7 @@ breeds, varying in size, color, and temperament.</code></pre>
     </div>
     <div class="card">
       <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/INTEGRATIONS.md" rel="noopener">Integrations</a></p>
-      <p class="card__body">Read-only Gmail, and using an Obsidian vault you already have.</p>
+      <p class="card__body">Read-only Gmail, using an Obsidian vault you already have, and a keyless weather tier.</p>
     </div>
     <div class="card">
       <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/ARCHITECTURE.md" rel="noopener">Architecture</a></p>

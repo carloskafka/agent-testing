@@ -54,16 +54,22 @@ HISTORY_FILE = AGENT_DIR / "optimization_history.json"
 #: 13 web search as a last resort
 #: 14 answer "what did you learn" from the vault, and cite it
 #: 16 a page behind an age gate, and where a purchase stops
+#: 17 the weather is a tool call, and its answer is not a note
 #:
 #: Rule 10 is deliberately absent: its closing sentence ("saved to the second
 #: brain as ...") is in every golden answer, so ROUGE-1 does see its loss. Rules
-#: 14 and 16 are present precisely because nothing observes them -- the digest and
-#: booking turns they govern are not in the eval set at all. Rule 14's loss was a
-#: bug this repo had once already (every digest answer came back uncited); rule
-#: 16's would be the mirror image and no less silent. A rewrite that dropped it
-#: would leave the agent setting ``attested=true`` on its own, or claiming a
-#: purchase it did not make, and ROUGE-1 would prefer the shorter instructions.
-REQUIRED_RULES = (7, 8, 9, 11, 12, 13, 14, 16)
+#: 14, 16 and 17 are present precisely because nothing observes them -- the digest,
+#: booking and weather turns they govern are not in the eval set at all. Rule 14's
+#: loss was a bug this repo had once already (every digest answer came back
+#: uncited); rule
+#: 16's would be the mirror image and no less silent. Rule 17's is the one a
+#: rewrite would be *pleased* with: a shorter instruction block reads as a better
+#: one, and "the weather is never in your training data" is a sentence ROUGE-1
+#: cannot price. Without it the agent answers the weather from memory, and with
+#: rule 8 still in force it also writes a stale forecast into the vault that the
+#: cache then replays verbatim. A rewrite that dropped it would let both happen,
+#: and ROUGE-1 would prefer the shorter instructions.
+REQUIRED_RULES = (7, 8, 9, 11, 12, 13, 14, 16, 17)
 
 
 def missing_required_rules(instructions):

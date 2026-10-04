@@ -65,6 +65,17 @@ os.environ["OBSIDIAN_MCP_URL"] = ""
 RENDERER_URL = os.environ.pop("RENDERER_URL", None)
 os.environ["RENDERER_URL"] = ""
 
+#: The weather tier, pinned for the same reason as ``RENDERER_URL`` above: it is a
+#: tier whose *tool list* is built at import time, so a developer's ``.env`` would
+#: decide whether ``weather_forecast`` is even in ``root_agent.tools``. ``WEATHER_ENABLED``
+#: is pinned **on** rather than blanked, because on is the shipped default and blanking
+#: it would silently stop the tests from covering the wired path.
+os.environ["WEATHER_ENABLED"] = "true"
+os.environ["WEATHER_GEOCODING_URL"] = "https://geocoding-api.open-meteo.com/v1/search"
+os.environ["WEATHER_FORECAST_URL"] = "https://api.open-meteo.com/v1/forecast"
+os.environ["WEATHER_PROVIDER"] = "open-meteo"
+os.environ["WEATHER_LANGUAGE"] = "pt"
+
 #: Observability: no key means no instrumenting, and no network.
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""

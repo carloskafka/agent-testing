@@ -58,8 +58,11 @@ def _rule(number: int) -> str:
 #: live on the vault path unchanged. Rule 7 is the *primary* path -- retrieve before
 #: summarizing -- so a vault-sourced answer was the one most likely to end on a stub,
 #: and it was the one left inviting it. Parameterised rather than duplicated so a
-#: third source-emitting rule cannot be added without appearing here.
-SOURCE_RULES = (7, 13)
+#: third source-emitting rule cannot be added without appearing here. Rule 17 was
+#: added to the tuple when the weather tier landed: it emits the same `[web]` line
+#: and was the rule most likely to reintroduce the old wording, because it is the
+#: newest and nobody had watched a stubbed weather turn fail.
+SOURCE_RULES = (7, 13, 17)
 
 
 @pytest.mark.parametrize("number", SOURCE_RULES)
