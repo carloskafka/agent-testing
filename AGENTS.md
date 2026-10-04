@@ -103,6 +103,7 @@ agent-testing/
         |-- test_citations_in_answer.py       # Answer and citations are one message
         |-- test_conversation_not_notes.py     # Rules 8 and 15: do not persist or ask wrongly
         |-- test_weather.py                    # Place resolution, the payload, and what must be data
+        |-- test_scenarios_harness.py         # The scenario harness's checkers, fed a turn that should fail
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
             |-- summarizer_eval_set.evalset.json # 4 eval cases
@@ -1250,14 +1251,53 @@ citable `[web][open-meteo][space-bunny-free]` line, `log_conversation` called an
 answer on the **last** event (7 events); `Springfield` → refused, `ask_user` called;
 `Nova York` → the model chose `"New York, NY"` and got New York City.
 
-**What the live run found that no unit test would have.** Rule 17 originally ended
-"Log the exchange with `log_conversation` as rule 9 says". The model wrote *"Then log
-conversation."* into its answer and **never called it** — three turns out of three. It
-read the cross-reference as a note to itself. The clause now names the two arguments and
-says *a real tool call in a FURTHER STEP of this same turn, not something to write down
-in prose*, and the next live turn made the call. That is the same class of defect as
-rule 7's "at the very END of your answer": an instruction the model can satisfy by
-writing prose is an instruction it will.
+**What the live run found, twice, and neither time was an instruction problem in the
+obvious place.** Rule 17 originally ended "Log the exchange with `log_conversation` as
+rule 9 says". The model wrote *"Then log conversation."* into its answer and **never
+called it** — three turns out of three. It read the cross-reference as a note to
+itself. The clause now names the two arguments and says *a real tool call in a FURTHER
+STEP of this same turn, not something to write down in prose*, and the next live turn
+made the call. That is the same class of defect as rule 7's "at the very END of your
+answer": an instruction the model can satisfy by writing prose is an instruction it
+will.
+
+**Fixing that one produced flow-r5 again, in a new place, which is why the rule states
+the *order* and not just the calls.** With the log clause as above, the model wrote
+the full forecast — bullets, units and the source line — on the same event as its
+`log_conversation` call, and then ended the turn on 41 characters:
+
+```
+  3. TEXT len=2244  "- Amanhã, segunda-feira (05/10/2026), em Osasco … @@ADK_WEB@@…"  + CALL log_conversation
+  4. RESP log_conversation
+  5. TEXT len= 116  "**Text Summarizer Agent**  Vale levar um guarda-chuva: 86% de chuva."
+```
+
+The reader got everything. The **last event** did not, and the last event is what the
+trace reports, what `response_match_score` scores, and what a UI collapsing tool-call
+turns draws — the same inversion as `flow-r5`, reached by a different route. Rule 17
+now says: call `log_conversation` first, then write the answer as your **final**
+message, and says *why* in the rule ("a message you write BEFORE a tool call is not
+the message the reader ends up on"), because a small model follows an ordering it has
+been given a reason for. The reordering is pinned by
+`test_the_weather_rule_states_the_order_because_nothing_else_enforces_it`.
+
+**The stub check that was supposed to catch this passes on it.**
+`scenarios._final_answer_has_a_body` — applied by `run_scenario` to *every* scenario,
+and the check AGENTS.md credits with catching flow-r5 — reports "final answer carries 41
+characters of body". It requires *some* body, and a one-line remark is some body. It is
+not fixed here: that is the shared harness rather than this tier, it is a defect of its
+own, and it reverts alone. The weather tier asserts its metrics on the **last** text
+event instead (`_the_reader_ends_on_the_forecast`), and
+`test_the_reader_ends_on_the_forecast_catches_the_recorded_stub` carries the recorded
+turn and asserts both verdicts — the weather check fails, the shared one passes — so
+the gap stays visible rather than being quietly papered over.
+
+**Two scenarios, both green against the deployed container** (`python3 tools/scenarios.py
+--only weather_`, 29.7 s and 10.8 s): `weather_metrics_land_on_the_last_message` and
+`weather_an_ambiguous_name_is_asked_about_not_guessed`. The first is the shape of the
+fix — `weather_forecast`, then `log_conversation`, then the answer **last** — and
+`_final_answer_has_a_body` is *not* in its composition for the reason above, so the
+tier carries a check the shared harness cannot supply.
 
 **Visible in that run, and not caused by this feature:** the free-tier primary emits
 token debris in the answer (`as temperaturas Bowling Amsterdamaise`, `com最大值 de
@@ -1271,7 +1311,7 @@ Real prompts against the deployed agent, judged from the **persisted session eve
 
 ```bash
 python3 tools/scenarios.py --list
-python3 tools/scenarios.py                  # all 13
+python3 tools/scenarios.py                  # all 15
 python3 tools/scenarios.py --only web_      # by prefix
 python3 tools/scenarios.py --keep           # do not delete the scenario sessions
 ```
@@ -1293,6 +1333,28 @@ Three harness bugs were found this way and none by writing it — each is a remi
 | nonce written `{{nonce}}` | every run sent the same prompt; the 2nd was a cache hit | uniqueness was checked on the *template*, which was unique while the render was fixed |
 | citation check read `results[0]` at top level | reported "no URLs" on a turn that returned nine | real payloads are `{"result": "<json string>"}` — ADK wraps a tool's return value |
 | duplication check counted text events | failed a healthy 4-tool turn as duplicated | a model narrating alongside a tool call is legitimate; only *repeated* text is duplication |
+
+**The weather scenarios' first live run failed on a checker that was wrong, and
+nothing offline could have told me.** `_weather_reports_the_metrics_not_one_of_them`
+asserts the payload carried the metrics, and it named them
+`precipitation_probability_max` and `wind_speed_10m_max` — which are the variables
+`weather.py` **requests**. The keys it **emits** are `rain_chance_pct` and
+`wind_max_kmh`; `_DAILY_FIELDS` maps one vocabulary to the other. So the check
+demanded two names the tool has never produced.
+
+The instructive half is that the hand-written fixture in `test_scenarios_harness.py`
+named them *the same wrong way*, so the fixture and the check agreed perfectly with
+each other and with nothing else. Every offline test passed, three mutations of the
+new checks were caught, and the defect was still there — it took a live run reading
+a real payload. That is the argument for this layer in one incident, and it is worth
+more than any amount of saying so.
+
+Two changes close it. The fixture is now **derived** from the checker's own list,
+because a fixture cannot check the tool and can only assert a guess; and
+`test_every_metric_this_check_names_is_one_weather_emits` asserts every name the check
+uses is one `weather._DAILY_FIELDS` produces, so a rename in the tool fails offline
+instead of at the next live run. Both mutations are confirmed caught — each half of
+the mapping confused the other way, and a rename.
 
 `web_js_rendered_page_is_not_invented` is the one worth knowing about: `ingresso.com` builds its listings in JavaScript and `web_fetch` does a plain HTTP GET with an HTML sanitiser, so the page arrives as a title and navigation. The failure there is not a crash — it is a model handed an empty page and a confident instruction writing plausible films and showtimes, every one fiction, with a citation attached. The check fires on a *schedule* claim and not on a bare film name, because a name can legitimately come from a search snippet and firing on those would make "stop citing" the only way to pass.
 

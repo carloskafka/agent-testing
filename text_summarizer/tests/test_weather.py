@@ -1067,6 +1067,23 @@ def test_the_weather_rule_asks_for_every_metric():
         assert metric in rule, f"the rule never mentions {metric}"
 
 
+def test_the_weather_rule_states_the_order_because_nothing_else_enforces_it():
+    """Measured live: the model wrote the answer, then called a tool, then ended the
+    turn on a 41-character closing remark -- and the full forecast plus its Sources
+    block sat on the *previous* event.
+
+    The reader got everything. The last event did not, and the last event is what the
+    trace reports, what ``response_match_score`` scores, and what a UI collapsing
+    tool-call turns draws. Rule 17 says "log the exchange, *then* write the answer"
+    and explains why, because a model that has not been told will put the tool call
+    after the answer every time -- which is exactly what happened.
+    """
+    rule = _rule(17)
+    assert "ORDER MATTERS HERE" in rule, "the rule does not explain why the order is fixed"
+    assert "FINAL message" in rule
+    assert "a tool call" in rule and "is not the message the reader ends up on" in rule
+
+
 def test_the_weather_rule_says_log_conversation_is_a_call_not_prose():
     """Measured live: the model wrote "Then log conversation." and never called it.
 

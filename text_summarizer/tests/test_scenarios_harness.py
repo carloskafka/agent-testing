@@ -748,3 +748,392 @@ def test_every_scenario_declares_its_tags():
     for scenario in scenarios.SCENARIOS:
         assert scenario.tags, f"{scenario.name} has no tags"
         assert scenario.note, f"{scenario.name} has no note explaining what it is for"
+
+
+# --- the weather tier, offline -----------------------------------------------
+#
+# Every turn shape here was recorded from a live run against the deployed container,
+# because the two failures these guard were both invisible to every other check --
+# see the docstrings on the checkers themselves. ``_call`` and ``_response`` return
+# *parts*, so each is wrapped in an event; passing one bare was the first version's
+# mistake and it made every payload unfindable.
+
+
+def _osasco() -> dict:
+    return {
+        "name": "Osasco",
+        "admin1": "São Paulo",
+        "country": "Brasil",
+        "country_code": "BR",
+        "latitude": -23.53,
+        "longitude": -46.79,
+        "population": 728615,
+    }
+
+
+#: Built from the checker's own list, and that is deliberate. This fixture's job is
+#: to test the *checkers'* logic -- does one fail on a recorded stub, does one pass on
+#: a healthy turn -- and hand-written field names were how the first version of this
+#: module came to assert ``precipitation_probability_max`` while ``weather.py`` emits
+#: ``rain_chance_pct``. Both the fixture and the check were wrong the same way and
+#: agreed perfectly with each other; asserting the provider's vocabulary here would
+#: only reintroduce that, since a fixture cannot check the tool, only assert a guess.
+#:
+#: The *values* are placeholders because no assertion reads them: what these checks
+#: inspect is the set of keys and the prose. The live scenario run reads a real
+#: payload, and ``test_every_metric_this_check_names_is_one_weather_emits`` makes a
+#: rename in ``weather.py`` fail here instead of at the next live run.
+_FULL_DAY: dict = {metric: 1.0 for metric in scenarios._WEATHER_METRICS}
+_FULL_DAY.update({"date": "2026-10-05", "condition": "dense drizzle"})
+
+
+def _full_day() -> dict:
+    return dict(_FULL_DAY)
+
+
+def _forecast_ok(place: dict | None = None, days: list[dict] | None = None) -> dict:
+    """ADK's own wrapper: the tool's return value is a JSON *string* under ``result``."""
+    payload: dict = {"status": "ok", "asked_for": "Osasco", "place": place or _osasco()}
+    if days is not None:
+        payload["forecast"] = days
+    return {"result": json.dumps(payload)}
+
+
+def _forecast_ambiguous(forecast: list[dict] | None = None) -> dict:
+    payload: dict = {
+        "status": "ambiguous",
+        "asked_for": "Springfield",
+        "candidates": [
+            {"name": "Springfield", "admin1": "Missouri", "population": 170188},
+            {"name": "Springfield", "admin1": "Illinois", "population": 114394},
+        ],
+    }
+    if forecast is not None:
+        payload["forecast"] = forecast
+    return {"result": json.dumps(payload)}
+
+
+_BULLETS = (
+    "**Text Summarizer Agent**\n\n"
+    "Amanhã em Osasco:\n"
+    "- Temperatura: máxima de 28,2 °C, mínima de 16,8 °C.\n"
+    "- Umidade: média de 85%.\n"
+    "- Chuva: 86% de chance.\n"
+    "- Vento: até 12,9 km/h, com rajadas de 36 km/h.\n"
+    "- Índice UV: 5,15.\n\n"
+    "**Sources**\n"
+    "- [web][open-meteo][space-bunny-free]<https://api.open-meteo.com/v1/forecast?x=1>: "
+    "previsão diária.\n"
+)
+
+#: The forecast without its Sources block: what the model had already written when it
+#: made the ``log_conversation`` call.
+_BULLETS_ONLY = _BULLETS.split("**Sources**")[0].rstrip() + "\n"
+
+
+def _healthy_weather_turn() -> scenarios.Turn:
+    return _turn(
+        _text_event("me fala a temperatura para osasco amanhã", author="user"),
+        _event(_APP, [_call("weather_forecast", {"place": "Osasco", "date": "tomorrow"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_ok(days=[_full_day()]))]),
+        _event(
+            _APP,
+            [
+                _call("log_conversation", {"user_message": "x", "agent_response": "..."}),
+            ],
+        ),
+        _event(_APP, [_response("log_conversation", {})]),
+        _text_event(_BULLETS),
+    )
+
+
+def _stub_weather_turn() -> scenarios.Turn:
+    """The turn that actually happened, recorded 2026-10-04.
+
+    The model put the whole forecast *and* the ``log_conversation`` call on one
+    event, then ended the turn on a 41-character remark whose only number was
+    already on the previous event.
+    """
+    return _turn(
+        _text_event("me fala a temperatura para osasco amanhã", author="user"),
+        _event(_APP, [_call("weather_forecast", {"place": "Osasco", "date": "tomorrow"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_ok(days=[_full_day()]))]),
+        _event(
+            _APP,
+            [
+                {"text": _BULLETS_ONLY},
+                _call("log_conversation", {"user_message": "x"}),
+            ],
+        ),
+        _event(_APP, [_response("log_conversation", {})]),
+        _text_event("**Text Summarizer Agent**\n\nVale levar um guarda-chuva: 86% de chuva."),
+    )
+
+
+def test_a_healthy_weather_turn_passes_every_weather_check():
+    turn = _healthy_weather_turn()
+    for check in (
+        scenarios._weather_resolved_to_the_city_that_was_asked_about,
+        scenarios._weather_reports_the_metrics_not_one_of_them,
+        scenarios._the_reader_ends_on_the_forecast,
+        scenarios._no_second_brain_note,
+    ):
+        ok, detail = check(turn)
+        assert ok is True, f"{check.__name__}: {detail}"
+
+
+def test_the_reader_ends_on_the_forecast_catches_the_recorded_stub():
+    """The defect the weather pair of scenarios exists to prevent.
+
+    ``_final_answer_has_a_body`` -- the shared check, applied to every scenario --
+    **passes** on this turn: 41 characters of body is some body. A scenario relying
+    on it alone would have reported the stub healthy. Hence the metrics are asserted
+    on the *last* event rather than on ``Turn.answer``; and the strength of that
+    shared check is a separate fix, in the shared harness rather than in this tier,
+    so it is deliberately not widened from here.
+    """
+    ok, detail = scenarios._the_reader_ends_on_the_forecast(_stub_weather_turn())
+    assert ok is False
+    assert "rather than on the forecast" in detail
+    assert scenarios._final_answer_has_a_body(_stub_weather_turn())[0] is True
+
+
+def test_the_recorded_stub_is_invisible_to_the_joined_prose_check():
+    """The control for the test above, and the reason the two checks differ.
+
+    ``Turn.answer`` joins every text part in the turn, which is right for gotcha 16
+    and wrong here: on this turn the joined prose *does* carry four metric families,
+    because the forecast is one event earlier. A check reading it reports a healthy
+    turn on a turn the reader never finished.
+    """
+    assert scenarios._weather_reports_the_metrics_not_one_of_them(_stub_weather_turn())[0] is True
+
+
+def test_a_metric_word_is_never_matched_inside_another_word():
+    """``"uv"`` inside *"ch**uv**a"* is how the first version of this check passed.
+
+    Bare substring matching counted the recorded stub's closing remark -- "vale levar
+    um guarda-chuva: 86% de chuva" -- as two metric families, one of them the ``uv``
+    index that is not in it at all. ``"rain"`` has the same problem inside
+    *"training"*, which these instructions are full of.
+    """
+    assert scenarios._metric_families("vale levar um guarda-chuva: 86% de chuva") == ["rain"]
+    assert scenarios._metric_families("the training session and the brain training") == []
+    assert scenarios._metric_families("Umidade de 85% e vento de 12 km/h") == ["humidity", "wind"]
+    assert scenarios._metric_families("chuva chuva chuva") == ["rain"], "per family, not per word"
+
+
+def test_a_forecast_resolved_to_the_wrong_city_fails():
+    """The trap the payload exists to expose: "New York" is *York, Nebraska*.
+
+    7,864 people is a plausible-looking city, which is exactly what makes it the
+    dangerous one -- nothing about the answer's shape would tell the reader.
+    """
+    turn = _turn(
+        _event(_APP, [_call("weather_forecast", {"place": "Nova York", "date": "tomorrow"})]),
+        _event(
+            _APP,
+            [
+                _response(
+                    "weather_forecast",
+                    _forecast_ok(
+                        {
+                            "name": "York",
+                            "admin1": "Nebraska",
+                            "country": "Estados Unidos",
+                            "country_code": "US",
+                            "population": 7864,
+                        },
+                        [_full_day()],
+                    ),
+                )
+            ],
+        ),
+        _text_event(_BULLETS),
+    )
+    ok, detail = scenarios._weather_resolved_to_the_city_that_was_asked_about(turn)
+    assert ok is False
+    assert "US" in detail
+
+
+def test_an_answer_carrying_only_the_temperature_it_was_asked_for_fails():
+    """A single-metric answer satisfies the prompt and defeats the feature.
+
+    The whole reason for a dedicated tier is that "and the humidity?" then costs no
+    extra turn -- which is only true if the first answer already reported it.
+    """
+    turn = _turn(
+        _event(_APP, [_call("weather_forecast", {"place": "Osasco"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_ok(days=[_full_day()]))]),
+        _text_event("**Text Summarizer Agent**\n\nAmanhã: máxima de 28 °C.\n"),
+    )
+    assert scenarios._weather_reports_the_metrics_not_one_of_them(turn)[0] is False
+
+
+def test_a_forecast_written_to_the_vault_fails():
+    """Rule 8 saves every summary; rule 17's exception is what stops the replay."""
+    turn = _healthy_weather_turn()
+    turn.events[3]["content"]["parts"].append(_call("save_summary_to_second_brain", {"title": "t"}))
+    ok, detail = scenarios._no_second_brain_note(turn)
+    assert ok is False
+    assert "save_summary_to_second_brain" in detail
+
+
+def test_an_ambiguous_place_passes_when_the_model_asks():
+    """What the live Springfield turn did: refused, offered candidates, asked."""
+    turn = _turn(
+        _event(_APP, [_call("weather_forecast", {"place": "Springfield", "date": "tomorrow"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_ambiguous())]),
+        _event(_APP, [_call("ask_user", {"question": "Which Springfield?"})]),
+    )
+    assert scenarios._asked_rather_than_guessed(turn)[0] is True
+
+
+def test_an_ambiguous_place_the_model_answered_anyway_fails():
+    """Nothing to quote, so it had to ask: it did not, and the turn is a dead end."""
+    turn = _turn(
+        _event(_APP, [_call("weather_forecast", {"place": "Springfield"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_ambiguous())]),
+        _text_event("**Text Summarizer Agent**\n\nIt will be 18 °C in Springfield."),
+    )
+    ok, detail = scenarios._asked_rather_than_guessed(turn)
+    assert ok is False
+    assert "never asked" in detail
+
+
+def test_an_ambiguous_payload_that_carried_a_forecast_would_fail():
+    """The missing key is load-bearing, so the check guards its absence too.
+
+    A payload carrying both is one the model can quote from without reading the
+    refusal, and "the tool said it was ambiguous" then loses to a number right there.
+    """
+    turn = _turn(
+        _event(_APP, [_call("weather_forecast", {"place": "Springfield"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_ambiguous([_full_day()]))]),
+        _event(_APP, [_call("ask_user", {"question": "Which one?"})]),
+    )
+    ok, detail = scenarios._asked_rather_than_guessed(turn)
+    assert ok is False
+    assert "carried a forecast anyway" in detail
+
+
+def test_the_metrics_scenario_fails_on_the_stub_it_exists_to_catch():
+    """The composed check, run against the recorded failure.
+
+    Asserted through :attr:`Scenario.check` rather than by inspecting what went into
+    it -- the composition is opaque on purpose, and the verdict is what matters. This
+    is also the strongest form of the claim: it fails *the scenario*, not one of its
+    parts, so a later edit to the composition cannot quietly drop the check this
+    defect needs.
+    """
+    by_name = {s.name: s for s in scenarios.SCENARIOS}
+    metrics = by_name["weather_metrics_land_on_the_last_message"]
+
+    ok, detail = metrics.check(_healthy_weather_turn())
+    assert ok is True, detail
+
+    ok, detail = metrics.check(_stub_weather_turn())
+    assert ok is False, "the metrics scenario reported the recorded stub as healthy"
+    assert "rather than on the forecast" in detail
+
+
+def test_both_weather_scenarios_are_registered():
+    """A scenario written but not in the table runs on nothing."""
+    names = {s.name for s in scenarios.SCENARIOS}
+    assert "weather_metrics_land_on_the_last_message" in names
+    assert "weather_an_ambiguous_name_is_asked_about_not_guessed" in names
+
+
+def test_a_brazilian_settlement_of_the_right_name_is_caught_by_population():
+    """The country check cannot be the only half, and this is the case that shows it.
+
+    "Nova York" resolves to *Nova Iorque, Maranhão* -- which is **Brazilian**, so it
+    sails straight past a country check and is only caught by the population. The
+    first version of the test used York, Nebraska, which trips the country check
+    first, so dropping the population branch changed nothing and the mutation escaped.
+    """
+    turn = _turn(
+        _event(_APP, [_call("weather_forecast", {"place": "Nova York"})]),
+        _event(
+            _APP,
+            [
+                _response(
+                    "weather_forecast",
+                    _forecast_ok(
+                        {
+                            "name": "Nova Iorque",
+                            "admin1": "Maranhão",
+                            "country": "Brasil",
+                            "country_code": "BR",
+                            "population": 4320,
+                        },
+                        [_full_day()],
+                    ),
+                )
+            ],
+        ),
+        _text_event(_BULLETS),
+    )
+    ok, detail = scenarios._weather_resolved_to_the_city_that_was_asked_about(turn)
+    assert ok is False
+    assert "4320" in detail
+
+
+def test_every_metric_this_check_names_is_one_weather_emits():
+    """The scenario check and the tool must speak the same vocabulary.
+
+    :data:`scenarios._WEATHER_METRICS` names the metrics a forecast row has to
+    carry, in order to assert the turn reported more than a temperature. It got two
+    of the six wrong the first time: ``precipitation_probability_max`` and
+    ``wind_speed_10m_max`` are the variables the tool *requests*, while it *emits*
+    ``rain_chance_pct`` and ``wind_max_kmh`` -- two vocabularies that
+    ``weather._DAILY_FIELDS`` maps one to the other.
+
+    No offline test could have caught it, because the fixture above named them the
+    same wrong way and the two agreed with each other and with nothing else. It took
+    a live scenario run reading a real payload, which is the argument for that layer
+    existing. This closes the loop the other way: a rename fails here instead of on
+    the next live run.
+    """
+    from text_summarizer.weather import _DAILY_FIELDS
+
+    unknown = sorted(set(scenarios._WEATHER_METRICS) - set(_DAILY_FIELDS.values()))
+    assert not unknown, (
+        f"the scenario check names metrics weather.py does not emit: {unknown}. "
+        "These are the emitted key names, not the requested Open-Meteo variables."
+    )
+
+
+def test_the_emitted_metric_names_are_unique():
+    """Two variables mapping to one key would make the second unreachable.
+
+    Cheap, and the failure it guards is silent: ``forecast[0]`` would carry both
+    values under one name, and every count of "how many metrics did we report" would
+    be one short with nothing looking wrong.
+    """
+    from text_summarizer.weather import _DAILY_FIELDS
+
+    values = list(_DAILY_FIELDS.values())
+    duplicates = sorted({key for key in values if values.count(key) > 1})
+    assert not duplicates, f"two Open-Meteo variables emit the same key: {duplicates}"
+
+
+def test_the_metrics_scenario_requires_the_conversation_to_be_logged():
+    """Rule 17's clause, and the defect the live run found: the model narrated the
+    log instead of calling it, three turns out of three.
+
+    The healthy turn carries the call, so asserting only that it *passes* cannot
+    tell whether the call is required -- removing it from the composition left every
+    test green. The negative is what pins it.
+    """
+    by_name = {s.name: s for s in scenarios.SCENARIOS}
+    metrics = by_name["weather_metrics_land_on_the_last_message"]
+
+    unlogged = _healthy_weather_turn()
+    unlogged.events = [
+        e for e in unlogged.events
+        if not any(p.get("function_call", {}).get("name") == "log_conversation" for p in e["content"]["parts"])
+    ]
+    ok, detail = metrics.check(unlogged)
+    assert ok is False, "dropping log_conversation still passed the weather scenario"
+    assert "log_conversation" in detail
