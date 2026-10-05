@@ -1,13 +1,15 @@
 # Integrations
 
-The agent can read your Gmail inbox, use an Obsidian vault as a second brain, and —
-when the vault has nothing — search the web through a self-hosted SearXNG. All three
+The agent can read your Gmail inbox, use an Obsidian vault as a second brain, search the
+web through a self-hosted SearXNG, and answer the weather for any place you name. All four
 are optional and controlled purely by environment variables: with none of them set the
 agent still works as a plain text summarizer.
 
-The three tiers are consulted in order — **vault → web → the model's own knowledge** —
-and the agent is told to reach for a later one only after the earlier ones come up
-empty.
+The three *retrieval* tiers are consulted in order — **vault → web → the model's own
+knowledge** — and the agent is told to reach for a later one only after the earlier ones
+come up empty. Weather is not one of the three: it is a single-purpose tier with no
+fallback, because a forecast is never in a training data set and "I do not know" is a
+worse answer than a wrong one.
 
 ## Gmail (Read-Only)
 
@@ -271,4 +273,83 @@ costs to remove:
 
 A failed search returns an error **as data**, so the model can fall through to the
 vault or its own knowledge rather than the turn dying.
+
+## Weather (Open-Meteo)
+
+One tool, [`weather_forecast`](../text_summarizer/weather.py), answering the weather of
+any place the user names — max/min temperature, apparent temperature, humidity, rain
+chance, precipitation, wind and gusts, UV, sunshine hours, sunrise/sunset, radiation and
+evapotranspiration, for 1–14 days.
+
+```bash
+# in .env — this is the whole configuration
+WEATHER_ENABLED=true                       # default; false removes the tool
+WEATHER_GEOCODING_URL=https://geocoding-api.open-meteo.com/v1/search
+WEATHER_FORECAST_URL=https://api.open-meteo.com/v1/forecast
+WEATHER_PROVIDER=open-meteo                # rendered in the [web] source line
+WEATHER_LANGUAGE=pt                        # language of the gazetteer's own names
+```
+
+No API key, no account, no Docker project. Open-Meteo is free and keyless, and it is
+the only no-key provider publishing all of the metrics above.
+
+**Why a dedicated tier and not `web_fetch`.** The web tier would technically answer
+"the weather in Osasco tomorrow" — behind a page built for humans, with the same numbers
+on ten sites, and via a search snippet, which is the single most poisonable channel the
+agent has. It also cannot answer the follow-up: *"and the humidity?"* is one parameter
+away here and a second search there.
+
+### The place is resolved, never guessed
+
+This is the part that decides whether the feature is useful or actively harmful. A name
+is not a place:
+
+| Query | Resolves to | Population |
+|---|---|---|
+| `Osasco` | Osasco, São Paulo, Brasil | 728,615 |
+| `Osasco, SP` | the same, decisively | 728,615 |
+| `Springfield` | **8 US cities**, none winning | 170,188 / 154,341 / 114,394 / … |
+| `Valencia` | Spain 824,340 **and Venezuela 1,619,470** | the runner-up is larger |
+| `Nova York` | Nova Iorque, **Maranhão, Brasil** | 4,320 |
+| `New York` | York, **Nebraska** | 7,864 |
+| `Nova Iorque` | New York City, USA | 8,804,190 |
+| `New York, NY` | New York City, USA | 8,804,190 |
+
+Two independent signals decide when there is more than one candidate, and either is
+enough: the leader leads by 4× on population, **or** it holds a strictly better
+GeoNames administrative rank (a national capital beats a town whatever the sizes).
+Neither signal deciding is the interesting case, and there the tool **refuses** — it
+returns the candidates and *no numbers at all*, because a payload carrying both is one
+the model can quote from without reading the refusal. The model is then told to ask you,
+or to retry with the region added (`"Springfield, Illinois"` resolves in one call) or a
+country code (`Valencia` + `ES`).
+
+The last four rows are why the resolved city, state, country and population are **in the
+payload** and instruction rule 17 makes the model check them against what you asked
+before it reports anything. No code can tell "York, Nebraska" from a question about New
+York; a model that can see the state and the population, and is told not to guess, can.
+
+### Everything else about it
+
+- **Errors are data.** A service that is down, a date past the provider's horizon, a
+  place it has never heard of: each returns a readable error, and the provider's own
+  explanation is passed through rather than flattened into "HTTP 400".
+- **Dates are resolved in code** — `today`/`tomorrow`/`yesterday` (and `hoje`,
+  `amanhã`, `ontem`) or an ISO date. Anything else is refused with a pointer to the
+  clock tool, because a model doing date arithmetic from a reading is one hallucinated
+  day away.
+- **A forecast is never written to the vault.** Instruction rule 17 forbids it
+  explicitly: a note holding a forecast goes stale, and the vault cache would then
+  replay it verbatim tomorrow. `log_conversation` still runs, so the exchange is
+  recoverable from the day's chat log.
+- **The returned strings are sanitised, not framed.** The only free text is a gazetteer
+  name the model has to reproduce in its answer, so wrapping it in `<untrusted_content>`
+  would put the wrapper in your answer.
+- **SSRF.** Both endpoints are operator-configured, so — exactly like `SEARXNG_URL` —
+  they are dialled with `allow_private` (a self-hosted instance is on a Docker bridge)
+  and pinned to the vetted address. Link-local is refused either way.
+- **Not declared in `docker-compose.yml`.** Compose's `environment:` overrides
+  `env_file:`, so a default there would silently disable the tier in Docker. `.env`
+  reaches the container on its own.
+
 

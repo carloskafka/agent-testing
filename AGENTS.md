@@ -48,6 +48,7 @@ agent-testing/
     |-- digest_tools.py         # read_day_digest: the same reader, as a model-callable tool
     |-- eval_scoring.py         # ROUGE-1 (response_match_score) matching eval-set golden answers
     |-- web_search.py           # Optional third retrieval tier: SearXNG search + guarded page fetch
+    |-- weather.py              # Optional weather tier: Open-Meteo forecast for a named place
     |-- obsidian_tools.py       # Optional MCP tools for an Obsidian vault
     |-- model_chain.py          # The model chain, and the guard that keeps a foreign history off Gemini
     |-- gmail_tools.py          # Optional MCP tools for read-only Gmail access
@@ -101,6 +102,8 @@ agent-testing/
         |-- test_final_answer_not_stub.py     # The turn must end on an answer, not a stub
         |-- test_citations_in_answer.py       # Answer and citations are one message
         |-- test_conversation_not_notes.py     # Rules 8 and 15: do not persist or ask wrongly
+        |-- test_weather.py                    # Place resolution, the payload, and what must be data
+        |-- test_scenarios_harness.py         # The scenario harness's checkers, fed a turn that should fail
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
             |-- summarizer_eval_set.evalset.json # 4 eval cases
@@ -1148,13 +1151,167 @@ the agent's own `web_fetch` end to end, but no human saw the page change.
 
 **Not verified:** no live turn has run with the renderer configured *and* a working model tier. The `web_js_rendered_page_is_not_invented` scenario passed against a rebuilt container (26s, real film names, cited), but the final full-suite run was cut short — see below.
 
+### The weather tier — `weather.py`
+
+One `FunctionTool`, `weather_forecast(place, date, days, country)`, on Open-Meteo:
+max/min/apparent temperature, humidity, rain chance, precipitation, wind and gusts, UV,
+sunshine, sunrise/sunset, radiation, evapotranspiration. Enabled **by default** —
+`WEATHER_ENABLED=false` removes it — because opt-in means a deployment that never heard
+of this tier keeps answering the weather from a training cutoff, and the alternative is
+a silent capability nobody configured.
+
+**The place is the whole design.** A name is not a place, and a confidently wrong city's
+forecast is worse than a question. Measured, live:
+
+| Query | Resolves to | Population |
+|---|---|---|
+| `Osasco` | Osasco, São Paulo, Brasil | 728,615 |
+| `Springfield` | **8 US cities**, none winning | 170,188 / 154,341 / 114,394 / … |
+| `Valencia` | Spain 824,340 **and Venezuela 1,619,470** | the *runner-up* is larger |
+| `Nova York` | Nova Iorque, **Maranhão, Brasil** | 4,320 |
+| `New York` | York, **Nebraska** | 7,864 |
+| `New York, NY` | New York City, USA | 8,804,190 |
+
+`resolve_place` takes the leader on either of two independent signals — a 4× population
+lead (`DOMINANCE_RATIO`) **or** a strictly better GeoNames administrative rank
+(`_FEATURE_RANK`, `PPLC < PPLA < … < PPLX`, so a capital beats a town whatever the
+sizes) — and when neither decides it raises `AmbiguousPlace` and the tool returns
+`status: "ambiguous"` with the candidates and **no `forecast` key at all**. That second
+half is load-bearing: a payload carrying both is one the model can quote from without
+reading the refusal, and then "the tool said it was ambiguous" loses to a number sitting
+right there. Measured live: asked *"qual o tempo em Springfield amanhã?"*, the tool
+refused with 8 candidates and the model called `ask_user` offering four of them.
+
+`WEATHER_LANGUAGE=pt` is not decoration — with it "Londres" is London (8.96M) instead of
+a 2,627-person village in Catamarca. It is also **not a fix**, which is the row that
+matters: `Nova Iorque, Maranhão` and `York, Nebraska` are real places with those names,
+in every language. No code can separate them from the user's intent. So the resolved
+**name, admin1, country, country_code, latitude, longitude and population are in the
+payload** and rule 17 makes the model check them before reporting anything.
+
+**Three things about the geocoder were measured, not assumed, and two were wrong in the
+code first.** `country` is applied **client-side**: the endpoint accepts a `country=`
+parameter and silently ignores it (`country=BR` still returns the Italian Osasco), so
+sending it would advertise a guarantee it does not offer — `test_a_country_filter_is_applied_here_and_not_in_the_query`
+asserts on both halves, since a filter that works and a filter that is sent are
+different properties. And candidates are filtered to those whose own name contains the
+query, because the ranking is by relevance: ten results for "Springfield" include a
+*Palmyra* and a *Jackson*, which both make the question harder to answer and dilute the
+dominance test. The filter is **abandoned rather than emptying the list**, since the API
+also translates names and an exact match would turn "Nova York" into "no place found".
+
+**Dates are resolved in code, never by the model.** `start_date` accepts `""`, today/hoje,
+tomorrow/amanhã, yesterday/ontem and an ISO date; anything else raises with a pointer to
+`current_datetime`. The alternative is a model doing date arithmetic from a tool reading,
+which is one hallucinated day away, and rule 17 says so.
+
+**A forecast is never written to the vault, and that is rule 17's most surprising
+clause.** Rule 8 saves *every* summary, so without the exception a weather answer
+becomes a note — and gotcha 18's cache then replays it **verbatim tomorrow**. Rule 17
+therefore says DO NOT CALL `save_summary_to_second_brain`, while `log_conversation`
+still runs, so the exchange stays recoverable from the day's chat log. `17` is in
+`auto_optimize.REQUIRED_RULES` for the reason rule 14 is: no eval case is a weather case,
+ROUGE-1 cannot see a tool call, and ROUGE-1 *rises* as instructions get shorter.
+
+**Errors are data, including the provider's own sentence.** Open-Meteo answers a date
+past its horizon with HTTP 400 and `{"reason": "Parameter start_date is out of allowed
+range from 2026-07-03 to 2026-10-19"}`, which is the whole difference between a model
+that can explain and one reporting "HTTP 400". `web_search._http_get` discards error
+bodies because `web_fetch` has no use for them, so it grew **keyword-only
+`include_error_body=False`**, capped at `_ERROR_BODY_CAP`, rather than this module
+growing a second GET helper. Two mutations confirmed the flag is genuinely covered: the
+pass-through in `_api_json`, and the transport behaviour itself, each of which the first
+version of the suite missed *because every weather test stubs `_http_get`* — the four
+tests that drive the real transport against a fake httpx client are what closed that.
+
+**The returned strings are sanitised, not framed.** The only free text is a gazetteer
+name the model must reproduce in its answer, so `<untrusted_content>` around it would
+put the wrapper in the user's answer. `_field` collapses whitespace, drops markup
+characters and bounds the length instead.
+
+**Both endpoints are operator-configured**, so `check_url(..., allow_private=True)` —
+the same reasoning as `SEARXNG_URL`, and the same asymmetry: a self-hosted weather API
+is on a Docker bridge, and the rule that refuses every private address is right for a URL
+that came out of a search result. Link-local is refused either way.
+`test_a_link_local_endpoint_is_still_refused` fails if that check is dropped.
+
+**A `[web]` line from this tier names `open-meteo`, not `searxng`** — which is why
+`record_returned_urls` grew a `provider=` argument and `agent._web_provider_label` became
+turn-aware (one tier → its name, several → `web`, none → the configuration fallback).
+Before that, a forecast cited from a weather API carried the search engine's name, and
+nothing anywhere would have shown it.
+
+**Not in `docker-compose.yml`, deliberately.** Compose's `environment:` overrides
+`env_file:`, so a `WEATHER_ENABLED: ${WEATHER_ENABLED:-true}` there would *disable* the
+tier for every Docker deployment that had not set it. `env_file: .env` passes it already.
+
+**Verified live**, three turns against the deployed container (`space-bunny-free` as the
+served model): `Osasco/amanhã` → full metric set with every field unit-suffixed, a
+citable `[web][open-meteo][space-bunny-free]` line, `log_conversation` called and the
+answer on the **last** event (7 events); `Springfield` → refused, `ask_user` called;
+`Nova York` → the model chose `"New York, NY"` and got New York City.
+
+**What the live run found, twice, and neither time was an instruction problem in the
+obvious place.** Rule 17 originally ended "Log the exchange with `log_conversation` as
+rule 9 says". The model wrote *"Then log conversation."* into its answer and **never
+called it** — three turns out of three. It read the cross-reference as a note to
+itself. The clause now names the two arguments and says *a real tool call in a FURTHER
+STEP of this same turn, not something to write down in prose*, and the next live turn
+made the call. That is the same class of defect as rule 7's "at the very END of your
+answer": an instruction the model can satisfy by writing prose is an instruction it
+will.
+
+**Fixing that one produced flow-r5 again, in a new place, which is why the rule states
+the *order* and not just the calls.** With the log clause as above, the model wrote
+the full forecast — bullets, units and the source line — on the same event as its
+`log_conversation` call, and then ended the turn on 41 characters:
+
+```
+  3. TEXT len=2244  "- Amanhã, segunda-feira (05/10/2026), em Osasco … @@ADK_WEB@@…"  + CALL log_conversation
+  4. RESP log_conversation
+  5. TEXT len= 116  "**Text Summarizer Agent**  Vale levar um guarda-chuva: 86% de chuva."
+```
+
+The reader got everything. The **last event** did not, and the last event is what the
+trace reports, what `response_match_score` scores, and what a UI collapsing tool-call
+turns draws — the same inversion as `flow-r5`, reached by a different route. Rule 17
+now says: call `log_conversation` first, then write the answer as your **final**
+message, and says *why* in the rule ("a message you write BEFORE a tool call is not
+the message the reader ends up on"), because a small model follows an ordering it has
+been given a reason for. The reordering is pinned by
+`test_the_weather_rule_states_the_order_because_nothing_else_enforces_it`.
+
+**The stub check that was supposed to catch this passes on it.**
+`scenarios._final_answer_has_a_body` — applied by `run_scenario` to *every* scenario,
+and the check AGENTS.md credits with catching flow-r5 — reports "final answer carries 41
+characters of body". It requires *some* body, and a one-line remark is some body. It is
+not fixed here: that is the shared harness rather than this tier, it is a defect of its
+own, and it reverts alone. The weather tier asserts its metrics on the **last** text
+event instead (`_the_reader_ends_on_the_forecast`), and
+`test_the_reader_ends_on_the_forecast_catches_the_recorded_stub` carries the recorded
+turn and asserts both verdicts — the weather check fails, the shared one passes — so
+the gap stays visible rather than being quietly papered over.
+
+**Two scenarios, both green against the deployed container** (`python3 tools/scenarios.py
+--only weather_`, 29.7 s and 10.8 s): `weather_metrics_land_on_the_last_message` and
+`weather_an_ambiguous_name_is_asked_about_not_guessed`. The first is the shape of the
+fix — `weather_forecast`, then `log_conversation`, then the answer **last** — and
+`_final_answer_has_a_body` is *not* in its composition for the reason above, so the
+tier carries a check the shared harness cannot supply.
+
+**Visible in that run, and not caused by this feature:** the free-tier primary emits
+token debris in the answer (`as temperaturas Bowling Amsterdamaise`, `com最大值 de
+19,4 °C`). That is gap 7 — the 2026-10-03 chain reorder means every turn goes to a free
+endpoint — and the weather tier simply made it visible on every answer, because it now
+guarantees a model call on the most common everyday question.
+
 ### Scenario harness — `tools/scenarios.py`
 
 Real prompts against the deployed agent, judged from the **persisted session events**. Not a pytest test and not part of `make check`: it spends Gemini quota, writes to the real vault, and needs both services up.
 
 ```bash
 python3 tools/scenarios.py --list
-python3 tools/scenarios.py                  # all 13
+python3 tools/scenarios.py                  # all 15
 python3 tools/scenarios.py --only web_      # by prefix
 python3 tools/scenarios.py --keep           # do not delete the scenario sessions
 ```
@@ -1176,6 +1333,28 @@ Three harness bugs were found this way and none by writing it — each is a remi
 | nonce written `{{nonce}}` | every run sent the same prompt; the 2nd was a cache hit | uniqueness was checked on the *template*, which was unique while the render was fixed |
 | citation check read `results[0]` at top level | reported "no URLs" on a turn that returned nine | real payloads are `{"result": "<json string>"}` — ADK wraps a tool's return value |
 | duplication check counted text events | failed a healthy 4-tool turn as duplicated | a model narrating alongside a tool call is legitimate; only *repeated* text is duplication |
+
+**The weather scenarios' first live run failed on a checker that was wrong, and
+nothing offline could have told me.** `_weather_reports_the_metrics_not_one_of_them`
+asserts the payload carried the metrics, and it named them
+`precipitation_probability_max` and `wind_speed_10m_max` — which are the variables
+`weather.py` **requests**. The keys it **emits** are `rain_chance_pct` and
+`wind_max_kmh`; `_DAILY_FIELDS` maps one vocabulary to the other. So the check
+demanded two names the tool has never produced.
+
+The instructive half is that the hand-written fixture in `test_scenarios_harness.py`
+named them *the same wrong way*, so the fixture and the check agreed perfectly with
+each other and with nothing else. Every offline test passed, three mutations of the
+new checks were caught, and the defect was still there — it took a live run reading
+a real payload. That is the argument for this layer in one incident, and it is worth
+more than any amount of saying so.
+
+Two changes close it. The fixture is now **derived** from the checker's own list,
+because a fixture cannot check the tool and can only assert a guess; and
+`test_every_metric_this_check_names_is_one_weather_emits` asserts every name the check
+uses is one `weather._DAILY_FIELDS` produces, so a rename in the tool fails offline
+instead of at the next live run. Both mutations are confirmed caught — each half of
+the mapping confused the other way, and a rename.
 
 `web_js_rendered_page_is_not_invented` is the one worth knowing about: `ingresso.com` builds its listings in JavaScript and `web_fetch` does a plain HTTP GET with an HTML sanitiser, so the page arrives as a title and navigation. The failure there is not a crash — it is a model handed an empty page and a confident instruction writing plausible films and showtimes, every one fiction, with a citation attached. The check fires on a *schedule* claim and not on a bare film name, because a name can legitimately come from a search snippet and firing on those would make "stop citing" the only way to pass.
 
@@ -1370,6 +1549,10 @@ run leaves the previously published site up, which looks like success.
 | `RENDERER_DISMISS_HOSTS` / `RENDERER_DISMISS_TEXT` | What the renderer may click, for `POST /dismiss`. **Both blank means the primitive is OFF**, which is the intended default. Set on the **renderer** project, not the agent — it is the process that runs a stranger's JavaScript. Suffix match on the registrable name (`ingresso.com` covers `checkout.ingresso.com`); phrases are matched against a whole button label. See "The renderer can dismiss an overlay". |
 | `RENDERER_URL` | Optional headless-browser renderer, for pages a plain GET cannot read. Unset means `web_fetch` never falls back and the tier is byte-for-byte what it was. A **separate** compose project at `~/Downloads/apps/chromium`, reached as a service name over `agent-net`. Read the host off `docker network inspect agent-net`, not out of any document — including this one. |
 | `WEB_SEARCH_ENABLED` | `false` removes the web tools while leaving `SEARXNG_URL` in place. Eval runs want this: live results change daily, so they would make `response_match_score` measure the day |
+| `WEATHER_ENABLED` | `false` removes `weather_forecast`. **On by default** — opt-out, because opt-in means an unconfigured deployment answers the weather from a training cutoff. Not declared in `docker-compose.yml`: compose's `environment:` overrides `env_file:`, so a default there would silently disable it |
+| `WEATHER_GEOCODING_URL` / `WEATHER_FORECAST_URL` | Optional mirror or self-hosted instance. Operator-configured, so dialled with `allow_private=True` like `SEARXNG_URL`; link-local still refused |
+| `WEATHER_PROVIDER` | Rendered in slot two of every `[web]` line this tier produces. Default `open-meteo` |
+| `WEATHER_LANGUAGE` | Language of the gazetteer's own place names. Default `pt` — measured, "Londres" is London at `pt` and a 2,627-person village at `en`. Does **not** fix "Nova York" → *Maranhão* |
 | `SECOND_BRAIN_VAULT` | Absolute path of the directory holding the vault(s) for direct writes; defaults to `/vault`. Under Docker point this at the vault's **parent** (`/vaults`) so the real name survives — see "Which vault is active" |
 | `OBSIDIAN_VAULT_NAME` | Picks the active vault by directory name when the parent holds several. Never guessed. `./run.sh` can prompt for it and writes it to `.env` |
 | `VAULT_NAME` | Name rendered in every `**Sources**` line. Usually **not needed** — the name is derived from the resolved vault path. Set it only when the vault itself is bind-mounted and its name is not in the path. |

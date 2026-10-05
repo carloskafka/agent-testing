@@ -60,8 +60,23 @@ SEARXNG_URL_ENV = "SEARXNG_URL"
 #: ``invocation_id`` so a later turn cannot cite a page an earlier one found.
 WEB_URLS_STATE_KEY = "_web_urls_by_invocation"
 
+#: Session-state key holding which retrieval tiers ran this turn, for the same reason
+#: and under the same ``invocation_id`` keying: slot two of a ``[web]`` line answers
+#: "where did this come from", and naming SearXNG for a forecast read from a weather
+#: API is a provenance line that is wrong in the way nobody can see.
+#:
+#: A set per invocation rather than one string, because two tiers *can* run on one turn
+#: and the honest answer then is no single name -- see ``agent._web_provider_label``,
+#: which degrades to ``web`` rather than picking one of them.
+WEB_PROVIDERS_STATE_KEY = "_web_providers_by_invocation"
 
-def record_returned_urls(tool_context, urls) -> None:
+#: What this tier calls itself in slot two of a ``[web]`` source line. A constant
+#: rather than a lookup because both tools on this tier return SearXNG's own URLs, so
+#: there is no call site that could disagree about it.
+SEARXNG_PROVIDER = "searxng"
+
+
+def record_returned_urls(tool_context, urls, provider: str = "") -> None:
     """Note the URLs this turn's web tier **showed the model**, for the citation
     allow-list.
 
@@ -73,6 +88,12 @@ def record_returned_urls(tool_context, urls) -> None:
     is the films listing and the thing a reader needs is the per-session checkout
     link inside it -- so the citation that mattered most was the one the allow-list
     forbade, and the symptom was an answer with the times and no way to act on them.
+
+    ``provider`` names the retrieval tier and is recorded alongside the URLs, so a
+    ``[web]`` line can say where the answer came from instead of defaulting to whatever
+    tier happens to be configured -- which for a forecast read from a weather API would
+    be a provenance line naming SearXNG. Optional, because a caller with URLs to allow
+    and no tier to name still has to be able to record them.
 
     Recorded **by the tool, at the moment it returns them**, which is the only
     place the information is reliably available. The obvious alternative -- scanning
@@ -92,6 +113,7 @@ def record_returned_urls(tool_context, urls) -> None:
     invocation_id = getattr(tool_context, "invocation_id", None)
     if not invocation_id:
         return
+    tier = (provider or "").strip()[:64]
     try:
         state = tool_context.state
         recorded = state.get(WEB_URLS_STATE_KEY) or {}
@@ -101,6 +123,14 @@ def record_returned_urls(tool_context, urls) -> None:
         # The state object is a delta, so assign the whole key back.
         recorded[invocation_id] = sorted(merged)
         state[WEB_URLS_STATE_KEY] = recorded
+
+        if tier:
+            tiers = state.get(WEB_PROVIDERS_STATE_KEY) or {}
+            if not isinstance(tiers, dict):
+                tiers = {}
+            # Same delta-assignment caveat as above, for the same reason.
+            tiers[invocation_id] = sorted(set(tiers.get(invocation_id) or ()) | {tier})
+            state[WEB_PROVIDERS_STATE_KEY] = tiers
     except Exception:  # pragma: no cover - never break the turn
         pass
 
@@ -151,6 +181,10 @@ _ALLOWED_CONTENT_TYPES = (
 #: hostile response into memory.
 MAX_SEARCH_BYTES = 2 * 1024 * 1024
 MAX_PAGE_BYTES = 2 * 1024 * 1024
+
+#: Ceiling on the body of an *error* response, for the callers that ask for one (see
+#: ``_http_get``'s ``include_error_body``). An error body exists to carry a sentence.
+_ERROR_BODY_CAP = 8 * 1024
 
 SEARCH_TIMEOUT_S = 10.0
 FETCH_TIMEOUT_S = 15.0
@@ -537,6 +571,7 @@ def _http_get(
     timeout: float,
     max_bytes: int,
     address: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None,
+    include_error_body: bool = False,
 ):
     """GET ``url`` with redirects disabled and a hard byte ceiling.
 
@@ -564,6 +599,17 @@ def _http_get(
     ``trust_env=False`` because httpx otherwise honours ``HTTP_PROXY`` and
     friends: the socket would go to the proxy while the address we vetted is not
     the address anything connects to. Nothing in this deployment needs a proxy.
+
+    ``include_error_body`` hands back the body of an error response as if it were
+    a success, and defaults to false so every existing caller is untouched. One
+    caller needs it (:mod:`text_summarizer.weather`): Open-Meteo refuses a date
+    past its horizon with HTTP 400 and a ``reason`` naming the range it can serve,
+    and that sentence is the whole difference between a model that can tell the
+    user why and one reporting "HTTP 400". :func:`fetch_page_text` has no use for
+    it -- an unreadable page is unreadable whatever the server says about it --
+    which is why this is a flag on the shared helper rather than a second GET
+    helper in that module. Capped at :data:`_ERROR_BODY_CAP`, so a server that
+    answers a 4xx with an unbounded body still cannot make the agent buffer it.
     """
     import httpx
 
@@ -582,17 +628,23 @@ def _http_get(
         if response.status_code in (301, 302, 303, 307, 308):
             location = response.headers.get("location", "")
             return response.status_code, location, None
-        if response.status_code >= 400:
+        if response.status_code >= 400 and not include_error_body:
             return response.status_code, "", None
         content_type = response.headers.get("content-type", "")
+        # An error body is read under a much lower ceiling than a page: it exists to
+        # carry one sentence of explanation, and the only thing an unbounded one could
+        # achieve is to make the agent buffer whatever the server felt like sending.
+        ceiling = max_bytes
+        if response.status_code >= 400:
+            ceiling = min(max_bytes, _ERROR_BODY_CAP)
         chunks: list[bytes] = []
         size = 0
         for chunk in response.iter_bytes():
             size += len(chunk)
-            if size > max_bytes:
+            if size > ceiling:
                 # Raised rather than returned: a caller cannot accidentally read
                 # a half-read body as if it were the whole page.
-                raise _BodyTooLarge(f"response exceeds {max_bytes} bytes")
+                raise _BodyTooLarge(f"response exceeds {ceiling} bytes")
             chunks.append(chunk)
         return response.status_code, "", (content_type, b"".join(chunks))
 
@@ -1358,7 +1410,7 @@ def web_search(query: str, max_results: int = 5, tool_context=None) -> str:
         )
     # These are the only URLs a [web] citation may name this turn. Recorded here,
     # where they are known, rather than reconstructed later from the event log.
-    record_returned_urls(tool_context, [hit.url for hit in hits])
+    record_returned_urls(tool_context, [hit.url for hit in hits], provider=SEARXNG_PROVIDER)
     # Each snippet is framed individually, so the marker sits next to the text it
     # describes. A single wrapper around the whole JSON was tried and is worse: the
     # model reads a JSON array, and the framing is far from the fields it poisons.
@@ -1722,7 +1774,7 @@ def web_fetch(url: str, max_chars: int = 6000, tool_context=None, attested: bool
         if _visible_len(fetched) >= RENDER_BELOW_CHARS or not renderer_url():
             if not attested and (markers := _age_gate_markers(fetched)):
                 fetched = _gate_advisory(fetched, markers)
-            record_returned_urls(tool_context, [url, *citable])
+            record_returned_urls(tool_context, [url, *citable], provider=SEARXNG_PROVIDER)
             return fetched
 
     # Either the fetch failed, or it succeeded and gave us a shell. Both are worth
@@ -1751,10 +1803,10 @@ def web_fetch(url: str, max_chars: int = 6000, tool_context=None, attested: bool
         # The page *and* the links it showed: a `[web]` citation may name any URL
         # the model actually read, which on a listing page is the per-item link and
         # not the listing itself.
-        record_returned_urls(tool_context, [url, *citable])
+        record_returned_urls(tool_context, [url, *citable], provider=SEARXNG_PROVIDER)
         return _wrap_untrusted(url, text)
 
     if not fetched:
         return json.dumps(_error(first_error), ensure_ascii=False)
-    record_returned_urls(tool_context, [url, *citable])
+    record_returned_urls(tool_context, [url, *citable], provider=SEARXNG_PROVIDER)
     return fetched

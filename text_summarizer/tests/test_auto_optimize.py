@@ -196,7 +196,7 @@ def test_a_renumbered_block_fails_closed():
 
     dropped = auto_optimize.missing_required_rules(renumbered)
 
-    assert dropped == [11, 12, 13, 14, 16], "only the numbers the compacted block lacks"
+    assert dropped == [11, 12, 13, 14, 16, 17], "only the numbers the compacted block lacks"
     assert 8 not in dropped, "rule 8 is still numbered 8 and must be found"
 
 
@@ -276,7 +276,7 @@ def _drive_loop(monkeypatch, tmp_path, rewrite, *, scores=(0.50, 0.60)):
 
 ORIGINAL_MARKER = (
     "1. one\n7. seven\n8. eight\n9. nine\n11. eleven\n12. twelve\n"
-    "13. thirteen\n14. fourteen\n16. sixteen\n"
+    "13. thirteen\n14. fourteen\n16. sixteen\n17. seventeen\n"
 )
 EVAL_STUB = pathlib.Path(__file__).parent / "eval" / "simple_test.test.json"
 
@@ -311,7 +311,7 @@ def test_a_compliant_rewrite_is_still_applied(monkeypatch, tmp_path):
     """
     compliant = (
         "1. one\n7. seven\n8. eight\n9. nine\n11. eleven\n12. twelve\n"
-        "13. thirteen\n14. fourteen\n15. extra\n16. sixteen\n"
+        "13. thirteen\n14. fourteen\n15. extra\n16. sixteen\n17. seventeen\n"
     )
 
     writes, kept = _drive_loop(monkeypatch, tmp_path, compliant)

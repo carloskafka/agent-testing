@@ -475,6 +475,211 @@ def _no_search_tool_error(turn: Turn) -> tuple[bool, str]:
     return True, "no retrieval tool errored"
 
 
+# --- the weather tier --------------------------------------------------------
+#
+# A forecast is the question class where a *wrong* answer is most confident: every
+# number looks right, and nothing about the shape of the payload says the place is
+# 400 km away. These four exist because that is what the feature has to get right,
+# not because a unit test can see it.
+
+
+#: Metric families, as the words an answer might use for them. Two spellings each
+#: because the answer may be in the user's language, which here is not English.
+_METRIC_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("humidity", ("umidade", "humidity", "humedad")),
+    ("rain", ("chuva", "rain", "lluvia", "precipita")),
+    ("wind", ("vento", "wind", "viento")),
+    ("uv", ("uv", "ultravioleta", "ultraviolet")),
+)
+
+#: A metric word must be a whole word. This is not fussy matching: the first version
+#: of these checks used bare ``in``, and ``"uv"`` matched inside the middle of
+#: *"ch**uv**a"* -- so a 41-character closing remark about an umbrella counted as two
+#: metric families and the check passed on exactly the turn it was written for.
+#: ``"rain"`` has the same problem inside *"training"*, which this repo's own
+#: instructions are full of.
+_METRIC_RE = re.compile(
+    r"\b(" + "|".join(w for _, words in _METRIC_FAMILIES for w in words) + r")\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _metric_families(text: str) -> list[str]:
+    """The metric families a piece of prose actually names, each counted once.
+
+    Families rather than words, so an answer that says "chuva" four times has not
+    reported four metrics.
+    """
+    words = {w.lower() for w in _METRIC_RE.findall(text or "")}
+    return sorted(family for family, spellings in _METRIC_FAMILIES if words & set(spellings))
+
+
+#: The emitted metric names every forecast row must carry, spelled as ``weather.py``
+#: emits them and **not** as the provider names it requests. Those are two different
+#: vocabularies -- ``weather._DAILY_FIELDS`` maps one to the other -- and the first
+#: version of this check named them the wrong way round:
+#:
+#:   precipitation_probability_max   (requested)   ->   rain_chance_pct    (emitted)
+#:   wind_speed_10m_max              (requested)   ->   wind_max_kmh       (emitted)
+#:
+#: Nothing offline could catch that: the hand-written fixture in the test module used
+#: the same wrong names, so the two agreed with each other and with nothing else. The
+#: live scenario run did, by reading a real payload -- which is the whole argument for
+#: it existing. ``test_every_metric_this_check_names_is_one_weather_emits`` now closes
+#: the loop in the other direction, so a rename fails offline instead of at the next
+#: live run.
+_WEATHER_METRICS: tuple[str, ...] = (
+    "temperature_max_c",
+    "temperature_min_c",
+    "humidity_mean_pct",
+    "rain_chance_pct",
+    "wind_max_kmh",
+    "uv_index_max",
+)
+
+
+def _forecast_payloads(turn: Turn) -> list[dict]:
+    """Every ``weather_forecast`` result, unwrapped from ADK's ``{"result": ...}``.
+
+    ADK wraps a tool's return value as a JSON *string* under ``result``, so reading
+    ``payload["result"]`` as a dict is the mistake that made an early version of the
+    citation check report "no URLs" on a turn that returned nine.
+    """
+    out = []
+    for payload in turn.tool_results("weather_forecast"):
+        value = payload.get("result", payload) if isinstance(payload, dict) else payload
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                continue
+        if isinstance(value, dict):
+            out.append(value)
+    return out
+
+
+def _weather_resolved_to_the_city_that_was_asked_about(turn: Turn) -> tuple[bool, str]:
+    """The answer must be about the place the user named.
+
+    The tool resolves a name against a gazetteer, and a name is not a place:
+    "Nova York" is *Nova Iorque, Maranhão* (4,320 people) and "New York" is *York,
+    Nebraska* (7,864). No code can tell either from the user's intent, which is why
+    the resolved city, state and population travel in the payload and rule 17 makes
+    the model check them. This is the check that would notice it not doing so.
+
+    Asserted on the payload rather than the prose: a model that silently reports the
+    wrong city is not one that announced it, and an answer that mentions "Maranhão"
+    somewhere is not the same as an answer *about* Maranhão.
+    """
+    payloads = _forecast_payloads(turn)
+    if not payloads:
+        return False, "no weather_forecast payload to check"
+    place = payloads[0].get("place") or {}
+    country = str(place.get("country_code") or "")
+    if country.upper() not in {"BR", ""}:
+        return False, f"asked about Osasco, resolved to {place.get('name')}, {country}"
+    population = place.get("population")
+    if isinstance(population, (int, float)) and population < 100_000:
+        return False, f"resolved to {place.get('name')}, population {population}"
+    return True, f"{place.get('name')}/{place.get('country_code')} pop={population}"
+
+
+def _weather_reports_the_metrics_not_one_of_them(turn: Turn) -> tuple[bool, str]:
+    """The answer must carry several metrics, not just the temperature it was asked for.
+
+    The tool exists so a *follow-up* -- "and the humidity?" -- costs no extra turn,
+    which is only true if the first answer already reported them. A single-metric
+    answer satisfies the prompt and defeats the feature, so this is asserted against
+    the payload's own keys rather than against the prose, where a model could
+    satisfy it by mentioning two words in a sentence.
+    """
+    payloads = _forecast_payloads(turn)
+    forecast = payloads[0].get("forecast") if payloads else None
+    if not forecast:
+        return False, "no forecast rows in the payload"
+    keys = set(forecast[0]) if isinstance(forecast[0], dict) else set()
+    missing = sorted(set(_WEATHER_METRICS) - keys)
+    if missing:
+        return False, f"payload is missing metrics: {missing}"
+    # And the answer has to carry more than the temperature it was asked about.
+    signals = _metric_families(turn.answer)
+    if len(signals) < 2:
+        return False, f"the answer mentions {signals or 'no other metric'}"
+    return True, f"{len(signals)} metric families in the answer"
+
+
+def _the_reader_ends_on_the_forecast(turn: Turn) -> tuple[bool, str]:
+    """The **last** message must carry the metrics, not merely the turn.
+
+    Asserted on the final text event rather than on :attr:`Turn.answer`, and that is
+    the whole point of this check. ``Turn.answer`` joins every text part in the turn,
+    which is the right property for gotcha 16 (the answer emitted twice) and exactly
+    the wrong one here: measured live, the model put the full forecast *and* the
+    ``log_conversation`` call on one event, and then ended the turn on a 41-character
+    closing remark -- "vale levar um guarda-chuva: 86% de chuva" -- whose only number
+    was already on the previous event.
+
+    The reader got the forecast, so every check on the joined prose passed. The
+    *last* event did not have it, and the last event is what the trace reports, what
+    ``response_match_score`` scores, and what a UI collapsing tool-call turns draws.
+
+    This is why rule 17 states the order -- log first, answer last -- instead of
+    leaving it to the model, and why :func:`_final_answer_has_a_body` is not enough
+    on its own: that one requires *some* body and 41 characters of body is some
+    body. (That check is a separate defect, in the shared harness rather than in this
+    tier, so it is deliberately not changed here.)
+    """
+    texts = [
+        p["text"]
+        for event in turn.events
+        if event.get("author") == APP
+        for p in _parts(event)
+        if p.get("text")
+    ]
+    if not texts:
+        return False, "no answer text at all"
+    body = answer_body(texts[-1])
+    signals = _metric_families(body)
+    if len(signals) < 2:
+        return False, (
+            f"the turn ends on {len(body)} characters carrying "
+            f"{signals or 'no metric'} rather than on the forecast"
+        )
+    return True, f"the last message carries {len(signals)} metric families"
+
+
+def _no_second_brain_note(turn: Turn) -> tuple[bool, str]:
+    """A forecast must never be written to the vault.
+
+    Rule 8 saves *every* summary, so without rule 17's exception a weather answer
+    becomes a note -- and the vault cache then replays it **verbatim tomorrow**. The
+    exchange is still logged, so what is forbidden is the note specifically.
+    """
+    if "save_summary_to_second_brain" in turn.tool_calls:
+        return False, "rule 17 forbids save_summary_to_second_brain for a forecast"
+    return True, "no note written"
+
+
+def _asked_rather_than_guessed(turn: Turn) -> tuple[bool, str]:
+    """An ambiguous name must produce a question, not a pick.
+
+    ``Springfield`` matches eight US cities and none wins, so the tool returns the
+    candidates and **no** ``forecast`` key at all. There is therefore nothing for the
+    model to report even if it wanted to: it has to ask. This asserts the question
+    reached the user, because a refusal that is never spoken is a dead turn.
+    """
+    payloads = _forecast_payloads(turn)
+    if not payloads:
+        return False, "no weather_forecast payload"
+    if payloads[0].get("status") != "ambiguous":
+        return False, f"status={payloads[0].get('status')!r}, expected 'ambiguous'"
+    if payloads[0].get("forecast"):
+        return False, "an ambiguous result carried a forecast anyway"
+    if "ask_user" not in turn.tool_calls:
+        return False, f"never asked: tools={turn.tool_calls}"
+    return True, "refused with candidates and asked"
+
+
 def _does_not_invent_showings(turn: Turn) -> tuple[bool, str]:
     """No fabricated film-and-time detail when the page could not be read.
 
@@ -783,6 +988,48 @@ SCENARIOS: list[Scenario] = [
         check=_all([_no_error, _no_cache_hit, _web_not_used, _answered]),
         note="the tier is additive: a vault question must not reach it",
         tags=["web", "vault"],
+    ),
+    Scenario(
+        name="weather_metrics_land_on_the_last_message",
+        prompt="me fala a temperatura para osasco amanhã",
+        check=_all(
+            [
+                _no_error,
+                _no_cache_hit,
+                _called("weather_forecast"),
+                _called("log_conversation"),
+                _weather_resolved_to_the_city_that_was_asked_about,
+                _weather_reports_the_metrics_not_one_of_them,
+                _the_reader_ends_on_the_forecast,
+                _no_second_brain_note,
+            ]
+        ),
+        note=(
+            "rule 17's whole shape: read the forecast, log it, and write the answer "
+            "LAST. Writing the answer before the log call is what ends the turn on a "
+            "stub -- and `_final_answer_has_a_body`, applied by run_scenario rather "
+            "than composed in here, is the check that catches it."
+        ),
+        tags=["weather", "regression"],
+    ),
+    Scenario(
+        name="weather_an_ambiguous_name_is_asked_about_not_guessed",
+        prompt="qual o tempo em Springfield amanhã?",
+        check=_all(
+            [
+                _no_error,
+                _no_cache_hit,
+                _called("weather_forecast"),
+                _asked_rather_than_guessed,
+                _no_second_brain_note,
+            ]
+        ),
+        note=(
+            "Springfield matches eight US cities and none of them wins. The tool "
+            "refuses and returns candidates with NO forecast key, so the model has "
+            "nothing to quote but the candidates -- it must ask, not pick one."
+        ),
+        tags=["weather"],
     ),
     # --- regressions: the tier must not have broken the rest -----------------
     Scenario(
