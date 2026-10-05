@@ -1118,6 +1118,31 @@ breeds, varying in size, color, and temperament.</code></pre>
         <pre><code>What do I already know about deployment pipelines? Cite the notes.</code></pre>
 
         <p>
+          Weather needs no key at all. It answers from the vault-free tier, and it
+          draws the day &mdash; this is a real answer, captured from a running agent,
+          with the graph <b>rendered in code</b> from the tool's own numbers:
+        </p>
+        <pre><code>Qual a temperatura agora em Osasco?</code></pre>
+        <pre><code>- **Agora em Osasco (SP), às 17:11 (hora local):** 18,5 °C, com sensação térmica de 19,1 °C.
+- **Hoje (segunda, 05/10/2026):** máxima de 22,9 °C e mínima de 16,1 °C (média de 18,3 °C).
+
+```adk-chart
+Hourly - Osasco, 2026-10-05, local time
+°C 16.1..22.9  ·  rain % 0..44
+hora   00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+°C     ▂  ▁  ▁  ▁  ▁  ▁  ▁  ▂  ▃  ▃  ▅  ▆  ▇  █  ▇  ▅  ▄  ▃  ▂  ▂  ▂  ▁  ▁  ▁
+rain % ▃  ▂  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▂  ▃  ▄  ▄  ▄  ▄  ▄  ▅  ▅  ▆  █
+now  17:00  18.5 °C  rain 24%
+```</code></pre>
+        <p>
+          The headline number is the <b>hour containing now</b>, not the day's average
+          &mdash; the average was what the agent used to answer this question, and it is
+          the wrong number for "agora". Each row is scaled to its own range, and the
+          model never plots a value itself: it writes one placeholder and the curve is
+          drawn from the payload the tool returned.
+        </p>
+
+        <p>
           More examples, including the ones that do <em>not</em> work and why, are in
           <a href="https://github.com/carloskafka/agent-testing/blob/main/docs/TESTING.md" rel="noopener">Testing in the web UI</a>.
         </p>
@@ -1156,7 +1181,12 @@ breeds, varying in size, color, and temperament.</code></pre>
               The weather for any place you name — max/min and apparent temperature,
               humidity, rain chance, wind and gusts, UV, sunshine, sunrise/sunset,
               radiation and evapotranspiration — from Open-Meteo, which needs
-              <b>no API key</b>. <b>On by default</b>; set
+              <b>no API key</b>. Every forecast also carries the
+              <b>hour by hour</b>, so "what time is it now" is answered from the
+              hour containing now rather than the daily average, and the answer draws
+              the day as a curve <b>rendered in code</b> from the tool's own payload —
+              the model writes one token and never plots a number itself.
+              <b>On by default</b>; set
               <code>WEATHER_ENABLED=false</code> to remove the tool. The agent asks
               when a name is genuinely ambiguous ("Springfield" matches eight US
               cities) instead of guessing, and reports the city, state and population
@@ -1237,7 +1267,8 @@ breeds, varying in size, color, and temperament.</code></pre>
           </tr>
           <tr>
             <td><b>Open-Meteo</b></td>
-            <td>Every daily weather metric for a named place, keyless. <b>On by
+            <td>Every daily weather metric for a named place, plus the hour by
+              hour and a curve drawn in the answer. Keyless. <b>On by
               default</b></td>
             <td>nothing — <code>WEATHER_ENABLED=false</code> to remove</td>
           </tr>
@@ -1328,7 +1359,7 @@ breeds, varying in size, color, and temperament.</code></pre>
     </div>
     <div class="card">
       <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/ARCHITECTURE.md" rel="noopener">Architecture</a></p>
-      <p class="      <p class="card__body">Vault, web and renderer tiers, <code>**Sources**</code> provenance, and the model chain.</p></p>
+      <p class="card__body">Vault, web and renderer tiers, <code>**Sources**</code> provenance, and the model chain.</p>
     </div>
     <div class="card">
       <p class="card__title"><a href="https://github.com/carloskafka/agent-testing/blob/main/docs/MODELS.md" rel="noopener">Models</a></p>

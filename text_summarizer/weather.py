@@ -197,6 +197,49 @@ _DAILY_FIELDS: dict[str, str] = {
     "et0_fao_evapotranspiration": "evapotranspiration_mm",
 }
 
+#: Open-Meteo hourly variable -> the key it is reported under. Same convention as
+#: :data:`_DAILY_FIELDS` (one place names the provider's spelling and the output's), and
+#: verified 200 one at a time against the live API for the same reason: a single
+#: unknown name 400s the whole request, so this list cannot be assembled from the
+#: documentation.
+#:
+#: Six variables, not more, and the choice is a payload-size one rather than a
+#: completeness one. Measured: these six for one day arrive as **1,341 bytes** in the
+#: compact form below, against **15,385** raw for fourteen. Every extra variable costs
+#: another 24 numbers on every weather turn, and the free tier that serves most turns
+#: here is the one least able to afford the context -- so the set is what a curve and
+#: an "is it raining this afternoon" question actually need, and not everything the
+#: provider publishes. Deliberately absent: ``weather_code``, because 24 condition
+#: phrases is prose the model must translate rather than numbers it can plot, and the
+#: daily row already carries the day's condition.
+_HOURLY_FIELDS: dict[str, str] = {
+    "temperature_2m": "temperature_c",
+    "apparent_temperature": "apparent_c",
+    "precipitation_probability": "rain_chance_pct",
+    "relative_humidity_2m": "humidity_pct",
+    "precipitation": "precipitation_mm",
+    "wind_speed_10m": "wind_kmh",
+}
+
+#: How many hours of the series the payload carries.
+#:
+#: A **cap that does not move with ``days``**, which is the property worth having: at
+#: fourteen days the provider's own block is 336 hours and ~18 KB of the model's
+#: context, on a turn whose whole point is usually one day. Twenty-four is one day --
+#: the day asked about, on every request whose ``days`` is 1, which is the default and
+#: the common case -- and the curve drawn from it is the width a markdown line can
+#: hold. Withheld hours are reported as ``hourly.truncated``, after
+#: ``digest_tools.read_day_digest``: the true total stays visible, so a capped list can
+#: never be read as a quiet day.
+MAX_HOURLY_HOURS = 24
+
+#: Session-state key holding the hourly series this turn's ``weather_forecast`` call
+#: returned, for the same reason and under the same ``invocation_id`` keying as
+#: ``web_search.WEB_URLS_STATE_KEY``: the chart is rendered in
+#: ``sources.render_sources`` from the answer's own callback, which has no view of the
+#: tool result -- and ``session.events`` is not populated under ``adk web``.
+HOURLY_STATE_KEY = "_weather_hourly_by_invocation"
+
 #: Durations the provider publishes in seconds and a reader thinks in hours.
 _SECONDS_DIVISOR = {"sunshine_hours": 3600.0, "daylight_hours": 3600.0}
 
@@ -647,6 +690,11 @@ def _forecast_query(place: Place, first: datetime.date, days: int) -> str:
         "latitude": round(place.latitude, 4),
         "longitude": round(place.longitude, 4),
         "daily": ",".join(_DAILY_FIELDS),
+        # The hourly block rides along on the same request rather than as a second one.
+        # Open-Meteo answers both from one document in one call, so this costs no
+        # extra round trip and no extra failure mode -- there is no second request that
+        # can succeed while the first fails.
+        "hourly": ",".join(_HOURLY_FIELDS),
         "timezone": "auto",
         # start_date/end_date rather than past_days/forecast_days: the requested range
         # is an absolute one, and asking for it directly is what lets the provider
@@ -655,6 +703,147 @@ def _forecast_query(place: Place, first: datetime.date, days: int) -> str:
         "end_date": (first + datetime.timedelta(days=days - 1)).isoformat(),
     }
     return f"{base}?{urlencode(query)}"
+
+
+def _hourly_window(
+    block: Any, offset_seconds: int, now: datetime.datetime | None
+) -> tuple[dict | None, dict | None]:
+    """The provider's hourly block, renamed, capped, and paired with ``now``.
+
+    Returns ``(series, current)``, and **either may be absent**: a provider that sends
+    no hourly block yields no keys at all rather than empty ones, which is the same
+    discipline ``weather_forecast`` already applies to an unresolved place (no
+    ``forecast`` key, so there is nothing to quote from a refusal).
+
+    Parallel arrays rather than a list of row objects, because the shape decides the
+    size: 24 rows of five named fields serialise to **2,772** bytes where the same data
+    as parallel arrays is **1,341** -- and every weather turn pays it. The ``time`` axis
+    is stated once and every other array lines up with it by index.
+
+    ``current`` is the hour *containing* now, chosen by flooring rather than rounding:
+    at 16:19 the answer is the 16:00 reading, and rounding up would report a forecast
+    for a moment that has not happened. It is present only when now falls inside the
+    window carried here, so a question about a future day gets no ``current`` -- the
+    honest answer, since the alternative is the day's *mean* presented as "now", which
+    is precisely the defect this was added to close (session
+    ``9c40b78b-3d1c-41ff-bd8a-ccaec8c85b7f``, where "temperatura agora" was answered
+    with the daily average).
+    """
+    if not isinstance(block, dict):
+        return None, None
+    times = block.get("time")
+    if not isinstance(times, list) or not times:
+        return None, None
+
+    total = len(times)
+    kept = min(total, MAX_HOURLY_HOURS)
+    series: dict[str, Any] = {
+        "unit": "hour",
+        "axis": "every array below lines up with time[] by index",
+        "hours": kept,
+        "time": [_field(t, 16) for t in times[:kept]],
+    }
+    if total > kept:
+        series["truncated"] = total - kept
+
+    for variable, key in _HOURLY_FIELDS.items():
+        values = block.get(variable)
+        if not isinstance(values, list):
+            continue
+        column: list[float | int | None] = []
+        for raw in values[:kept]:
+            value = _number(raw)
+            if value is None:
+                column.append(None)
+                continue
+            # Same integral-value rule as the daily row: the provider sends
+            # percentages as JSON integers, which a float division turns into "84.0%".
+            column.append(int(value) if float(value).is_integer() else round(value, 1))
+        series[key] = column
+
+    return series, _current_reading(series, offset_seconds, now)
+
+
+def _current_reading(
+    series: dict[str, Any], offset_seconds: int, now: datetime.datetime | None
+) -> dict | None:
+    """This hour's readings, computed here so the model never does the arithmetic.
+
+    ``now`` is the **place's** wall clock: the provider's ``utc_offset_seconds`` is what
+    makes that possible, and it is the same field the daily rows already carry. Working
+    in UTC and reporting it as local time is the failure mode -- it would put "agora" on
+    the wrong hour for every place whose offset is not zero, which is every place
+    outside west Africa and the UK.
+    """
+    if now is None:
+        return None
+    times = series.get("time") or []
+    try:
+        local = now.astimezone(datetime.UTC) + datetime.timedelta(
+            seconds=offset_seconds
+        )
+    except (OverflowError, OSError, ValueError):  # pragma: no cover - absurd offset
+        return None
+    # tzinfo dropped, and the minutes floored: the provider's stamps are naive local
+    # times, so a `+00:00` suffix here would match nothing and silently yield no
+    # reading of the present at all.
+    stamp = local.replace(tzinfo=None, minute=0, second=0, microsecond=0).isoformat(
+        timespec="minutes"
+    )
+    index = times.index(stamp) if stamp in times else None
+    if index is None:
+        # The window starts at the requested day and today is not in it, or the
+        # provider's clock differs by an hour. Either way there is no reading of *now*
+        # here and inventing one is the one answer this module must never produce.
+        return None
+
+    reading: dict[str, Any] = {
+        "time": times[index],
+        "hour": times[index][-5:],
+        "local_date": local.date().isoformat(),
+        "local_time": local.strftime("%H:%M"),
+    }
+    for key in _HOURLY_FIELDS.values():
+        column = series.get(key)
+        if isinstance(column, list) and index < len(column):
+            reading[key] = column[index]
+    return reading
+
+
+def record_hourly_series(tool_context: Any, series: Any, current: Any, place: Any = "") -> None:
+    """Note the hourly series this turn returned, so the chart can be drawn from it.
+
+    Recorded by the tool, at the moment it returns the numbers, and keyed by
+    ``invocation_id`` -- identical to ``web_search.record_returned_urls`` and for the
+    same reason. The alternative, reconstructing it from ``session.events``, does not
+    work in production: that list is not populated under ``adk web``'s database session
+    service, which is the only place a chart can be rendered from anyway (the tool
+    result is gone by the time the answer's ``after_model_callback`` runs).
+
+    Best-effort and silent on failure, like every other state write on this path: a
+    missing chart costs a curve in the answer, never a turn.
+    """
+    if tool_context is None or not isinstance(series, dict):
+        return
+    invocation_id = getattr(tool_context, "invocation_id", None)
+    if not invocation_id:
+        return
+    try:
+        state = tool_context.state
+        recorded = state.get(HOURLY_STATE_KEY) or {}
+        if not isinstance(recorded, dict):
+            recorded = {}
+        # The state object is a delta, so assign the whole key back. `place` is the name
+        # the tool *resolved*, not the one it was asked for: the chart is titled with
+        # the city the numbers are for, and an ambiguous match never gets this far.
+        recorded[invocation_id] = {
+            "hourly": series,
+            "current": current if current else None,
+            "place": _field(place, 80),
+        }
+        state[HOURLY_STATE_KEY] = recorded
+    except Exception:  # pragma: no cover - never break the turn
+        pass
 
 
 def _day(index: int, daily: dict[str, Any], offset_seconds: int) -> dict[str, Any]:
@@ -697,8 +886,16 @@ def _day(index: int, daily: dict[str, Any], offset_seconds: int) -> dict[str, An
     return day
 
 
-def forecast(place: Place, first: datetime.date, days: int) -> tuple[list[dict], dict, str]:
-    """The forecast for ``place``, as ``(days, provider_metadata, url)``."""
+def forecast(
+    place: Place, first: datetime.date, days: int, now: datetime.datetime | None = None
+) -> tuple[list[dict], dict | None, dict | None, dict, str]:
+    """The forecast for ``place``, as ``(days, hourly, current, provider_metadata, url)``.
+
+    ``hourly`` and ``current`` are ``None`` when the provider sent no hourly block, so
+    a provider that does not serve one degrades to the daily-only tool it was before
+    rather than failing. ``now`` is injected rather than read here so the current-hour
+    arithmetic is testable against a fixed clock.
+    """
     count = max(1, min(int(days), MAX_DAYS))
     url = _forecast_query(place, first, count)
     status, document = _api_json(url, timeout=FORECAST_TIMEOUT_S, with_error_body=True)
@@ -717,6 +914,8 @@ def forecast(place: Place, first: datetime.date, days: int) -> tuple[list[dict],
     if not rows:
         raise ValueError("the forecast service returned no days for the requested range")
 
+    series, current = _hourly_window(document.get("hourly"), offset, now)
+
     metadata: dict[str, Any] = {
         "timezone": _field(document.get("timezone"), 64),
         "timezone_abbreviation": _field(document.get("timezone_abbreviation"), 24),
@@ -725,7 +924,7 @@ def forecast(place: Place, first: datetime.date, days: int) -> tuple[list[dict],
             document.get("daily_units") if isinstance(document.get("daily_units"), dict) else {}
         ),
     }
-    return rows, metadata, url
+    return rows, series, current, metadata, url
 
 
 def _failure(message: str, hint: str = "") -> dict[str, Any]:
@@ -770,6 +969,18 @@ def weather_forecast(
     max and min temperature, apparent temperature, humidity, rain chance, precipitation,
     wind and gusts, UV, sunshine hours, sunrise and sunset. The user asked for the whole
     picture, and a follow-up that should not have been needed is a turn wasted.
+
+    **A question about *now* is answered by `current`, not by the daily row.** The daily
+    figures are aggregates over the whole day, so their mean is not what the weather is
+    doing at this moment -- report `current` for "agora", "right now", "at the moment",
+    and for any question about a particular hour. `current` is absent when the day asked
+    is not today, and then there is no reading of the present to report: say the forecast
+    is for that date rather than substituting a daily average.
+
+    `hourly` is the day asked about, one reading per hour, in the place's local time.
+    Every array lines up with `hourly.time` by index. Use it for "when will it rain",
+    "what will it be like tonight", and anything comparing two hours. Do not add these
+    numbers up: the daily row already carries the totals.
 
     Do NOT save this to the second brain: a forecast goes stale, and a note holding one
     would be replayed verbatim by the vault cache tomorrow.
@@ -817,7 +1028,9 @@ def weather_forecast(
         return _failure("the weather service took too long to answer")
     try:
         first = start_date(date)
-        rows, metadata, url = forecast(resolved, first, days)
+        rows, series, current, metadata, url = forecast(
+            resolved, first, days, now=datetime.datetime.now(datetime.UTC)
+        )
     except ValueError as exc:
         return _failure(str(exc))
 
@@ -828,8 +1041,12 @@ def weather_forecast(
     # forecast URL is the one to cite: it is the document the numbers came from, and it
     # carries the coordinates the answer was computed for.
     record_returned_urls(tool_context, [url, geocode_url], provider=provider_name())
+    # The chart is drawn from this, by ``sources.render_chart``, off the answer's own
+    # callback. Recorded whether or not a tool_context exists, so the call degrades to
+    # "no chart" rather than to an exception.
+    record_hourly_series(tool_context, series, current, resolved.name)
 
-    return {
+    payload: dict[str, Any] = {
         "status": "ok",
         "asked_for": asked,
         "place": resolved.as_dict(),
@@ -847,3 +1064,11 @@ def weather_forecast(
             "place it is for"
         ),
     }
+    # Absent rather than empty, for the reason the ambiguous branch has no `forecast`
+    # key: a key that exists but is empty is one the model can quote from without
+    # reading the refusal beside it.
+    if series:
+        payload["hourly"] = series
+    if current:
+        payload["current"] = current
+    return payload

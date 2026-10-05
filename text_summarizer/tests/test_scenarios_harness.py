@@ -1137,3 +1137,282 @@ def test_the_metrics_scenario_requires_the_conversation_to_be_logged():
     ok, detail = metrics.check(unlogged)
     assert ok is False, "dropping log_conversation still passed the weather scenario"
     assert "log_conversation" in detail
+
+
+# --- the hourly graph, in the harness -------------------------------------------
+#
+# Two checkers and two scenarios, and the fixtures below are **built by calling
+# `sources.render_chart`** rather than by writing a fence by hand. That is the whole
+# argument for the layer, restated: the first version of the weather check named the
+# provider's variables instead of the emitted keys, the fixture named them the same wrong
+# way, and the two agreed perfectly with each other and with nothing else. A fixture that
+# cannot check the tool can only assert a guess -- but a fixture that *calls* the
+# renderer cannot guess, because there is nothing left to guess.
+
+
+def _hourly_block(hours: int = 24) -> dict:
+    """The series shape ``weather_forecast`` emits: parallel arrays, ``time`` first."""
+    return {
+        "unit": "hour",
+        "hours": hours,
+        "time": [f"2026-10-05T{h:02d}:00" for h in range(hours)],
+        "temperature_c": [16.1 + (h % 7) for h in range(hours)],
+        "rain_chance_pct": [0] * (hours - 6) + [20, 30, 40, 44, 40, 30],
+    }
+
+
+_CURRENT = {"time": "2026-10-05T16:00", "hour": "16:00", "temperature_c": 19.2,
+            "rain_chance_pct": 24}
+
+
+def _rendered_chart(**kw) -> str:
+    from text_summarizer.sources import render_chart
+
+    return render_chart(_hourly_block(), _CURRENT, "Osasco")
+
+
+def _forecast_with_hourly(**overrides) -> dict:
+    """ADK's wrapper, carrying the series and the reading of *now*."""
+    payload: dict = {
+        "status": "ok",
+        "asked_for": "Osasco",
+        "place": _osasco(),
+        "forecast": [_full_day()],
+        "hourly": _hourly_block(),
+        "current": _CURRENT,
+    }
+    payload.update(overrides)
+    return {"result": json.dumps(payload)}
+
+
+def _now_answer(chart: str) -> str:
+    return (
+        "**Text Summarizer Agent**\n\n"
+        "Agora em Osasco são 16:00 e a temperatura é de 19,2 °C, com 24% de chance de "
+        "chuva. A máxima do dia é de 28,2 °C e a mínima de 16,8 °C.\n\n"
+        f"{chart}\n\n"
+        "**Sources**\n"
+        "- [web][open-meteo][space-bunny-free]<https://api.open-meteo.com/v1/forecast?x=1>: "
+        "leitura por hora.\n"
+    )
+
+
+def _chart_turn(answer: str | None = None, payload: dict | None = None) -> scenarios.Turn:
+    """A healthy graph turn: both tool calls first, the answer -- graph and all -- last."""
+    return _turn(
+        _text_event("como fica o tempo em Osasco hoje hora a hora?", author="user"),
+        _event(_APP, [_call("weather_forecast", {"place": "Osasco"})]),
+        _event(
+            _APP,
+            [_response("weather_forecast", payload if payload is not None else _forecast_with_hourly())],
+        ),
+        _event(_APP, [_call("log_conversation", {"user_message": "x"})]),
+        _event(_APP, [_response("log_conversation", {})]),
+        _text_event(answer if answer is not None else _now_answer(_rendered_chart())),
+    )
+
+
+def test_the_curve_levels_this_check_knows_are_the_ones_the_renderer_emits():
+    """The duplicated constant, closed.
+
+    :data:`scenarios._CURVE_LEVELS` exists because ``tools/scenarios.py`` runs under a
+    system ``python3`` with no business importing the agent package -- the same trade as
+    ``_WEATHER_METRICS``. Duplication is only safe while something asserts the two agree,
+    and the failure it guards is silent in the worst direction: a renamed glyph would
+    leave the check accepting whatever the renderer now emits, so it would stop being a
+    check at all and nothing would say so.
+    """
+    from text_summarizer.sources import _CURVE_LEVELS as emitted
+
+    assert set(scenarios._CURVE_LEVELS) == set(emitted)
+    assert len(set(emitted)) == len(emitted), "the renderer emits a duplicated glyph"
+
+
+def test_a_healthy_graph_turn_passes_both_curve_checks():
+    for check in (
+        scenarios._the_curve_rides_in_the_answer,
+        scenarios._the_curve_is_drawn_from_the_payload,
+        scenarios._now_is_answered_from_the_hour_containing_now,
+    ):
+        ok, detail = check(_chart_turn())
+        assert ok is True, f"{check.__name__}: {detail}"
+
+
+def test_the_model_drawing_the_graph_itself_fails_the_curve_check():
+    """The failure the whole code-rendering decision exists to prevent.
+
+    A model told "show the hour as a graph" and left to itself produces *something* with
+    a curve in it, so a check that merely looked for temperature glyphs would pass. The
+    fence is the evidence of who drew it: ``render_chart`` emits ``adk-chart`` and nothing
+    else does, so its absence is the whole signal.
+    """
+    hand_drawn = (
+        "**Text Summarizer Agent**\n\n"
+        "Osasco hoje: 16 °C de madrugada, subindo a 23 °C às 13h.\n\n"
+        "Temperatura: ▂▃▅▇█▆▄▂▁▁▂▃▄▅▆▇█▇▅▃▂▁▁▂▃\n"
+    )
+    ok, detail = scenarios._the_curve_rides_in_the_answer(_chart_turn(answer=hand_drawn))
+    assert ok is False
+    assert "drew the graph itself" in detail
+
+
+def test_a_curve_left_on_its_own_message_fails_even_though_the_turn_carries_it():
+    """The ``flow-r5`` shape, for the graph.
+
+    The reader has the forecast and the curve somewhere in the turn; the *last* event is
+    a remark. Every joined-prose check passes, and the reader ends on the remark -- the
+    same inversion the weather tier already has a check for, now on the newest trailing
+    block.
+    """
+    stub = (
+        "**Text Summarizer Agent**\n\nVale levar um guarda-chuva à tarde.\n"
+    )
+    turn = _turn(
+        _text_event("como fica o tempo em Osasco hoje hora a hora?", author="user"),
+        _event(_APP, [_call("weather_forecast", {"place": "Osasco"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_with_hourly())]),
+        _event(_APP, [_response("log_conversation", {})]),
+        _text_event(_now_answer(_rendered_chart())),
+        _text_event(stub),
+    )
+    ok, detail = scenarios._the_curve_rides_in_the_answer(turn)
+    assert ok is False
+    assert "ends on something other than" in detail
+
+
+def test_two_charts_on_the_last_message_fail_the_curve_check():
+    """Duplication is gotcha 16 arriving through a different door."""
+    chart = _rendered_chart()
+    answer = _now_answer(chart).replace(chart, f"{chart}\n{chart}")
+    ok, detail = scenarios._the_curve_rides_in_the_answer(_chart_turn(answer=answer))
+    assert ok is False
+    assert "charts on the last message" in detail
+
+
+def test_a_curve_row_shorter_than_the_series_fails_the_payload_check():
+    """A curve narrower than the hours it claims to cover is a truncated graph.
+
+    The renderer sizes the row from the series, so this cannot happen without something
+    else already being broken -- which is the point. Read off the answer rather than
+    re-derived from the payload, so it checks what the reader would see.
+    """
+    chart = _rendered_chart()
+    truncated = "\n".join(
+        line[: 7 + 3 * 6] if line[:7] in ("°C     ", "rain % ") else line
+        for line in chart.split("\n")
+    )
+    ok, detail = scenarios._the_curve_is_drawn_from_the_payload(
+        _chart_turn(answer=_now_answer(truncated))
+    )
+    assert ok is False
+    assert "characters for 24 hours" in detail
+
+
+def test_a_cell_that_is_not_a_curve_level_fails_the_payload_check():
+    """A number typed where a glyph belongs is a number the code did not draw.
+
+    The control for the test above: this check must be able to see a wrong cell, or the
+    width assertion is the only thing it can do.
+    """
+    chart = _rendered_chart()
+    doctored = chart.replace("▇", "7", 1)
+    ok, detail = scenarios._the_curve_is_drawn_from_the_payload(
+        _chart_turn(answer=_now_answer(doctored))
+    )
+    assert ok is False
+    assert "not a curve level" in detail
+
+
+def test_a_forecast_with_no_hourly_series_fails_the_payload_check():
+    """A provider that serves no hourly block must not be reported as a chart drawn."""
+    payload = {"status": "ok", "asked_for": "Osasco", "place": _osasco(),
+               "forecast": [_full_day()]}
+    ok, detail = scenarios._the_curve_is_drawn_from_the_payload(
+        _chart_turn(payload={"result": json.dumps(payload)})
+    )
+    assert ok is False
+    assert "no hourly series" in detail
+
+
+# --- "now", which is what the series was added for -----------------------------
+
+
+def _now_turn(payload: dict | None = None) -> scenarios.Turn:
+    return _turn(
+        _text_event("Qual a temperatura agora em Osasco?", author="user"),
+        _event(_APP, [_call("weather_forecast", {"place": "Osasco", "date": "today"})]),
+        _event(
+            _APP,
+            [_response("weather_forecast", payload if payload is not None else _forecast_with_hourly())],
+        ),
+        _event(_APP, [_response("log_conversation", {})]),
+        _text_event(_now_answer(_rendered_chart())),
+    )
+
+
+def test_a_payload_without_a_current_reading_fails_the_now_check():
+    """The recorded defect's root, as a check: nothing in a daily row answers "now"."""
+    payload = {"status": "ok", "asked_for": "Osasco", "place": _osasco(),
+               "forecast": [_full_day()], "hourly": _hourly_block()}
+    ok, detail = scenarios._now_is_answered_from_the_hour_containing_now(
+        _now_turn({"result": json.dumps(payload)})
+    )
+    assert ok is False
+    assert "no `current` reading" in detail
+
+
+def test_an_answer_that_quotes_the_daily_mean_fails_the_now_check():
+    """The model choosing the familiar field over the right one.
+
+    The payload carries ``current`` and the prose still says 18,3 °C -- the day's mean.
+    Only the second half of the check sees this, which is why it is there: a check on the
+    payload alone would pass a turn that answers the wrong question correctly.
+    """
+    day = _full_day()
+    day["temperature_mean_c"] = 18.3
+    day["temperature_max_c"] = 22.9
+    answer = _now_answer(_rendered_chart()).replace("19,2 °C", "18,3 °C")
+    turn = _turn(
+        _text_event("Qual a temperatura agora em Osasco?", author="user"),
+        _event(_APP, [_call("weather_forecast", {"place": "Osasco", "date": "today"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_with_hourly(forecast=[day]))]),
+        _event(_APP, [_response("log_conversation", {})]),
+        _text_event(answer),
+    )
+    ok, detail = scenarios._now_is_answered_from_the_hour_containing_now(turn)
+    assert ok is False, detail
+
+
+def test_an_answer_that_never_names_the_hour_fails_the_now_check():
+    """Reporting a temperature "now" without saying which hour is not a reading.
+
+    The hourly data exists so that "agora" has an answer with an hour attached; prose
+    that gives the number and no hour is the same gap the recorded turn had, one layer
+    up.
+    """
+    answer = _now_answer(_rendered_chart()).replace("16:00", "agora")
+    ok, detail = scenarios._now_is_answered_from_the_hour_containing_now(
+        _chart_turn(answer=answer)
+    )
+    assert ok is False
+    assert "never names the hour" in detail
+
+
+def test_the_now_check_cannot_be_satisfied_by_the_mean_being_absent():
+    """A payload with no ``temperature_mean_c`` must not pass vacuously.
+
+    Without the ``mean is not None`` guard a provider that does not serve the mean would
+    skip the comparison entirely, and the check would report a pass on a turn it never
+    examined.
+    """
+    day = {k: v for k, v in _full_day().items() if k != "temperature_mean_c"}
+    day["temperature_max_c"] = 22.9
+    turn = _turn(
+        _text_event("Qual a temperatura agora em Osasco?", author="user"),
+        _event(_APP, [_call("weather_forecast", {"place": "Osasco"})]),
+        _event(_APP, [_response("weather_forecast", _forecast_with_hourly(forecast=[day]))]),
+        _event(_APP, [_response("log_conversation", {})]),
+        _text_event(_now_answer(_rendered_chart())),
+    )
+    ok, _ = scenarios._now_is_answered_from_the_hour_containing_now(turn)
+    assert ok is True, "the comparison is skipped when there is no mean to compare against"
