@@ -48,7 +48,7 @@ agent-testing/
     |-- digest_tools.py         # read_day_digest: the same reader, as a model-callable tool
     |-- eval_scoring.py         # ROUGE-1 (response_match_score) matching eval-set golden answers
     |-- web_search.py           # Optional third retrieval tier: SearXNG search + guarded page fetch
-    |-- weather.py              # Optional weather tier: Open-Meteo forecast for a named place
+    |-- weather.py              # Optional weather tier: Open-Meteo daily + hourly for a named place
     |-- obsidian_tools.py       # Optional MCP tools for an Obsidian vault
     |-- model_chain.py          # The model chain, and the guard that keeps a foreign history off Gemini
     |-- gmail_tools.py          # Optional MCP tools for read-only Gmail access
@@ -68,7 +68,7 @@ agent-testing/
     # it is local run state, like .adk/ (see gotcha 8).
     `-- tests/
         |-- conftest.py                    # Blanks LANGFUSE_PUBLIC_KEY so imports don't do a network auth check
-        |-- test_sources.py                # **Sources** renderer unit tests
+        |-- test_sources.py                # **Sources** renderer unit tests, and the hourly curve
         |-- test_serve.py                  # The /vault route: serving, and traversal guards
         |-- test_agent_callback.py         # before/after agent callbacks (rewrite, cache hit/miss, key)
         |-- test_bot_name.py               # The **Name** stamp: derivation, idempotence, and the metrics control
@@ -102,7 +102,7 @@ agent-testing/
         |-- test_final_answer_not_stub.py     # The turn must end on an answer, not a stub
         |-- test_citations_in_answer.py       # Answer and citations are one message
         |-- test_conversation_not_notes.py     # Rules 8 and 15: do not persist or ask wrongly
-        |-- test_weather.py                    # Place resolution, the payload, and what must be data
+        |-- test_weather.py                    # Place resolution, the payload, the hourly series, and what must be data
         |-- test_scenarios_harness.py         # The scenario harness's checkers, fed a turn that should fail
         `-- eval/
             |-- simple_test.test.json            # 1 eval case
@@ -1292,12 +1292,19 @@ event instead (`_the_reader_ends_on_the_forecast`), and
 turn and asserts both verdicts — the weather check fails, the shared one passes — so
 the gap stays visible rather than being quietly papered over.
 
-**Two scenarios, both green against the deployed container** (`python3 tools/scenarios.py
---only weather_`, 29.7 s and 10.8 s): `weather_metrics_land_on_the_last_message` and
-`weather_an_ambiguous_name_is_asked_about_not_guessed`. The first is the shape of the
+**Four scenarios, all green against the deployed container** (`python3 tools/scenarios.py
+--only weather_`, 4/4 at 15.1–20.3 s): `weather_metrics_land_on_the_last_message`,
+`weather_an_ambiguous_name_is_asked_about_not_guessed`,
+`weather_now_is_the_hour_and_not_the_day_mean` and
+`weather_the_curve_rides_in_the_answer`. The first is the shape of the
 fix — `weather_forecast`, then `log_conversation`, then the answer **last** — and
 `_final_answer_has_a_body` is *not* in its composition for the reason above, so the
-tier carries a check the shared harness cannot supply.
+tier carries a check the shared harness cannot supply. The last two are the hourly work
+(see below) and its `_the_curve_is_drawn_from_the_payload` half reads the curve **off the
+answer** rather than re-deriving it, so it checks what a reader would see; the chart
+fixtures in `test_scenarios_harness.py` are built by calling `sources.render_chart`
+rather than by hand, because a fixture that *calls* the renderer cannot guess the wrong
+field names the way the hand-written one did.
 
 **Visible in that run, and not caused by this feature:** the free-tier primary emits
 token debris in the answer (`as temperaturas Bowling Amsterdamaise`, `com最大值 de
@@ -1305,13 +1312,127 @@ token debris in the answer (`as temperaturas Bowling Amsterdamaise`, `com最大�
 endpoint — and the weather tier simply made it visible on every answer, because it now
 guarantees a model call on the most common everyday question.
 
+### The hourly series, and the graph drawn from it
+
+Found live, session `9c40b78b-3d1c-41ff-bd8a-ccaec8c85b7f`, asked *"Qual a temperatura
+agora em Osasco?"*. Seven events, healthy shape, no error — and the answer was the
+day's **mean**, 18,3 °C, reported with an honest hedge: *"a fonte fornece valores do dia,
+nao uma leitura instantanea"*. That is a correct description of the wrong number, and
+it is the shape of every failure this repository cares about: nothing red, nothing
+logged, a confident wrong answer.
+
+**The root cause is that the daily block has no time axis in it.** Nothing in the
+payload could answer "now" — not the mean, not the max, not any field. So the hourly
+series and the `current` reading are not a feature laid on top; they are the missing
+axis, and the graph is what that axis buys. Measured on the same day: the nearest hour
+to 16:19 was **19,2 °C** against the 18,3 °C that was reported.
+
+Both halves therefore shipped as one change, because either alone is half the answer:
+the series answers "now", and a series with no time axis drawn on it is a table.
+
+**Fetched in the same request** (`hourly=` on `_forecast_query`), not a second call. Six
+variables, and **no `weather_code`** — the daily row already carries it as an English
+phrase, so a second copy would be a code the model has to translate in the answer.
+Every variable was verified to return 200 **on its own** before being added, because
+one unknown name 400s the whole request and would have cost the daily forecast too. That
+is the same discipline `_DAILY_FIELDS` documents, and it is not optional.
+
+**Parallel arrays, measured.** `{"time": [...], "temperature_c": [...]}` is **1,341
+bytes** for 24 hours; 24 row objects are 2,772. Every weather turn pays that difference,
+and the difference decides the shape.
+
+**The payload is bounded, and `MAX_HOURLY_HOURS = 24` is the invariant.** It does not
+grow with `days`: 14 days would otherwise be 336 hours, 15,385 bytes raw. Withheld
+hours are reported as `hourly.truncated`, after `digest_tools`' payload — a capped
+series that does not say so is indistinguishable from a quiet day.
+
+**`current` is computed in code, and *floored*.** `utc_offset_seconds` makes the
+place's wall clock available; a `+00:00` suffix on the stamp matches nothing and
+silently yields no reading of the present (that was one of six real bugs found by
+measuring the render). Flooring rather than rounding is the same choice as the age
+gate's: at 17:11 the answer is the 17:00 reading, and rounding up reports a forecast
+for a moment that has not happened. It is **absent, not null**, when today is outside
+the window — so a question about tomorrow gets no reading of the present rather than a
+fabricated one.
+
+#### The graph is drawn in code, like the `**Sources**` block
+
+The model writes `@@ADK_CHART@@` and nothing else; `sources.render_chart` draws the
+curve from the same payload, substituted **where the model put the token**. Not a PNG,
+and that was measured rather than assumed: no matplotlib, **zero TTF fonts in the
+container**, a new route to serve, and an unverified `<img>` sanitizer in the dev UI.
+A fenced block needs nothing added to the deployment.
+
+Three properties of drawing it here, and each is load-bearing:
+
+- **A model asked to plot 24 numbers invents them.** The `adk-chart` fence is the
+  *evidence of who drew the curve*, so a hand-drawn graph is a scenario **failure**
+  rather than a slightly worse answer. That is why `_the_curve_rides_in_the_answer`
+  keys on the fence and not on the presence of glyphs.
+- **The graph must not reach a `quality.*` score.** `summary_only` strips it, exactly
+  as it strips the `**Sources**` block. A row of `▂▃▄▅` is not prose the model wrote,
+  and `lexical_recall` compares against the *user's* words — left in, every weather
+  turn would carry a small permanent bias, which is precisely the drift that makes
+  `response_match_score` useless (gotcha 4).
+- **A chart the model drew cannot be idempotent.** `render_sources` may run over an
+  already-rendered answer, and the linked-`Sources` re-parse depends on that. The
+  rendered block carries no sentinel of its own, so a second pass reproduces it byte
+  for byte.
+
+**The strip marker is the fence's info string, not a phrase.** `adk-chart` is invisible
+when rendered, and no model emits it by accident. A stripper keyed on a word is a
+stripper that eats the rest of the answer the first time the word appears — so
+`test_the_strip_marker_is_the_fence_info_string_not_a_word_the_model_writes` pins it.
+Mutating `_is_chart_fence` to "any fenced block" passes that test for the *wrong*
+reason, which is why `test_a_code_block_the_model_wrote_is_not_stripped_as_if_it_were_a_chart`
+exists: it caught exactly that. That mutation also found a real bug — `\b` after
+`adk-chart` matches before a hyphen, so ```` ```adk-chart-2 ```` read as a chart. The
+match is now `fullmatch` on the info string.
+
+**Each row is scaled to its own range, and the scales sit on their own line.**
+Temperature around 19 and rain chance around 0 have nothing in common numerically, and
+one shared scale flattens the smaller into a straight line — a chart that lies about the
+thing it exists to show. The scales line is separate because appending it to each row
+pushed a 24-hour day to 94 characters, which wraps in the dev UI's 800px column, and a
+wrapped chart is not a chart. A missing reading is a **blank cell**, never the lowest
+level: plotting a `null` as "the minimum" invents a reading. A flat series draws flat,
+via an explicit `span == 0` branch — dropping it is a `ZeroDivisionError`, caught.
+
+**"now" is a labelled line, not a caret on the curve.** A caret has to sit under exactly
+the right column, and column alignment depends on the monospace face the *reader's*
+browser falls back to, which this module cannot guarantee. A labelled line cannot be
+misread.
+
+**The state plumbing mirrors `record_returned_urls` exactly**, keyed by
+`invocation_id` under `HOURLY_STATE_KEY`, for the same reason: `session.events` is not
+populated under `adk web`, so the series is recorded by the tool at the moment it
+returns the numbers. One turn's chart is never reused by the next — pinned, and
+mutation-tested.
+
+**Verified live, twice.** Session `9c40b78b`'s exact prompt, against the rebuilt
+container (`md5sum` of all three files equal to the tree — gotcha 17): the answer now
+opens *"**Agora em Osasco (SP), às 17:11 (hora local):** 18,5 °C"*, with the mean
+demoted to its own labelled clause. The graph rendered, on the same message as the
+prose, before the `**Sources**` block. Both new scenarios pass against the deployed
+stack (`--only weather_`, **4/4**, 15.1–20.3 s each).
+
+**Thirteen mutations, thirteen caught, each confirmed landed.** A mutation that
+silently fails to apply reports "all pass", which reads exactly like a robust suite and
+means the opposite — so the sweep asserts the file's bytes differ before trusting the
+result. Per-series→shared scale; `span == 0` dropped; strip keyed on any fence;
+`summary_only` not stripping; the substitution removed; the dropped-placeholder gap left
+behind; a non-string `place` f-stringified; the cap raised to 336; `truncated` dropped;
+floor→round; local→UTC; `invocation_id` ignored; and the graph check accepting a
+hand-drawn curve. **Two survived the first sweep** — the last two — and both are now
+tests rather than comments.
+
 ### Scenario harness — `tools/scenarios.py`
 
 Real prompts against the deployed agent, judged from the **persisted session events**. Not a pytest test and not part of `make check`: it spends Gemini quota, writes to the real vault, and needs both services up.
 
 ```bash
 python3 tools/scenarios.py --list
-python3 tools/scenarios.py                  # all 15
+python3 tools/scenarios.py                  # all 18
 python3 tools/scenarios.py --only web_      # by prefix
 python3 tools/scenarios.py --keep           # do not delete the scenario sessions
 ```

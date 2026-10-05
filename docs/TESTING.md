@@ -258,3 +258,42 @@ Summarize: In Q3 2024, Acme Corp reported revenue of $4.2 billion, up 12% from $
 ```
 
 Does the agent correctly preserve the numbers in the summary?
+
+**Edge case 4: "agora" — the question the daily average cannot answer**
+
+```
+Qual a temperatura agora em Osasco?
+```
+
+Needs no configuration; the weather tier is on by default. **This is the prompt that
+found a live defect**, and it is worth running because the failure was invisible: the
+agent used to answer with the day's **mean** and say so honestly (*"a fonte fornece
+valores do dia, nao uma leitura instantanea"*) — a correct description of the wrong
+number, on a turn with no error anywhere in it.
+
+What to look for now:
+
+- The **first** number is the hour containing now, and it names the hour (*"às 17:11
+  (hora local)"*). The daily mean may appear, but only labelled as the mean.
+- A code block fenced `adk-chart` sits **inside the same message** as the bullets,
+  between them and the `**Sources**` block — one curve per series, an hour axis, and a
+  `now` line.
+- If instead you see the model drawing its own curve with `▂▃▅` characters and no
+  `adk-chart` fence, the renderer did not run: that is the model plotting numbers, and
+  a scenario check treats it as a failure.
+- Nothing was written to the vault. Rule 17 forbids it for weather, because a saved
+  forecast goes stale and the vault cache would replay it tomorrow.
+
+Then ask again, and it must **not** come from the cache: the answer here changes
+hourly, so a replay is a stale number presented as a live one.
+
+**Edge case 5: a genuinely ambiguous place**
+
+```
+qual o tempo em Springfield amanhã?
+```
+
+`Springfield` matches eight US cities and none of them wins. The tool refuses and
+returns the candidates with **no numbers at all**, so the agent should ask which one
+you meant rather than picking one and reporting a confident forecast for the wrong
+state. "Springfield, Illinois" resolves in a single call.

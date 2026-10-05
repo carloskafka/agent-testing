@@ -30,6 +30,7 @@ import datetime
 import ipaddress
 import json
 import sys
+from urllib.parse import unquote
 
 import pytest
 from text_summarizer import agent, weather, web_search
@@ -1133,3 +1134,502 @@ def test_the_instruction_never_asks_for_a_real_weather_provider_name():
     instruction = agent.root_agent.instruction
     assert "[web][open-meteo]" not in instruction
     assert "[web][@@ADK_WEB@@][@@ADK_MODEL@@]" in _rule(17)
+
+
+# --- the hourly series, and the reading of *now* --------------------------------
+#
+# Found live on session 9c40b78b-3d1c-41ff-bd8a-ccaec8c85b7f, asked "Qual a
+# temperatura agora em Osasco?". The agent answered the **daily mean** and said so
+# honestly -- "a fonte fornece valores do dia, nao uma leitura instantanea" -- which is
+# correct and useless: the day's mean is not what the weather is doing at the moment, and
+# the daily block is 29 scalars with no time axis in it. Measured against the live API,
+# the hour containing that moment read **19.2 °C** against the 18.3 °C mean that was
+# reported.
+#
+# So `current` is not a convenience. It is the fix for that answer, and it is computed in
+# code because the alternative is a model doing date arithmetic off a tool reading.
+
+
+def _hourly(day="2026-10-05", hours=24, temps=None, rain=None, **overrides):
+    """The provider's hourly block in its own variable names, as the live API sends it.
+
+    The values are the shapes it returned for Osasco on 2026-10-04: a night near 16 °C,
+    a peak of 22.9 °C at 13:00, and rain chance rising through the evening.
+    """
+    times = [f"{day}T{h:02d}:00" for h in range(hours)]
+    block = {
+        "time": times,
+        "temperature_2m": temps if temps is not None else [16.1 + (h % 7) for h in range(hours)],
+        "apparent_temperature": [15.4 + (h % 5) for h in range(hours)],
+        "precipitation_probability": rain if rain is not None else [0] * (hours - 6) + [20, 30, 40, 44, 40, 30],
+        "relative_humidity_2m": [88] * hours,
+        "precipitation": [0.0] * hours,
+        "wind_speed_10m": [9.4] * hours,
+    }
+    block.update(overrides)
+    return block
+
+
+def test_the_hourly_series_rides_along_on_the_daily_request(monkeypatch):
+    """One HTTP call, not two.
+
+    The obvious implementation -- a second request for ``hourly=`` -- would double the
+    latency of every weather turn and add a second way for the turn to fail with only one
+    of the two blocks arriving. Open-Meteo answers both from one document, so the hourly
+    variables belong in the query that was already being sent.
+    """
+    seen: list[str] = []
+
+    def fake(url, **kwargs):
+        seen.append(url)
+        if "forecast" in url:
+            return 200, "", ("application/json", json.dumps(_forecast_doc(hourly=_hourly())).encode())
+        return 200, "", ("application/json", json.dumps({"results": [_place()]}).encode())
+
+    monkeypatch.setattr(weather, "_http_get", fake)
+    weather.weather_forecast("Osasco")
+    forecast_calls = [u for u in seen if "forecast" in u]
+    assert len(forecast_calls) == 1
+    query = unquote(forecast_calls[0].split("hourly=", 1)[1].split("&", 1)[0])
+    assert set(query.split(",")) == set(weather._HOURLY_FIELDS)
+
+
+def test_every_hourly_variable_is_asked_for_by_the_providers_own_name():
+    """The mapping is the provider's spelling -> ours, and nothing is left unrenamed.
+
+    Two halves, both load-bearing. A key left as the provider spells it reaches the
+    answer as ``temperature_2m`` and the model has to guess the unit; and a variable
+    added to the query but not to the mapping silently drops off the payload, which looks
+    like a provider outage rather than an omission here.
+    """
+    for variable, key in weather._HOURLY_FIELDS.items():
+        assert variable and key and key != variable
+        assert key.endswith(("_c", "_pct", "_mm", "_kmh")), key
+
+
+def test_the_series_is_parallel_arrays_and_not_a_list_of_rows(monkeypatch):
+    """The shape decides the size: 2,772 bytes as rows, 1,341 as arrays (measured).
+
+    Every weather turn pays this, on a provider that is a free tier, so the more compact
+    of two equivalent encodings is the one that has to be the one in the code -- and the
+    test states the property rather than the byte count, because a provider that starts
+    sending more precision would move the count without moving anything else.
+    """
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly()))
+    series = weather.weather_forecast("Osasco")["hourly"]
+    assert series["time"][0] == "2026-10-05T00:00"
+    assert len(series["time"]) == 24
+    for key in weather._HOURLY_FIELDS.values():
+        assert isinstance(series[key], list), key
+        assert len(series[key]) == 24, key
+        assert not isinstance(series[key][0], dict)
+    assert "rows" not in series
+
+
+def test_the_payload_size_does_not_grow_with_the_number_of_days(monkeypatch):
+    """The property ``MAX_HOURLY_HOURS`` exists for.
+
+    Fourteen days of the six hourly variables is 336 hours and **15,385 bytes** from the
+    provider -- measured -- on a turn whose whole point is usually one day. A cap that
+    moved with ``days`` would put an unbounded block in the model's context on exactly the
+    questions that already carry fourteen daily rows.
+    """
+    _serve(
+        monkeypatch,
+        forecast=_forecast_doc(
+            hourly=_hourly(hours=24 * 14),
+            daily=_daily(time=[f"2026-10-{d:02d}" for d in range(5, 19)]),
+        ),
+    )
+    one = weather.weather_forecast("Osasco", date="2026-10-05")
+    many = weather.weather_forecast("Osasco", date="2026-10-05", days=14)
+    assert len(many["hourly"]["time"]) == weather.MAX_HOURLY_HOURS
+    assert many["hourly"]["truncated"] == 24 * 14 - weather.MAX_HOURLY_HOURS
+    # The daily rows are what `days` is for; the series is capped either way.
+    assert len(one["hourly"]["time"]) == len(many["hourly"]["time"])
+    assert len(many["forecast"]) == 14
+
+
+def test_withheld_hours_are_reported_rather_than_hidden(monkeypatch):
+    """A capped list that does not say so is indistinguishable from a quiet day.
+
+    The same reasoning ``digest_tools.read_day_digest`` follows: ``hours`` stays the true
+    number the series carried before the cap, and ``truncated`` says how many the reader
+    is not seeing.
+    """
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly(hours=24 * 3)))
+    series = weather.weather_forecast("Osasco", days=3)["hourly"]
+    assert series["hours"] == weather.MAX_HOURLY_HOURS
+    assert series["truncated"] == 48
+
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly(hours=24)))
+    assert "truncated" not in weather.weather_forecast("Osasco")["hourly"]
+
+
+def test_now_is_the_hour_containing_the_moment_not_the_nearest_one(monkeypatch):
+    """Floored, not rounded.
+
+    At 16:19 the answer is the 16:00 reading. Rounding up would report the 17:00
+    forecast as what is happening now, which is a forecast for a moment that has not
+    happened -- on the most common everyday question, about the next hour.
+    """
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly()))
+    seen = {}
+
+    real_now = datetime.datetime
+
+    class _Clock(real_now):
+        @classmethod
+        def now(cls, tz=None):
+            return real_now(2026, 10, 5, 19, 19, tzinfo=datetime.UTC)
+
+    monkeypatch.setattr(weather.datetime, "datetime", _Clock)
+    out = weather.weather_forecast("Osasco")
+    seen.update(out)
+    assert out["current"]["time"] == "2026-10-05T16:00"
+    assert out["current"]["hour"] == "16:00"
+    assert out["current"]["temperature_c"] == 16.1 + 16 % 7
+
+
+def test_now_is_the_places_own_time_and_not_utc(monkeypatch):
+    """The offset is what makes "now" answerable, and using UTC instead is silently wrong.
+
+    Osasco is UTC-3, so a UTC lookup would put "agora" three hours ahead -- at 22:00 UTC
+    it would report 22:00 local as the current hour. Every place outside west Africa and
+    the UK is affected, and the error is invisible because the answer still looks like a
+    plausible hour of the day.
+    """
+    for offset, utc_stamp, local_stamp in (
+        (-10800, "2026-10-05T19:19", "2026-10-05T16:00"),  # Osasco, UTC-3
+        (19800, "2026-10-05T09:19", "2026-10-05T14:00"),   # Delhi, UTC+5:30
+        (0, "2026-10-05T19:19", "2026-10-05T19:00"),       # Accra, UTC+0
+    ):
+        block = _hourly()
+        _serve(monkeypatch, forecast=_forecast_doc(hourly=block, utc_offset_seconds=offset))
+        hour = int(utc_stamp[11:13])
+        minute = utc_stamp[14:16]
+        moment = real_utc(2026, 10, 5, hour, int(minute))
+        current = weather._current_reading(
+            {"time": block["time"]}, offset, moment
+        )
+        assert current is not None, offset
+        assert current["time"] == local_stamp, offset
+
+
+def real_utc(*args):
+    return datetime.datetime(*args, tzinfo=datetime.UTC)
+
+
+def test_now_is_absent_for_a_day_that_is_not_today(monkeypatch):
+    """No reading of the present exists for tomorrow, so no reading is reported.
+
+    The alternative is the day's mean presented as "now" -- the exact answer this was
+    added to stop. The key is **absent** rather than null, for the reason the ambiguous
+    branch has no ``forecast`` key: a payload carrying both invites quoting the number.
+    """
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly(day="2030-01-01")))
+    out = weather.weather_forecast("Osasco", date="2030-01-01")
+    assert out["status"] == "ok"
+    assert "current" not in out
+    assert "hourly" in out
+
+
+def test_a_provider_that_serves_no_hourly_block_degrades_to_the_daily_tool(monkeypatch):
+    """Self-hosted or older provider: no hourly keys at all, and still a forecast.
+
+    The tier must not stop working because a graph stopped being drawable. That is the
+    whole reason the block is read with a plain ``isinstance`` check and the keys are
+    omitted rather than emitted empty.
+    """
+    _serve(monkeypatch)
+    out = weather.weather_forecast("Osasco")
+    assert out["status"] == "ok"
+    assert "hourly" not in out
+    assert "current" not in out
+    assert out["forecast"][0]["temperature_max_c"] == 28.1
+
+
+def test_an_hourly_block_of_the_wrong_shape_is_ignored(monkeypatch):
+    """A block that is not a mapping, or has no time axis, is not a series."""
+    for block in (None, [], "nope", {}, {"time": []}, {"time": "2026-10-05T00:00"}):
+        _serve(monkeypatch, forecast=_forecast_doc(hourly=block))
+        out = weather.weather_forecast("Osasco")
+        assert "hourly" not in out, block
+        assert out["status"] == "ok"
+
+
+def test_a_missing_reading_is_kept_as_a_gap_and_not_dropped_from_its_column(monkeypatch):
+    """The provider returns ``null`` for hours it cannot serve; the array must stay aligned.
+
+    Dropping the value instead of the entry would shift every later hour one column left,
+    and the chart drawn from it would put the morning's peak in the afternoon.
+    """
+    temps = [16.1, None, 17.0, None, 19.0, 20.0]
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly(hours=6, temps=temps)))
+    series = weather.weather_forecast("Osasco")["hourly"]
+    assert series["temperature_c"] == [16.1, None, 17.0, None, 19.0, 20.0]
+
+
+def test_an_integral_hourly_value_is_reported_as_an_int(monkeypatch):
+    """Percentages arrive as JSON integers and a float division makes them "84.0%"."""
+    _serve(
+        monkeypatch,
+        forecast=_forecast_doc(hourly=_hourly(hours=6, rain=[0, 20, 33, 44, 55, 100])),
+    )
+    column = weather.weather_forecast("Osasco")["hourly"]["rain_chance_pct"]
+    assert column == [0, 20, 33, 44, 55, 100]
+    assert all(isinstance(v, int) for v in column)
+
+
+def test_the_series_and_the_resolved_place_are_recorded_for_the_chart(monkeypatch):
+    """The chart is drawn from this, and only from this.
+
+    Two halves. The series has to reach the answer's ``after_model_callback``, whose only
+    view of the turn is session state -- ``session.events`` is not populated under
+    ``adk web``. And the title is the place the tool **resolved**, not the one it was
+    asked for: an ambiguous match never reaches this code, so a chart titled with the
+    wrong city is a lie drawn in code.
+    """
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly()))
+    ctx = _Ctx()
+    weather.weather_forecast("Osasco, SP", tool_context=ctx)
+    entry = ctx.state[weather.HOURLY_STATE_KEY]["inv-1"]
+    assert entry["place"] == "Osasco"
+    assert entry["hourly"]["time"][0] == "2026-10-05T00:00"
+    assert entry["current"] is None or isinstance(entry["current"], dict)
+
+
+def test_recording_the_series_is_best_effort_and_never_raises():
+    """A graph must never be the reason a turn dies."""
+
+    class _Broken:
+        invocation_id = "inv-1"
+
+        @property
+        def state(self):
+            raise RuntimeError("state is gone")
+
+    weather.record_hourly_series(_Broken(), {"time": ["2026-10-05T00:00"]}, None, "Osasco")
+    weather.record_hourly_series(None, {"time": ["2026-10-05T00:00"]}, None, "Osasco")
+    weather.record_hourly_series(_Ctx(), "not a series", None, "Osasco")
+
+
+def test_the_series_is_never_added_to_the_vault(monkeypatch):
+    """The daily tool already refuses to be saved, and the graph must not reopen that.
+
+    A forecast note is replayed verbatim by the vault cache the next day (gotcha 18), so
+    this is asserted as an instruction property rather than a code one: nothing in the
+    code path writes a note, and the rule is what stops the model from asking.
+    """
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly()))
+    out = weather.weather_forecast("Osasco", tool_context=_Ctx())
+    assert "note_path" not in out
+    assert "note" not in out
+    assert "DO NOT CALL save_summary_to_second_brain FOR A WEATHER ANSWER" in _rule(17)
+
+
+# --- the graph, from the tool's state to the answer ----------------------------
+
+
+def test_the_chart_is_drawn_from_the_series_the_weather_tool_recorded(monkeypatch):
+    """The end-to-end shape, offline: tool call -> state -> rendered answer.
+
+    Driven through the real ``weather_forecast`` rather than by writing the state by
+    hand, because the state entry's shape is exactly the kind of thing that can drift
+    between the writer and the reader with both sides' unit tests green -- the same lesson
+    as `test_a_country_filter_is_applied_here_and_not_in_the_query`.
+    """
+    from types import SimpleNamespace
+
+    from text_summarizer.sources import CHART_TOKEN
+
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly()))
+    ctx = _Ctx()
+    weather.weather_forecast("Osasco", tool_context=ctx)
+
+    callback_context = SimpleNamespace(invocation_id="inv-1", state=dict(ctx.state))
+    chart = agent._render_weather_chart(callback_context)
+    assert chart.startswith("```adk-chart")
+    assert "Osasco" in chart.split("\n")[1]
+    assert chart.count("▁") + chart.count("▂") + chart.count("▃") + chart.count("▄") > 10
+
+    callback_context.session = None
+    rendered = agent._render_sources_text(
+        callback_context,
+        SimpleNamespace(model_version="space-bunny-free"),
+        f"- Max 22,9 °C.\n\n{CHART_TOKEN}",
+    )
+    assert "```adk-chart" in rendered
+    assert "Osasco" in rendered
+
+
+def test_a_turn_with_no_weather_tool_gets_no_chart_and_loses_the_placeholder():
+    """The overwhelmingly common case: a vault answer, or a question with no forecast in it.
+
+    Nothing is recorded, so nothing is drawn, and the placeholder is dropped rather than
+    left in the answer as ``@@ADK_CHART@@`` -- which is the failure a token added to the
+    scrubber's tuple but not to every path would produce.
+    """
+    from types import SimpleNamespace
+
+    from text_summarizer.sources import CHART_TOKEN
+
+    callback_context = SimpleNamespace(invocation_id="inv-1", state={})
+    assert agent._render_weather_chart(callback_context) == ""
+    callback_context.session = None
+    rendered = agent._render_sources_text(
+        callback_context,
+        SimpleNamespace(model_version="m"),
+        f"- Dogs are mammals.\n\n{CHART_TOKEN}",
+    )
+    assert CHART_TOKEN not in rendered
+    assert rendered.strip() == "- Dogs are mammals."
+
+
+def test_one_turns_chart_is_never_reused_by_the_next(monkeypatch):
+    """Keyed by ``invocation_id``, for the same reason the URL allow-list is.
+
+    Without the key the second turn would draw yesterday's curve under today's answer --
+    and because the chart is drawn from *stale state* rather than from nothing, it looks
+    correct. This is the identical shape to the cache defect: a lookup that finds the
+    wrong thing and reports it confidently.
+    """
+    from types import SimpleNamespace
+
+    _serve(monkeypatch, forecast=_forecast_doc(hourly=_hourly()))
+    ctx = _Ctx()
+    weather.weather_forecast("Osasco", tool_context=ctx)
+    state = ctx.state
+
+    first = SimpleNamespace(invocation_id="inv-1", state=dict(state))
+    second = SimpleNamespace(invocation_id="inv-2", state=dict(state))
+    assert agent._render_weather_chart(first)
+    assert agent._render_weather_chart(second) == ""
+
+
+def test_a_series_too_short_to_be_a_curve_costs_a_graph_and_not_the_turn(monkeypatch):
+    """Every failure mode of the reader is a missing graph, never an exception.
+
+    A chart that cannot be drawn is a cosmetic loss. An exception raised inside
+    ``after_model_callback`` would end the turn, so the whole read is wrapped rather than
+    each failure handled.
+    """
+    from types import SimpleNamespace
+
+    from text_summarizer.weather import HOURLY_STATE_KEY
+
+    for state in (
+        {"nonsense": "a string"},
+        {HOURLY_STATE_KEY: "not a dict"},
+        {HOURLY_STATE_KEY: {"inv-1": "not a dict"}},
+        {HOURLY_STATE_KEY: {"inv-1": {"hourly": "not a series"}}},
+        {HOURLY_STATE_KEY: {"inv-1": {"hourly": {"time": ["2026-10-05T16:00"]}}}},
+    ):
+        ctx = SimpleNamespace(invocation_id="inv-1", state=dict(state))
+        assert agent._render_weather_chart(ctx) == "", state
+
+    class _Unreadable:
+        invocation_id = "inv-1"
+
+        @property
+        def state(self):
+            raise RuntimeError("state is gone")
+
+    assert agent._render_weather_chart(_Unreadable()) == ""
+    assert agent._render_weather_chart(SimpleNamespace(invocation_id=None)) == ""
+
+
+def test_the_chart_is_titled_with_the_city_the_numbers_are_for(monkeypatch):
+    """The one way a chart drawn in code can lie is by being titled with a guess.
+
+    So the title is the place the tool **resolved**, not the string it was asked for --
+    which is the same discipline as ``_MAX_DAILY_FIELDS`` and the ``[web]`` provider
+    label: a name the code invented is a name nothing else in the answer can be checked
+    against. And a state entry carrying no place gets an untitled chart rather than one
+    labelled ``None``.
+    """
+    from types import SimpleNamespace
+
+    from text_summarizer.weather import HOURLY_STATE_KEY
+
+    _serve(monkeypatch, results=[_place(name="Osasco")], forecast=_forecast_doc(hourly=_hourly()))
+    ctx = _Ctx()
+    weather.weather_forecast("Osasco, SP, Brazil", tool_context=ctx)
+    entry = ctx.state[HOURLY_STATE_KEY]["inv-1"]
+    assert entry["place"] == "Osasco"
+
+    titled = agent._render_weather_chart(
+        SimpleNamespace(invocation_id="inv-1", state=dict(ctx.state))
+    )
+    assert titled.split("\n")[1].startswith("Hourly - Osasco, 2026-10-05")
+
+    for absent in (None, 17, 0.5, ["Osasco"], {"name": "Osasco"}):
+        state = {HOURLY_STATE_KEY: {"inv-1": {**entry, "place": absent}}}
+        chart = agent._render_weather_chart(
+            SimpleNamespace(invocation_id="inv-1", state=dict(state))
+        )
+        assert chart.split("\n")[1].startswith("Hourly - 2026-10-05"), absent
+        assert "None" not in chart, absent
+
+
+# --- the rule has to say both halves -------------------------------------------
+
+
+def test_the_rule_says_a_question_about_now_is_answered_by_current():
+    """The live finding, pinned on the instruction.
+
+    Session 9c40b78b answered "temperatura agora" with the day's mean and said so
+    honestly -- a correct description of the wrong number, 0.9 °C off on the day measured
+    and several degrees off at 06:00. Nothing in the tier can fix that by itself: the
+    model has to be told that `current` exists and that the daily mean is not it, because
+    the daily row is the part of the payload that looks most like a temperature.
+    """
+    rule = _rule(17)
+    assert "A QUESTION ABOUT NOW IS ANSWERED BY `current`" in rule
+    assert "NOT BY THE DAILY ROW" in rule
+    assert "agora" in rule
+    assert "aggregates over the whole day" in rule
+
+
+def test_the_rule_makes_the_model_write_the_placeholder_and_never_draw_the_graph():
+    """A model told to "show a graph" will generate 24 hourly numbers from memory.
+
+    So the instruction has to be specific about which of the two it is: copy one token, or
+    draw nothing. And the token's placement is stated, because the graph has to land
+    above the source line -- the same "at the very END" mistake rule 7 and rule 13 both
+    had, which ended turns on a citation with no answer above it.
+    """
+    rule = _rule(17)
+    assert "@@ADK_CHART@@" in rule
+    assert "write exactly `@@ADK_CHART@@` and nothing else" in rule
+    assert "BEFORE the source line" in rule
+    assert "do NOT draw the graph yourself" in rule
+    assert "omit the token entirely" in rule
+
+
+def test_the_rule_keeps_its_order_clause_alongside_the_graph():
+    """Adding the token must not have cost the rule its reason.
+
+    The order -- log_conversation first, answer last -- is what stops the turn ending on a
+    stub (flow-r5, and the weather turn that reproduced it), and it was only ever obeyed
+    because the rule says *why*. A rule that gained a chart clause and lost its ordering
+    would pass every test here.
+    """
+    rule = _rule(17)
+    assert "First call log_conversation" in rule
+    assert "FINAL message" in rule
+    assert "ORDER MATTERS HERE" in rule
+
+
+def test_no_rule_says_very_end_of_your_answer_which_ends_a_turn_on_a_citation():
+    """The sweep that caught rule 13 the second time, now covering the chart too.
+
+    A per-rule list cannot catch a *new* rule carrying old wording; only a sweep over all
+    of them can. The chart is the newest emitter of trailing lines, so it is exactly where
+    that mistake comes back.
+    """
+    import re
+
+    instruction = agent.root_agent.instruction
+    assert not re.search(r"very END of your answer", instruction, re.I)
+    assert "@@ADK_CHART@@" in instruction

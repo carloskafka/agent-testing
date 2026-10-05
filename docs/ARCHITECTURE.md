@@ -53,7 +53,7 @@ agent-testing/
     |-- gmail_mcp_server.py     # Stdio Gmail MCP server spawned by gmail_tools
     |-- gmail_oauth.py          # One-time helper that mints GOOGLE_REFRESH_TOKEN
     |-- observability.py        # Langfuse tracing (no-op if unconfigured)
-    |-- sources.py              # Deterministic **Sources** rendering: vault name, served model, links
+    |-- sources.py              # Deterministic rendering: **Sources** (vault name, served model, links) and the hourly curve
     |-- serve.py                # `adk web` + the active vault served read-only at /vault
     |-- vaults.py               # Which vault is active: discovery, selection, import
     |-- second_brain.py         # Vault writes: notes, chat log, index, cache lookup
@@ -87,7 +87,7 @@ agent-testing/
         |-- test_second_brain_tools.py  # save/log/find as the *model* calls them (arg shapes)
         |-- test_second_brain_write.py  # Note contents and frontmatter
         |-- test_serve.py               # The /vault route: serving, and traversal guards
-        |-- test_sources.py             # **Sources** renderer unit tests
+        |-- test_sources.py             # **Sources** renderer unit tests, and the hourly curve
         |-- test_sources_web.py         # The [web] line in the Sources block, and its allow-list
         |-- test_tools_gif.py           # tools/: artifact sync + the decoder round trip
         |-- test_trace_identity.py      # before_agent_callback: trace name + userId/sessionId
@@ -432,6 +432,45 @@ duplicates; and re-rendering an already-rendered block reproduces it byte for by
 - The brackets are escaped (`[\[\[Note\]\](href)`) so they survive to the
   screen. `marked` would otherwise eat one pair as link syntax and the user
   would see `[Note]` with no hint it was Obsidian syntax.
+
+### The hourly curve, drawn by the same renderer
+
+A weather answer carries a second code-rendered block, from the same module and by
+the same discipline:
+
+```
+Hourly - Osasco, 2026-10-05, local time
+°C 16.1..22.9  ·  rain % 0..44
+hora   00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+°C     ▂  ▁  ▁  ▁  ▁  ▁  ▁  ▂  ▃  ▃  ▅  ▆  ▇  █  ▇  ▅  ▄  ▃  ▂  ▂  ▂  ▁  ▁  ▁
+rain % ▃  ▂  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▂  ▃  ▄  ▄  ▄  ▄  ▄  ▅  ▅  ▆  █
+now  17:00  18.5 °C  rain 24%
+```
+
+Rule 17 makes the model write one token, `@@ADK_CHART@@`, and
+`sources.render_chart` draws the curve **from the tool's own payload**, substituted
+where the model put it. On a turn where no weather tool ran the token is dropped —
+with the blank line it leaves — so every non-weather answer is unchanged.
+
+- **The strip marker is the fence's info string** (`adk-chart`), which is invisible
+  when rendered. A stripper keyed on a word the model writes would eat the rest of
+  the answer the first time that word appeared without a chart.
+- **`summary_only` strips it** before the `quality.*` heuristics read the text, for
+  the same reason it strips the `**Sources**` block: glyph rows are not prose, and
+  letting them in would move every weather score for no reason anyone could name.
+- **Each row is scaled to its own range.** Temperature ~19 °C and rain chance ~0 %
+  share nothing numerically, and one scale flattens the smaller into a straight
+  line — a chart that lies about the thing it exists to show. A missing reading is a
+  **blank cell**, never the lowest level; plotting a `null` as the minimum invents a
+  reading.
+- **The series reaches the renderer through session state keyed by
+  `invocation_id`**, recorded by the tool itself. `session.events` is not populated
+  under `adk web`, which is the only place this can be rendered from.
+- **The payload that feeds it is bounded** — `MAX_HOURLY_HOURS = 24`, with the
+  withheld count reported — so it cannot grow with the requested `days`.
+
+Full detail, including why it is text rather than a PNG, is in the weather section
+of [Integrations](INTEGRATIONS.md#the-hour-and-the-graph).
 
 ## Observability (Langfuse)
 

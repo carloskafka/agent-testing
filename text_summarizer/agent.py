@@ -35,10 +35,12 @@ from .second_brain import (
 )
 from .sources import (
     mcp_vault_name_from_events,
+    render_chart,
     render_sources,
     resolve_vault_name,
     summary_only,
 )
+from .weather import HOURLY_STATE_KEY as WEATHER_HOURLY_STATE_KEY
 from .weather import build_weather_tools
 from .web_search import (
     SEARXNG_PROVIDER,
@@ -896,7 +898,60 @@ def _render_sources_text(callback_context, llm_response, text: str) -> str:
         # emitted for a note that is not there. Read from the session state the
         # tools wrote to, which is populated under adk web (unlike the event log).
         allowed_web_urls=_web_urls_this_turn(callback_context),
+        # The drawn hourly curve, from the series weather_forecast recorded this turn.
+        # Rendered in code from the tool's own numbers -- never asked of the model --
+        # and substituted where the model put the token, so the graph sits next to the
+        # prose that explains it. See sources.render_chart.
+        chart=_render_weather_chart(callback_context),
     )
+
+
+def _render_weather_chart(callback_context=None) -> str:
+    """The hourly curve for this turn's forecast, or ``""`` when there is none.
+
+    Read from the session state ``weather_forecast`` wrote, for the same reason
+    ``_web_urls_this_turn`` reads its own: the tool result does not survive to the
+    answer's ``after_model_callback``, and ``session.events`` is not populated under
+    ``adk web``.
+
+    The title is the place the tool resolved, carried in the same state entry. It falls
+    back to nothing rather than to a guess: an untitled chart is a chart, and a chart
+    titled with the wrong city is a lie drawn in code, which is the one thing this
+    module must not produce.
+
+    Best-effort throughout. Every failure here -- no invocation, unreadable state, a
+    series too short to be a curve -- costs a graph in the answer and nothing else,
+    because the caller substitutes nothing and the token is dropped.
+    """
+    entry = _weather_entry_this_turn(callback_context)
+    if not entry:
+        return ""
+    try:
+        place = entry.get("place")
+        return render_chart(
+            entry.get("hourly"),
+            entry.get("current"),
+            place if isinstance(place, str) else None,
+        )
+    except Exception:  # pragma: no cover - a graph must never end a turn
+        return ""
+
+
+def _weather_entry_this_turn(callback_context) -> dict:
+    """What this turn's ``weather_forecast`` recorded, or ``{}``.
+
+    Empty when the weather tool did not run, and when the state itself cannot be read --
+    best-effort signalling only, so a failure here costs a graph, never a turn.
+    """
+    invocation_id = getattr(callback_context, "invocation_id", None)
+    if not invocation_id:
+        return {}
+    try:
+        recorded = callback_context.state.get(WEATHER_HOURLY_STATE_KEY) or {}
+    except Exception:  # pragma: no cover - state is best-effort signalling only
+        return {}
+    entry = recorded.get(invocation_id) if isinstance(recorded, dict) else None
+    return entry if isinstance(entry, dict) else {}
 
 
 def _web_provider_label(callback_context=None) -> str:
@@ -1079,7 +1134,7 @@ Rules:
 14. ANSWER "WHAT DID YOU LEARN" FROM THE VAULT, NOT FROM THE CONVERSATION: when the user asks what was summarised, saved or learned on a given day, call read_day_digest with that day as YYYY-MM-DD rather than answering from this conversation - it reads the vault, so it also covers notes written in sessions the user never saw, and it costs no extra model call. Resolve today, yesterday or this week with current_datetime first, exactly as rule 12 requires. A day with no notes is a real answer: say so plainly in one sentence instead of filling the gap from your own knowledge. Pass include_chat only if the user asked for the raw exchanges; otherwise leave it off. Report only what the notes say, and never attribute a note that lists no provenance to the model you are running on - that absence means the vault never recorded which model wrote it. This turn is about the vault, so it is a sourced answer like any other: list at the END the notes you actually reported on, using the exact template and the same rules as rule 7, citing a note's alias when you have one and its title otherwise, and say nothing about a note that contributed nothing to your answer.
 15. ASK ONLY WHEN THE ANSWER ACTUALLY FORKS: call ask_user when you have found two or more options you genuinely cannot choose between and picking wrong would make the whole answer wrong - two cinemas whose session times all differ, two payment methods with different fees, two accounts whose history you cannot see. Listing what is available and picking for the user are different acts, and rule 13's LIVE exception does not make the second one safe: when the options are screenings, seats, dates or times - the things a note goes stale on - reporting all of them is right and CHOOSING one is a fork, so ask before you choose. State in `consequence` what actually changes between them, and pass a `default` you would use if the user did not answer. Do NOT ask when a sensible default is obvious, when the answer would not really change, or merely to check the user is still there: an agent that asks about everything is worse than one that never asks, because every question costs a turn. ONE EXCEPTION, AND IT OVERRIDES THAT RULE: an age or eligibility gate under rule 16 has no default at all, because you cannot know whether the user meets it - not "probably" and not "they asked about it", which is not the same thing. When ask_user returns answered_by: default_*, carry on with the choice it made and tell the user which one you used and why. Never present a question in prose and then wait - if you want an answer, call the tool, which pauses the turn properly.
 16. A PAGE BEHIND AN AGE GATE, AND WHERE A PURCHASE STOPS: if web_fetch returns an error saying the page is behind an age or eligibility gate, do NOT report it as unreadable and do NOT fall back to your own knowledge about what is behind it. Call ask_user, asking the user to confirm they meet the gate; only if it returns answered_by: user may you call web_fetch again with attested=true. Passing attested=true without a recorded answer is refused, and that refusal is correct - do not look for a way around it. Never state or imply the user confirmed anything they did not confirm; an attestation is their statement, not yours. ONCE THE PAGE IS READ, STOP AT THE CHECKOUT. Hand the user the exact URL of the page they must act on as a markdown link, and report what you actually read: the session, the room, the seat rows, the price. Then stop. Do NOT buy, pay, reserve, hold or complete anything, and do not describe any step as done that you have not done - there is no tool for it and there is not going to be one, because spending someone's money is the user's act and not yours. A payment link you hand over is a payment they make themselves, which is the whole of what you offer. If the user asks you to buy, say plainly that you can read the page and get them to it but cannot complete a payment, and give them the link. Copy every URL character for character from the tool result.
-17. THE WEATHER IS A TOOL CALL, NOT A RECALL: whenever the user asks about the weather of a place - temperature, rain, rain chance, humidity, wind, UV, how cold, whether to take an umbrella, "me fala a temperatura para osasco amanhã" - call weather_forecast with that place and never answer from memory. A forecast is not in your training data, so a plausible-sounding guess is indistinguishable from a real reading and is wrong. Resolve the day with the `date` argument ("today", "tomorrow", "yesterday", or YYYY-MM-DD); for any other expression such as "next Friday" call current_datetime first and pass the resolved date. CHECK WHICH PLACE IT RESOLVED: the payload names the city, state and country it actually matched, so if that is not plainly the place the user meant - a different city or country, or a very small settlement - do not report numbers for it; call ask_user, or call the tool again with a more specific place or a country code. The same goes for `candidates` in place of a forecast: the name matched several places and none clearly won, so ask which one they meant rather than silently taking the first. Report EVERY metric the payload carries for the day asked, each with its unit - max and min temperature, apparent temperature, humidity, rain chance, precipitation, wind and gusts, UV, sunshine hours, sunrise and sunset - because a follow-up that should not have been needed costs a turn. This is a live reading, so treat it as you would rule 13's LIVE case and skip rule 7's vault search: a note on the topic is a record of an earlier fetch. DO NOT CALL save_summary_to_second_brain FOR A WEATHER ANSWER - a forecast goes stale, and a note that records one would be replayed verbatim by the vault cache tomorrow, which is how the agent ends up confident about yesterday's weather. Finally, persist the exchange and then WRITE THE ANSWER, in that order. First call log_conversation with the user's message and your composed answer as its two arguments - a real tool call, not something to write down in prose. Then, in a FURTHER STEP, write that answer to the user as your FINAL message: your bullets and the source line IN THE SAME MESSAGE, and nothing at all after them. ORDER MATTERS HERE: a message you write BEFORE a tool call is not the message the reader ends up on, and the turn ends on whatever you wrote last - so writing your answer and then calling a tool leaves the reader with a closing remark instead of the forecast. Copy this template EXACTLY for the source line: [web][@@ADK_WEB@@][@@ADK_MODEL@@]<source_url exactly as the tool returned it>: short reason the forecast is relevant. The token @@ADK_WEB@@ is a placeholder replaced later with the provider name - copy it verbatim, and follow the same no-heading and nothing-after-the-last-line rules as rule 7.""",
+17. THE WEATHER IS A TOOL CALL, NOT A RECALL: whenever the user asks about the weather of a place - temperature, rain, rain chance, humidity, wind, UV, how cold, whether to take an umbrella, "me fala a temperatura para osasco amanhã" - call weather_forecast with that place and never answer from memory. A forecast is not in your training data, so a plausible-sounding guess is indistinguishable from a real reading and is wrong. Resolve the day with the `date` argument ("today", "tomorrow", "yesterday", or YYYY-MM-DD); for any other expression such as "next Friday" call current_datetime first and pass the resolved date. CHECK WHICH PLACE IT RESOLVED: the payload names the city, state and country it actually matched, so if that is not plainly the place the user meant - a different city or country, or a very small settlement - do not report numbers for it; call ask_user, or call the tool again with a more specific place or a country code. The same goes for `candidates` in place of a forecast: the name matched several places and none clearly won, so ask which one they meant rather than silently taking the first. Report EVERY metric the payload carries for the day asked, each with its unit - max and min temperature, apparent temperature, humidity, rain chance, precipitation, wind and gusts, UV, sunshine hours, sunrise and sunset - because a follow-up that should not have been needed costs a turn. A QUESTION ABOUT NOW IS ANSWERED BY `current`, NOT BY THE DAILY ROW: for "agora", "now", "at this moment", or any particular hour, report the `current` reading. The daily figures are aggregates over the whole day, so their mean is not what the weather is doing at the moment - answering "temperatura agora" with the daily average is wrong by several degrees, and it is the single most common way this answer goes wrong. If `current` is absent the day asked is not today, so say the reading is a forecast for that date rather than substituting an average. The payload's `hourly` block is the day asked about, one reading per hour in the place's own local time, every array lining up with `hourly.time` by index; use it for "when will it rain" or "what will it be like tonight", and never add it up, because the daily row already carries the totals. SHOW THE HOUR AS A GRAPH: on your own line, where the graph belongs in the answer and BEFORE the source line, write exactly `@@ADK_CHART@@` and nothing else. That token is a placeholder replaced with a drawn curve of the hours the tool returned - do NOT draw the graph yourself, do not write out the hourly numbers as a list, and do not describe what the graph shows: a chart you draw is one with invented numbers in it. If the payload has no `hourly` block, omit the token entirely. This is a live reading, so treat it as you would rule 13's LIVE case and skip rule 7's vault search: a note on the topic is a record of an earlier fetch. DO NOT CALL save_summary_to_second_brain FOR A WEATHER ANSWER - a forecast goes stale, and a note that records one would be replayed verbatim by the vault cache tomorrow, which is how the agent ends up confident about yesterday's weather. Finally, persist the exchange and then WRITE THE ANSWER, in that order. First call log_conversation with the user's message and your composed answer as its two arguments - a real tool call, not something to write down in prose. Then, in a FURTHER STEP, write that answer to the user as your FINAL message: your bullets and the source line IN THE SAME MESSAGE, and nothing at all after them. ORDER MATTERS HERE: a message you write BEFORE a tool call is not the message the reader ends up on, and the turn ends on whatever you wrote last - so writing your answer and then calling a tool leaves the reader with a closing remark instead of the forecast. Copy this template EXACTLY for the source line: [web][@@ADK_WEB@@][@@ADK_MODEL@@]<source_url exactly as the tool returned it>: short reason the forecast is relevant. The token @@ADK_WEB@@ is a placeholder replaced later with the provider name - copy it verbatim, and follow the same no-heading and nothing-after-the-last-line rules as rule 7.""",
     tools=[
         FunctionTool(save_summary_to_second_brain),
         FunctionTool(log_conversation),

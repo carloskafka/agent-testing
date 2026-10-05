@@ -537,6 +537,16 @@ _WEATHER_METRICS: tuple[str, ...] = (
     "uv_index_max",
 )
 
+#: The glyphs a rendered curve cell may hold, spelled out here rather than imported.
+#:
+#: Same reason as ``_WEATHER_METRICS``, and the same trade: this file is run as a script by
+#: a system ``python3`` that has no business importing the agent package, so the constant
+#: is duplicated rather than shared. The duplication is only safe because
+#: ``test_the_curve_levels_this_check_knows_are_the_ones_the_renderer_emits`` asserts the
+#: two sets are equal, so a rename in ``sources`` fails offline instead of quietly turning
+#: this check into one that accepts anything.
+_CURVE_LEVELS = "▁▂▃▄▅▆▇█"
+
 
 def _forecast_payloads(turn: Turn) -> list[dict]:
     """Every ``weather_forecast`` result, unwrapped from ADK's ``{"result": ...}``.
@@ -678,6 +688,125 @@ def _asked_rather_than_guessed(turn: Turn) -> tuple[bool, str]:
     if "ask_user" not in turn.tool_calls:
         return False, f"never asked: tools={turn.tool_calls}"
     return True, "refused with candidates and asked"
+
+
+def _the_curve_rides_in_the_answer(turn: Turn) -> tuple[bool, str]:
+    """The graph is drawn, substituted where the model put the token, and it is *last*.
+
+    Three properties, and the third is why this is not simply
+    ``"adk-chart" in turn.answer``. The first is that the model emitted the placeholder at
+    all -- rule 17 asks for one token, and a model that instead draws the curve itself
+    produces 24 generated numbers with no ``adk-chart`` fence anywhere. The second is
+    that the *renderer* produced the curve, which the fence is the evidence of: it is
+    drawn from the tool's payload in code, so it cannot contain a number the payload did
+    not carry. The third is that it sits on the **last** message, because ``flow-r5``
+    taught this repo that a trailing block on a message of its own turns the turn into a
+    stub -- and the graph is the newest trailing block, so it is where that comes back.
+    """
+    if "```adk-chart" not in turn.answer:
+        return False, (
+            "no rendered chart in the answer: the model either wrote no placeholder or "
+            "drew the graph itself"
+        )
+    texts = [
+        p["text"]
+        for event in turn.events
+        if event.get("author") == APP
+        for p in _parts(event)
+        if p.get("text")
+    ]
+    if not texts:
+        return False, "no answer text at all"
+    if "```adk-chart" not in texts[-1]:
+        return False, "the turn ends on something other than the message carrying the graph"
+    if texts[-1].count("```adk-chart") > 1:
+        return False, f"{texts[-1].count('```adk-chart')} charts on the last message"
+    return True, "one rendered curve on the last message"
+
+
+def _the_curve_is_drawn_from_the_payload(turn: Turn) -> tuple[bool, str]:
+    """No glyph on the curve that the tool did not return.
+
+    The chart is code-rendered, so this should be true by construction -- which is exactly
+    why it is asserted. If it ever stops being true the failure is invisible in the
+    answer: a fabricated hour is a plausible-looking glyph in a column of 24, and nothing
+    in the UI distinguishes it from the 23 honest ones.
+
+    Read off the fence rather than re-rendered from the payload, so it checks what the
+    reader sees.
+    """
+    payloads = _forecast_payloads(turn)
+    series = payloads[0].get("hourly") if payloads else None
+    if not isinstance(series, dict) or not series.get("time"):
+        return False, "no hourly series in the payload to have drawn"
+    block = re.search(r"```adk-chart\n(.*?)\n```", turn.answer, re.S)
+    if not block:
+        return False, "no chart block in the answer"
+    body = block.group(1)
+    rows = [line for line in body.split("\n") if line[:7] in ("°C     ", "rain % ")]
+    if not rows:
+        return False, "the chart drew no series rows"
+    for row in rows:
+        cells = {row[7 + i * 3 : 7 + (i + 1) * 3].strip() for i in range(len(series["time"]))}
+        unknown = cells - set(_CURVE_LEVELS) - {""}
+        if unknown:
+            return False, f"a cell is not a curve level: {sorted(unknown)[:3]}"
+    if len(rows[0]) < 7 + 3 * len(series["time"]) - 2:
+        return False, (
+            f"the row is {len(rows[0])} characters for {len(series['time'])} hours"
+        )
+    return True, f"{len(rows)} rows over {len(series['time'])} hours"
+
+
+def _now_is_answered_from_the_hour_containing_now(turn: Turn) -> tuple[bool, str]:
+    """The live defect, as a check.
+
+    Session ``9c40b78b``, asked *"Qual a temperatura agora em Osasco?"*: the agent
+    reported the day's **mean** and hedged honestly -- *"a fonte fornece valores do dia, nao
+    uma leitura instantanea"* -- which is a correct description of the wrong number. The
+    daily block has no time axis in it, so nothing in the old payload could answer "now"
+    at all; the hourly series and the ``current`` reading were added for this.
+
+    Three assertions, and the middle one is the defect itself. The payload must carry a
+    ``current``; the answer must name the hour it is reporting, because a temperature
+    "now" without an hour is the same gap one layer up; and **the current reading's
+    temperature must appear in the answer**. That last one is what catches the recorded
+    turn, and a payload-only check would miss it entirely -- the model choosing the mean
+    over the hour is a *prose* failure, so it has to be read off the prose.
+
+    The tolerance is 0.5 °C so a model that rounds "19,2" to "19" passes; below that the
+    two readings are indistinguishable and the earlier guard reports it instead of
+    pretending to tell them apart.
+    """
+    payloads = _forecast_payloads(turn)
+    if not payloads:
+        return False, "no weather_forecast payload"
+    current = payloads[0].get("current")
+    if not isinstance(current, dict) or "temperature_c" not in current:
+        return False, (
+            "the payload carries no `current` reading, so 'now' cannot be answered "
+            "from anything but a daily aggregate"
+        )
+    hour = current.get("hour")
+    body = turn.answer
+    if hour and hour not in body:
+        return False, f"the answer never names the hour it is reporting ({hour})"
+    mean = (payloads[0].get("forecast") or [{}])[0].get("temperature_mean_c")
+    now = float(current["temperature_c"])
+    if mean is not None and abs(float(mean) - now) < 0.05:
+        return False, f"the current reading equals the daily mean ({mean}) - check the floor"
+    # The graph is code-rendered and carries no numbers, so it is stripped rather than
+    # read around: what is being asked is whether the *prose* reports the hour.
+    prose = re.sub(r"```adk-chart.*?```", "", body, flags=re.S)
+    quoted = [float(m.replace(",", ".")) for m in re.findall(r"(-?\d+(?:[.,]\d+)?)\s*°C", prose)]
+    if quoted and not any(abs(q - now) <= 0.5 for q in quoted):
+        return False, (
+            f"the answer reports {quoted} °C but the {hour} reading is {now} °C - "
+            f"the {mean} °C mean is not 'now'"
+        )
+    if not quoted:
+        return False, "the answer quotes no temperature at all, so nothing answers 'now'"
+    return True, f"reported the {hour} reading ({now} °C), not the {mean} °C mean"
 
 
 def _does_not_invent_showings(turn: Turn) -> tuple[bool, str]:
@@ -1028,6 +1157,55 @@ SCENARIOS: list[Scenario] = [
             "Springfield matches eight US cities and none of them wins. The tool "
             "refuses and returns candidates with NO forecast key, so the model has "
             "nothing to quote but the candidates -- it must ask, not pick one."
+        ),
+        tags=["weather"],
+    ),
+    Scenario(
+        name="weather_now_is_the_hour_and_not_the_day_mean",
+        prompt="Qual a temperatura agora em Osasco?",
+        check=_all(
+            [
+                _no_error,
+                _no_cache_hit,
+                _called("weather_forecast"),
+                _now_is_answered_from_the_hour_containing_now,
+                _the_reader_ends_on_the_forecast,
+                _no_second_brain_note,
+            ]
+        ),
+        note=(
+            "The prompt that found the defect, verbatim. Session 9c40b78b answered this "
+            "with the day's MEAN and said so honestly -- 'a fonte fornece valores do dia, "
+            "nao uma leitura instantanea' -- which is a correct description of the wrong "
+            "number. The daily block has no time axis, so nothing in the old payload could "
+            "answer 'now'; the hourly series and the `current` reading exist for this."
+        ),
+        tags=["weather", "regression"],
+    ),
+    Scenario(
+        name="weather_the_curve_rides_in_the_answer",
+        prompt="como fica o tempo em Osasco hoje hora a hora?",
+        check=_all(
+            [
+                _no_error,
+                _no_cache_hit,
+                _called("weather_forecast"),
+                _called("log_conversation"),
+                _the_curve_rides_in_the_answer,
+                _the_curve_is_drawn_from_the_payload,
+                _weather_resolved_to_the_city_that_was_asked_about,
+                _no_second_brain_note,
+            ]
+        ),
+        note=(
+            "The graph is drawn in code from the tool's own payload, so the model writes "
+            "one token and nothing else. Two ways this can pass a reader and still be "
+            "wrong, which is why there are two checks: the fence proves the *renderer* "
+            "produced it rather than the model, and the last-message requirement is the "
+            "`flow-r5` shape -- a trailing block on a message of its own leaves the turn "
+            "ending on a graph with nothing above it. `_final_answer_has_a_body` is not "
+            "composed in here, for the same reason the other weather scenario leaves it "
+            "out: it passes on the recorded 41-character stub."
         ),
         tags=["weather"],
     ),

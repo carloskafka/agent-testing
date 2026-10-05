@@ -8,7 +8,7 @@ A text summarization agent built with Google's **Agent Development Kit (ADK)** t
 
 ## What This Project Does
 
-The agent takes long text and converts it into concise bullet-point summaries, then persists them into an Obsidian vault (a "second brain"). It can also read your Gmail inbox, search the web, report every daily weather metric for a place you name, and — when a page hides its content behind an age gate — ask you to confirm, read past it, and hand you the checkout link. **It will not buy anything**: a payment is yours to make. The real value of the repo is the **evaluation loop**: edit the agent's instructions in `agent.py`, run ADK evals, and watch the `response_match_score` (ROUGE-1 word overlap) change.
+The agent takes long text and converts it into concise bullet-point summaries, then persists them into an Obsidian vault (a "second brain"). It can also read your Gmail inbox, search the web, and report the weather for a place you name — every daily metric, the hour by hour so "what time is it now" is answered from the hour rather than the daily average, and the day drawn as a curve in the answer. When a page hides its content behind an age gate, it asks you to confirm, reads past it, and hands you the checkout link. **It will not buy anything**: a payment is yours to make. The real value of the repo is the **evaluation loop**: edit the agent's instructions in `agent.py`, run ADK evals, and watch the `response_match_score` (ROUGE-1 word overlap) change.
 
 ## Quick Start
 

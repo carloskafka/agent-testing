@@ -279,7 +279,8 @@ vault or its own knowledge rather than the turn dying.
 One tool, [`weather_forecast`](../text_summarizer/weather.py), answering the weather of
 any place the user names — max/min temperature, apparent temperature, humidity, rain
 chance, precipitation, wind and gusts, UV, sunshine hours, sunrise/sunset, radiation and
-evapotranspiration, for 1–14 days.
+evapotranspiration, for 1–14 days, plus an hourly series and a reading of *now* drawn as
+a curve in the answer.
 
 ```bash
 # in .env — this is the whole configuration
@@ -328,6 +329,67 @@ The last four rows are why the resolved city, state, country and population are 
 payload** and instruction rule 17 makes the model check them against what you asked
 before it reports anything. No code can tell "York, Nebraska" from a question about New
 York; a model that can see the state and the population, and is told not to guess, can.
+
+### The hour, and the graph
+
+The daily row answers "tomorrow". It cannot answer *"que horas está agora?"* — it has
+no time axis at all. So every weather turn also carries an **hourly series** and a
+`current` reading, and the answer draws a curve:
+
+```
+- **Agora em Osasco (SP), às 17:11 (hora local):** 18,5 °C, com sensação térmica de 19,1 °C.
+- **Hoje (segunda, 05/10/2026):** máxima de 22,9 °C e mínima de 16,1 °C (média de 18,3 °C).
+
+```adk-chart
+Hourly - Osasco, 2026-10-05, local time
+°C 16.1..22.9  ·  rain % 0..44
+hora   00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+°C     ▂  ▁  ▁  ▁  ▁  ▁  ▁  ▂  ▃  ▃  ▅  ▆  ▇  █  ▇  ▅  ▄  ▃  ▂  ▂  ▂  ▁  ▁  ▁
+rain % ▃  ▂  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▁  ▂  ▃  ▄  ▄  ▄  ▄  ▄  ▅  ▅  ▆  █
+now  17:00  18.5 °C  rain 24%
+```
+```
+
+That block is **drawn in code**, from the tool's own payload, and the model writes one
+token (`@@ADK_CHART@@`) in its place. Three reasons, in order of how much they cost to
+get wrong:
+
+- **A model asked to plot 24 numbers invents them.** The `adk-chart` fence is the
+  evidence of who drew a curve, and a scenario check reads it — so a hand-drawn graph
+  is a scenario *failure*, not a slightly worse answer.
+- **The graph must not reach a `quality.*` score.** `summary_only` strips the block
+  before the heuristics read the text, exactly as it strips the `**Sources**` block.
+  A row of `▂▃▄▅` glyphs is not prose the model wrote, and letting it in would make the
+  scores read a little differently on weather turns than on every other turn, for no
+  reason anyone could name.
+- **A chart rendered by the model cannot be idempotent.** The `**Sources**` renderer
+  runs over an answer that may already carry a rendered block; with the graph drawn in
+  code there is no sentinel inside the block, so a second pass reproduces it byte for
+  byte.
+
+The placeholder is substituted **where the model put it** and the line is dropped — with
+the blank line it leaves behind — on a turn where no weather tool ran. So the graph
+lands next to the prose that explains it, and a non-weather turn is unchanged.
+
+Six variables (no `weather_code`, which the daily row already carries as a phrase):
+`temperature_2m`, `apparent_temperature`, `precipitation_probability`,
+`relative_humidity_2m`, `precipitation`, `wind_speed_10m`. They are fetched in the
+**same** request as the daily block, and each was verified to return 200 on its own
+before being added — one unknown variable 400s the whole request, so a bad name would
+have cost the daily forecast too.
+
+**The payload is bounded and the bound is reported.** `MAX_HOURLY_HOURS = 24`, so the
+payload does not grow with `days` (14 days would otherwise be 336 hours, 15,385 bytes
+raw). Withheld hours are reported as `hourly.truncated`, so a capped series can never be
+read as a quiet day. The shape is **parallel arrays**, not a list of row objects —
+measured at **1,341 bytes** against 2,772 for the same 24 rows as objects, and every
+weather turn pays that difference.
+
+`current` is **computed in code** from the provider's `utc_offset_seconds`, floored to
+the hour that *contains* now rather than rounded — at 17:11 the answer is the 17:00
+reading, and rounding up would report a forecast for a moment that has not happened. It
+is *absent* (not null) when today is outside the requested window, so a question about
+tomorrow gets no reading of the present rather than a fabricated one.
 
 ### Everything else about it
 
