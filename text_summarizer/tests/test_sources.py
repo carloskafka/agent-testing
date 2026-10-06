@@ -14,13 +14,21 @@ Run with::
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from _helpers import SERVED_MODEL, _event, _point_vault_at
+from text_summarizer.chart import chart_dir
 from text_summarizer.sources import (
+<<<<<<< Updated upstream
+=======
+    CHART_FENCE,
+    CHART_IMAGE_PREFIX,
+    CHART_TOKEN,
+>>>>>>> Stashed changes
     MODEL_TOKEN,
     SOURCES_HEADING,
     UNKNOWN,
@@ -683,3 +691,429 @@ def test_aliases_are_not_read_out_of_the_note_body(tmp_path):
 def test_a_note_with_no_frontmatter_is_fine(tmp_path):
     (tmp_path / "plain.md").write_text("# Plain\n")
     assert note_href("Plain", str(tmp_path)) == "/vault/plain.md"
+<<<<<<< Updated upstream
+=======
+
+
+# --- the hourly curve ---------------------------------------------------------
+#
+# Asked for as "a graph in the answer", and what makes it possible is that it is drawn
+# from the tool's payload in code rather than asked of the model. That is the same
+# decision as the **Sources** block and the name stamp, and for a sharper reason: a model
+# asked to plot 24 hourly readings is not summarising them, it is generating 24 more.
+# The free-tier primary that serves most turns here emits token debris on ordinary prose
+# (`com最大值 de 19,4 °C`), which is what "draw the chart yourself" looks like in practice.
+#
+# So the model writes `@@ADK_CHART@@` on a line and this module replaces it. What the
+# tests below hold onto is the properties that make that safe: the curve lands where it
+# was asked for, a second pass reproduces it byte for byte, a turn with no series loses
+# the placeholder rather than keeping a gap, and -- the one a presentation artefact can
+# silently break -- none of it moves a quality score.
+
+
+def _series(temps=None, rain=None, hours=24, day="2026-10-05"):
+    """A payload the live API returned for Osasco on 2026-10-04, in this module's names.
+
+    A night near 16 °C rising to 22.9 °C at 13:00, and rain chance climbing through the
+    evening -- so the two rows have visibly different shapes, which is what makes the
+    per-series scaling testable rather than vacuous.
+    """
+    return {
+        "unit": "hour",
+        "hours": hours,
+        "time": [f"{day}T{h:02d}:00" for h in range(hours)],
+        "temperature_c": temps if temps is not None else [16.1 + (h % 7) for h in range(hours)],
+        "rain_chance_pct": rain if rain is not None else [0] * (hours - 6) + [20, 30, 40, 44, 40, 30],
+    }
+
+
+NOW = {"hour": "16:00", "temperature_c": 19.2, "rain_chance_pct": 24}
+
+#: Spelled out rather than imported for the same reason the test file spells out other
+#: shapes: an assertion about "the 16-hex name" is a claim about the *format*, and a copy
+#: of the pattern is the only way to make a change to ``chart.py`` fail here.
+_NAME_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _alt(image: str) -> str:
+    """The alt text of a rendered chart, or ``""`` for anything that is not one."""
+    match = re.fullmatch(r"!\[([^\]\n]*)\]\(" + re.escape(CHART_IMAGE_PREFIX) + r"[^)\n]*\)", image)
+    return match.group(1) if match else ""
+
+
+def _heading(alt: str) -> str:
+    """The alt text up to the reading of now -- the part naming the place and the day."""
+    return alt.split(" - now ", 1)[0]
+
+
+def _svg_of(image: str) -> str:
+    """The stored SVG a rendered chart points at."""
+    href = image[image.index("](") + 2 : -1]
+    assert href.startswith(CHART_IMAGE_PREFIX), href
+    return (Path(chart_dir()) / href.rsplit("/", 1)[-1]).read_text(encoding="utf-8")
+
+
+def test_the_chart_is_substituted_where_the_model_put_the_token():
+    """In place, not appended.
+
+    The model puts the token where the graph belongs -- under the prose that explains it,
+    above the source line -- and appending instead would pile the curve onto the end of
+    the answer, after the citation, where nothing the model wrote refers to it.
+    """
+    answer = (
+        "- Max 22.9 °C.\n- Rain 44% of the day.\n\n"
+        f"{CHART_TOKEN}\n\n"
+        f"{SOURCES_HEADING}\n- [obsidian][ck][m1][[Osasco]]: readings"
+    )
+    rendered = render_sources(
+        answer,
+        vault_name="ck",
+        model_name=SERVED_MODEL,
+        chart=render_chart(_series(), NOW, "Osasco"),
+    )
+    lines = [line for line in rendered.split("\n") if line.strip()]
+    assert lines[0] == "- Max 22.9 °C."
+    assert lines[2].startswith("![")
+    assert CHART_IMAGE_PREFIX in lines[2]
+    assert lines[-1].startswith("- [obsidian]")
+    assert CHART_TOKEN not in rendered
+    assert CHART_IMAGE_PREFIX in rendered.split(SOURCES_HEADING)[0]
+
+
+def test_a_chart_token_with_no_series_behind_it_is_dropped_and_leaves_no_gap(monkeypatch):
+    """A turn where no weather tool ran has no graph, and must not look like it lost one.
+
+    Two halves, and the second is the one that is easy to miss. Removing the placeholder
+    on its own leaves the blank line above and below it, so the answer grows a double gap
+    exactly where the reader was told to expect a curve.
+    """
+    answer = f"- Max 22.9 °C.\n\n{CHART_TOKEN}\n\nSaved.\n"
+    assert render_sources(answer, chart=None) == "- Max 22.9 °C.\n\nSaved.\n"
+    assert render_sources(answer, chart="") == "- Max 22.9 °C.\n\nSaved.\n"
+    # And the same for an empty render, which is what a series too short produces.
+    assert render_sources(answer, chart=render_chart(None)) == "- Max 22.9 °C.\n\nSaved.\n"
+
+
+def test_gap_collapsing_does_not_reformat_an_answer_that_never_mentioned_a_chart():
+    """The control: the collapse is scoped to the placeholder, not a general tidy-up.
+
+    A renderer that collapsed every run of blank lines would pass the test above while
+    quietly reformatting every answer the agent produces -- and that is a change in the
+    bytes a user reads, made for a cosmetic reason, in the one function whose job is
+    provenance.
+    """
+    assert render_sources("- a\n\n\n\nb\n") == "- a\n\n\n\nb\n"
+
+
+def test_rendering_is_idempotent_with_a_chart_present():
+    """A second pass reproduces the answer byte for byte, chart included.
+
+    The Sources block earns this by re-parsing its own output; the chart has to earn it
+    too, and it does so by carrying no sentinel of its own. A block that still contained
+    one would be substituted a second time on the next pass and grow a copy -- which is
+    the duplication `after_agent_callback` exists to prevent, arriving through a
+    different door.
+    """
+    chart = render_chart(_series(), NOW, "Osasco")
+    kwargs = dict(vault_name="ck", model_name=SERVED_MODEL, chart=chart)
+    answer = f"- Max 22.9 °C.\n\n{CHART_TOKEN}\n\n{SOURCES_HEADING}\n- [obsidian][ck][m1][[Osasco]]: x"
+    once = render_sources(answer, **kwargs)
+    assert render_sources(once, **kwargs) == once
+    assert once.count(CHART_IMAGE_PREFIX) == 1
+
+
+def test_the_chart_does_not_move_any_quality_score():
+    """A row of glyphs is not prose the model wrote, and must not be scored as one.
+
+    `quality.bullet_score` counts bullets and `lexical_recall` compares the answer with
+    the *user's* words. Both read `summary_only`, so the chart has to be stripped there
+    rather than left in -- otherwise weather turns score differently from every other turn
+    for no reason a reader of the dashboard could see, which is exactly the kind of drift
+    that makes a score useless for the instruction edits it exists to measure.
+    """
+    from text_summarizer.agent import _score_generation
+
+    user = "como esta o tempo em Osasco hoje?"
+    prose = "- Max 22.9 °C.\n- Min 16.1 °C.\n- Chuva 44%."
+    chart = render_chart(_series(), NOW, "Osasco")
+    without = render_sources(prose, vault_name="ck", model_name=SERVED_MODEL)
+    with_chart = render_sources(
+        prose + f"\n\n{CHART_TOKEN}", vault_name="ck", model_name=SERVED_MODEL, chart=chart
+    )
+    assert with_chart != without
+    assert _score_generation(user, summary_only(without)) == _score_generation(
+        user, summary_only(with_chart)
+    )
+
+
+def test_a_single_reading_is_not_a_chart():
+    """One point is a number wearing a graph's clothes."""
+    assert render_chart({"time": ["2026-10-05T16:00"], "temperature_c": [19.2]}, None) == ""
+    assert render_chart({"time": [], "temperature_c": []}, None) == ""
+
+
+def test_the_strip_marker_is_the_image_url_not_a_word_the_model_writes():
+    """Why the marker is invisible, now that the chart is an image.
+
+    The obvious key for stripping a rendered chart is a line of prose -- "Hourly -", a
+    heading -- and that is exactly what cannot be used: a model writes prose, so a
+    stripper keyed on a phrase eats the rest of the answer the first time the phrase
+    appears without a chart. The second half matters more now that the chart *is* an
+    image: a model asked about a chart may well write the word, and the alt text of the
+    rendered image carries the title too -- so a stripper keyed on the phrase would
+    delete the image the moment the answer was scored, and the alt text is what a text
+    consumer reads.
+    """
+    prose = "- Max 22.9 °C.\n\nHourly - Osasco, 2026-10-05\n°C 16.1..22.9\n- Min 16.1 °C."
+    assert summary_only(prose) == prose, "a phrase the model wrote was treated as a chart"
+
+    chart = render_chart(_series(), NOW, "Osasco")
+    rendered = f"- Max 22.9 °C.\n\n{chart}\n- Min 16.1 °C."
+    stripped = summary_only(rendered)
+    assert stripped == "- Max 22.9 °C.\n\n- Min 16.1 °C."
+    assert "Hourly -" not in stripped
+
+
+def test_an_image_the_model_wrote_is_not_stripped_as_if_it_were_a_chart():
+    """The counterpart, and the one this change made newly possible.
+
+    The renderer now emits an ``<img>``, so the strip key is a URL shape -- and a model can
+    emit images too. A stripper that matched "a markdown image" would delete every
+    diagram a model put in an answer, and ``summary_only`` is what
+    ``quality.lexical_recall`` reads, so the loss would be invisible in the scores.
+
+    Two shapes, because a URL prefix alone is not narrow enough: a different host and a
+    different path both fail the match, and the digest is required to be exactly the 16
+    hex characters ``chart.chart_href`` produces.
+    """
+    for image in (
+        "![a chart](/chart/chartjs.png)",
+        "![a chart](https://example.test/deadbeefdeadbeef.svg)",
+        "![a chart](/vault/deadbeefdeadbeef.svg)",
+        "![a chart](/chart/DEADBEEFDEADBEEF.svg)",
+    ):
+        answer = f"- Here it is.\n\n{image}\n- That is the forecast."
+        assert summary_only(answer) == answer, image
+
+
+def test_a_code_block_the_model_wrote_is_not_stripped_as_if_it_were_a_chart():
+    """The other half of the marker argument: a *narrow* marker still has to be narrow.
+
+    Keying the strip on "a fenced block" rather than on ``adk-chart`` passes the test
+    above for the wrong reason -- it removes the prose case by removing every code block,
+    which is a far larger loss. And the loss is silent and measurable: ``summary_only`` is
+    what ``quality.lexical_recall`` and ``format_and_recall`` read, so an answer that
+    quotes code would have its quoted code deleted before scoring. The scores would
+    simply read a little different on code answers, with nothing to say why.
+
+    Mutating ``_is_chart_fence`` to ``line.strip().startswith("```")`` leaves the suite
+    green, which is why this test exists and not a comment.
+    """
+    answer = (
+        "- Use `dict` or `defaultdict`.\n\n"
+        "```python\n"
+        "counts = defaultdict(int)\n"
+        "for word in text.split():\n"
+        "    counts[word] += 1\n"
+        "```\n\n"
+        "- Both are in the stdlib."
+    )
+    assert summary_only(answer) == answer
+
+
+def test_a_fenced_block_with_its_own_info_string_is_still_not_a_chart():
+    """``adk-chart`` is the whole marker; a fence labelled anything else is the model's.
+
+    The mutation a reader of the previous test might reasonably make is a substring
+    match -- ``"chart" in line`` -- which would eat every block whose language happens
+    to be ``mermaid`` or ``chartjs``. So the comparison is exact, and this is the test
+    that says so rather than leaving it to the implementation.
+    """
+    for info in ("mermaid", "chartjs", "adk-charts", "adk-chart-2", "not-adk-chart"):
+        answer = f"- A diagram.\n\n```{info}\ngraph TD;\nA-->B;\n```\n\n- That is it."
+        assert summary_only(answer) == answer, info
+
+
+def test_an_unterminated_chart_fence_does_not_leak_the_rest_of_the_answer_into_the_strip():
+    """A half-rendered block is a truncated model response, and the strip must still end.
+
+    Treating an unterminated fence as running to the end of the text is the choice that
+    keeps the strip from leaving a dangling `````adk-chart`` fence in the middle of an
+    otherwise well-formed answer.
+    """
+    assert summary_only("- a\n\n```adk-chart\nHourly - x\n°C ▁▂▃") == "- a\n"
+
+
+def test_the_chart_is_one_line_of_an_image_that_fits_the_message_column():
+    """A fixed 720px-wide SVG on a line of its own, and never a wrapping block.
+
+    The ASCII version's bound was 80 *characters*, because the curve was text and text
+    wraps: a chart that wraps stops being a chart, since the axis stops lining up with the
+    rows under it. An ``<img>`` cannot wrap -- it is one replaced element with its own
+    intrinsic width -- so the same failure is gone, and what replaces the character bound
+    is that the width has to fit the dev UI's ~800px column, or the browser scales it down
+    and the reader squints.
+
+    The renderer emits ``width``/``viewBox`` from one constant rather than measuring
+    anything, because an ``<img>`` has no viewport to measure. So the claim is that the
+    constant is inside the column.
+    """
+    chart = render_chart(_series(), NOW, "Osasco")
+    assert "\n" not in chart, "the image must occupy a single line, or the strip misses it"
+    href = chart[chart.index("](") + 2 : -1]
+    assert href.startswith(CHART_IMAGE_PREFIX), href
+    name = href.rsplit("/", 1)[-1].removesuffix(".svg")
+    assert _NAME_RE.fullmatch(name), href
+    root = Path(chart_dir()) / f"{name}.svg"
+    assert root.is_file(), "the image is referenced but was never stored"
+    header = root.read_text(encoding="utf-8").split(">")[0]
+    assert f'width="{720}"' in header
+    assert 720 <= 800, "wider than the dev UI's message column, so it scales down unreadably"
+
+
+def test_the_same_forecast_renders_one_file_rather_than_one_per_turn():
+    """The content-addressed name, which is also what makes rendering idempotent.
+
+    Two turns describing the same hours must not accumulate identical images: the name is
+    a digest of the payload, so the second turn rewrites the same bytes to the same path
+    and the store stays proportional to *distinct* forecasts. A random token would fail
+    this -- and would also break ``render_sources``'s idempotence, which the linked-
+    ``Sources`` re-parse depends on.
+
+    Counted against the store as it stands rather than against an empty one: the module
+    writes nothing outside ``CHART_DIR`` but it is not emptied between tests, so an
+    absolute count would be a claim about the order the suite ran in.
+    """
+    store = Path(chart_dir())
+    before = {path.name for path in store.glob("*.svg")} if store.is_dir() else set()
+
+    first = render_chart(_series(), NOW, "Osasco")
+    after_first = {path.name for path in store.glob("*.svg")}
+    second = render_chart(_series(), NOW, "Osasco")
+
+    assert first == second, "the same payload rendered two different URLs"
+    assert {path.name for path in store.glob("*.svg")} == after_first, (
+        "a repeat of the same forecast added a file"
+    )
+    assert len(after_first - before) == 1
+
+    # And a *different* forecast is a different file, which is the other half: a digest
+    # that ignored its inputs would pass the assertion above while serving one graph for
+    # every forecast ever drawn.
+    other = render_chart(_series(temps=[20.0] * 24), NOW, "Osasco")
+    assert other != first
+    assert len({path.name for path in store.glob("*.svg")} - before) == 2
+
+
+def test_a_stray_chart_token_never_reaches_the_reader():
+    """The sentinel machinery covers all four tokens, not the three it started with.
+
+    ``_TOKENS`` is built from a tuple for exactly this: adding a token without adding it
+    there would leave the scrubber ignorant of it, and a turn with no series would show
+    the reader `@@ADK_CHART@@` where a graph should have been.
+    """
+    assert CHART_TOKEN not in render_sources(f"- a\n\n{CHART_TOKEN}\n", chart=None)
+    assert CHART_TOKEN not in render_sources(f"{CHART_TOKEN} - a")
+
+
+def test_the_hour_reading_is_in_the_alt_text_and_the_drawing_marks_it():
+    """Two consumers, two channels, and neither is a column index.
+
+    The ASCII version refused to draw a caret under the current hour because the caret has
+    to sit under exactly the right *character column*, and that depends on whichever
+    monospace face the reader's browser falls back to -- a property this module cannot
+    know. In an SVG the hour is a real x-coordinate, so the drawing can mark it (a dashed
+    rule on the first panel) and the misalignment is gone.
+
+    What it cannot do is *reach* the reader who never loads an image -- the ``adk run``
+    CLI, a text browser, a screen reader. That reader gets the alt text, which is the whole
+    point of carrying the reading twice: one channel is lost silently when the image does
+    not load, and neither one alone is enough.
+    """
+    chart = render_chart(_series(), NOW, "Osasco")
+    alt = _alt(chart)
+    assert "now 16:00" in alt and "19.2" in alt and "24%" in alt
+
+    svg = _svg_of(chart)
+    assert "stroke-dasharray" in svg, "the drawing does not mark where now is"
+    assert ">now 16:00</text>" in svg
+    # The rule is drawn once, on the first panel: two would read as two annotations.
+    assert svg.count("stroke-dasharray") == 1
+
+    # With no `current` there is nothing to mark, and nothing claiming to be the present.
+    assert "now" not in _alt(render_chart(_series(), None, "Osasco"))
+    assert "stroke-dasharray" not in _svg_of(render_chart(_series(), "not a dict", "Osasco"))
+
+
+def test_the_current_hour_is_floored_and_a_missing_one_is_never_invented():
+    """An absent reading is a shorter line, never a printed `None`.
+
+    The floor itself is `weather`'s property and is tested there; what is asserted here is
+    the rendering, in both channels -- a `current` carrying only an hour must still mark
+    that hour in the drawing and say ``now 16:00`` in the alt text, and must not invent a
+    temperature or a rain chance to go with it.
+    """
+    chart = render_chart(_series(), {"hour": "16:00"}, "Osasco")
+    assert _alt(chart) == "Hourly - Osasco, 2026-10-05, local time - now 16:00"
+    assert ">now 16:00</text>" in _svg_of(chart)
+
+    for junk in ("not a dict", {"hour": 17}, {"hour": "99:99"}, {"hour": ""}, {}, None):
+        rendered = render_chart(_series(), junk, "Osasco")
+        assert "now" not in _alt(rendered), junk
+        assert "stroke-dasharray" not in _svg_of(rendered), junk
+
+
+def test_the_chart_is_titled_with_the_place_and_the_day_it_covers():
+    """A curve with no place on it is a chart of nowhere.
+
+    The date is stated rather than inferred from the axis, because the axis carries hours
+    only and a reader comparing two answers has to see which day each one belongs to. It is
+    in both channels -- the alt text and the drawn title -- because the alt text is what
+    survives when the image does not.
+    """
+    chart = render_chart(_series(day="2026-10-07"), NOW, "Londres")
+    alt = _alt(chart)
+    assert "Londres" in alt and "2026-10-07" in alt and "local time" in alt
+    assert ">Hourly - Londres, 2026-10-07</text>" in _svg_of(chart)
+
+    # No place recorded: the title drops it rather than inventing one.
+    assert "Osasco" not in _alt(render_chart(_series(), NOW, None))
+
+
+def test_a_non_string_place_is_dropped_from_the_title_rather_than_printed():
+    """A heading is either a place's name or nothing.
+
+    ``render_chart`` is public and its ``place`` argument is whatever the caller had to
+    hand, so f-stringing it unguarded would print ``Hourly - 17`` or ``Hourly - ['Osasco']``
+    -- and neither reads as a bug. A reader has no way to tell it is one, which is what
+    makes it worth a guard rather than a code review.
+
+    Coercion rather than a type check, because ``None`` and ``""`` already mean "no
+    place" here and a caller that passes a str is fine whether or not it is a real city
+    name -- ``render_chart`` cannot tell a bad name from a good one, and pretending it
+    can would only move the failure somewhere it can no longer be seen.
+
+    The same coercion feeds the SVG title and the fingerprint, so a non-string cannot leak
+    into the drawn heading *or* split the store: one name for one shape.
+    """
+    for absent in (None, 17, 0.5, ["Osasco"], {"name": "Osasco"}, (1, 2)):
+        rendered = render_chart(_series(), NOW, absent)
+        assert _heading(_alt(rendered)) == "Hourly - 2026-10-05, local time", absent
+        assert _alt(rendered) == _alt(render_chart(_series(), NOW, None)), absent
+
+    # The empty string and a blank one are the same "no place", not a stray separator.
+    for blank in ("", "   ", "\n"):
+        assert _heading(_alt(render_chart(_series(), NOW, blank))) == (
+            "Hourly - 2026-10-05, local time"
+        ), repr(blank)
+
+    # And a non-string is not merely hidden from the title: it does not become a
+    # different image, because the fingerprint coerces it the same way.
+    assert render_chart(_series(), NOW, 17) == render_chart(_series(), NOW, None)
+
+
+def test_strip_chart_block_is_a_no_op_on_text_that_has_no_chart():
+    """So the hot path for every non-weather turn costs one substring test."""
+    text = "- a\n- b\n\n**Sources**\n- [obsidian][ck][m1][[x]]: y"
+    assert strip_chart_block(text) is text or strip_chart_block(text) == text
+>>>>>>> Stashed changes

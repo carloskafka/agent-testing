@@ -65,6 +65,7 @@ os.environ["OBSIDIAN_MCP_URL"] = ""
 RENDERER_URL = os.environ.pop("RENDERER_URL", None)
 os.environ["RENDERER_URL"] = ""
 
+
 #: The weather tier, pinned for the same reason as ``RENDERER_URL`` above: it is a
 #: tier whose *tool list* is built at import time, so a developer's ``.env`` would
 #: decide whether ``weather_forecast`` is even in ``root_agent.tools``. ``WEATHER_ENABLED``
@@ -99,3 +100,18 @@ os.environ["VAULT_NAME"] = ""
 
 #: Pinned, not defaulted: read at import time by ``agent.py``.
 os.environ["CACHE_ENABLED"] = "true"
+
+#: **3. The chart store.** ``chart.chart_dir()`` defaults to
+#: ``$CWD/.adk/charts``, and the suite renders real charts -- ``test_sources.py`` and
+#: ``test_weather.py`` both drive ``render_chart`` end to end and then assert on the
+#: bytes that were written. Left alone, every test run dropped SVG files into the
+#: repository's own ``.adk`` directory, which is git-ignored but is also where a real
+#: deployment's charts live: a developer's next ``docker compose up`` would then be
+#: serving images written by a test run, from a payload that was never requested.
+#:
+#: Set per-session rather than per-test because ``chart_dir`` resolves the environment
+#: on every call, and a ``tmp_path`` here would not be importable from a test module.
+#: The directory is created eagerly so the mount path and the write path agree.
+_CHART_DIR = tempfile.mkdtemp(prefix="adk-tests-charts-")
+os.makedirs(_CHART_DIR, exist_ok=True)
+os.environ["CHART_DIR"] = _CHART_DIR

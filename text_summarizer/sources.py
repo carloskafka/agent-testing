@@ -76,7 +76,17 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from .chart import (
+    _position_of as chart_position_of,
+    render_svg as chart_render_svg,
+    store_svg as chart_store_svg,
+    svg_fingerprint as chart_svg_fingerprint,
+)
+
 __all__ = [
+    "CHART_FENCE",
+    "CHART_IMAGE_PREFIX",
+    "CHART_TOKEN",
     "MODEL_TOKEN",
     "SOURCES_HEADING",
     "SOURCE_BULLET",
@@ -860,5 +870,5 @@ def strip_sources_block(text: str) -> str:
 
 
 def summary_only(text: str) -> str:
-    """The response as the quality metrics should see it: bullets, no Sources."""
-    return strip_sources_block(text)
+    """Summary text with charts and sources removed."""
+    return strip_chart_block(strip_sources_block(text))

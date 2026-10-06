@@ -44,6 +44,7 @@ distinct prompt each run (a `{nonce}` placeholder).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -537,6 +538,29 @@ _WEATHER_METRICS: tuple[str, ...] = (
     "uv_index_max",
 )
 
+#: The shape of the image a rendered curve is emitted as: a markdown image whose URL is
+#: ``/chart/<16 hex>.svg``, **alone on its line**. Spelled out here rather than imported,
+#: for the same reason as ``_WEATHER_METRICS``: this file is run by a system ``python3``
+#: with no business importing the agent package. The duplication is only safe because
+#: ``test_the_chart_url_this_check_knows_is_the_one_the_renderer_emits`` asserts the two
+#: agree, so a change in ``chart.py`` fails offline instead of quietly turning these checks
+#: into ones that accept anything.
+#:
+#: **Anchored to the line**, matching how ``sources._is_chart_image`` recognises one. The
+#: renderer emits the image as its own line, so anchoring costs nothing and buys the thing
+#: an unanchored search cannot have: an image with prose glued to the end of it does not
+#: count as the renderer's output. Without that, a model could satisfy "there is a chart
+#: here" by writing an image line of its own and trailing its own words onto it.
+#:
+#: It used to be a glyph set -- the ASCII curve's eight block-drawing levels -- and the
+#: check that asserted parity was ``test_the_curve_levels_...``. That check was not
+#: replaced because the drawing got prettier: it went away with the drawing. There are no
+#: levels to enumerate when the curve is an image, and a check that had nothing to assert
+#: is better deleted than kept as a shape.
+_CHART_URL_RE = re.compile(
+    r"^!\[[^\]\n]*\]\(/chart/([0-9a-f]{16}\.svg)\)[ \t]*$", re.MULTILINE
+)
+
 
 def _forecast_payloads(turn: Turn) -> list[dict]:
     """Every ``weather_forecast`` result, unwrapped from ADK's ``{"result": ...}``.
@@ -678,6 +702,158 @@ def _asked_rather_than_guessed(turn: Turn) -> tuple[bool, str]:
     if "ask_user" not in turn.tool_calls:
         return False, f"never asked: tools={turn.tool_calls}"
     return True, "refused with candidates and asked"
+
+
+def _the_curve_rides_in_the_answer(turn: Turn) -> tuple[bool, str]:
+    """The graph is drawn, substituted where the model put the token, and it is *last*.
+
+    Three properties, and the third is why this is not simply a search of
+    ``turn.answer``. The first is that the model emitted the placeholder at all -- rule 17
+    asks for one token, and a model that instead draws the curve itself produces 24
+    generated numbers with no ``/chart/`` URL anywhere. The second is that the
+    *renderer* produced it, which the URL is the evidence of: it is drawn from the tool's
+    payload in code and served from ``/chart``, so it cannot contain a number the payload
+    did not carry. The third is that it sits on the **last** message, because ``flow-r5``
+    taught this repo that a trailing block on a message of its own turns the turn into a
+    stub -- and the graph is the newest trailing block, so it is where that comes back.
+
+    **The URL is also what makes the second property checkable**, which the ASCII fence
+    only approximated: the name is a digest of the payload
+    (:func:`chart.svg_fingerprint`), so a graph drawn from different numbers would carry a
+    different URL. That is what ``_the_curve_is_drawn_from_the_payload`` now asserts
+    instead of counting glyphs -- a strictly stronger claim, because it is about the
+    specific numbers rather than about the alphabet they came from.
+    """
+    if not _CHART_URL_RE.search(turn.answer):
+        return False, (
+            "no rendered chart in the answer: the model either wrote no placeholder or "
+            "drew the graph itself"
+        )
+    texts = [
+        p["text"]
+        for event in turn.events
+        if event.get("author") == APP
+        for p in _parts(event)
+        if p.get("text")
+    ]
+    if not texts:
+        return False, "no answer text at all"
+    if not _CHART_URL_RE.search(texts[-1]):
+        return False, "the turn ends on something other than the message carrying the graph"
+    if len(_CHART_URL_RE.findall(texts[-1])) > 1:
+        return False, f"{len(_CHART_URL_RE.findall(texts[-1]))} charts on the last message"
+    return True, "one rendered curve on the last message"
+
+
+def _the_curve_is_drawn_from_the_payload(turn: Turn) -> tuple[bool, str]:
+    """The image in the answer is *this* forecast's, not a plausible-looking one.
+
+    The chart is code-rendered, so this should be true by construction -- which is exactly
+    why it is asserted. If it ever stops being true the failure is invisible in the
+    answer: a graph of the wrong hours looks exactly like a graph of the right ones, and
+    nothing in the UI distinguishes them.
+
+    Read off the answer rather than re-rendered from the payload, so it checks what the
+    reader is actually shown.
+    """
+    payloads = _forecast_payloads(turn)
+    series = payloads[0].get("hourly") if payloads else None
+    if not isinstance(series, dict) or not series.get("time"):
+        return False, "no hourly series in the payload to have drawn"
+    found = _CHART_URL_RE.findall(turn.answer)
+    if not found:
+        return False, "no chart image in the answer"
+    served = found[-1]
+    place = (payloads[0].get("place") or {}).get("name")
+    expected = _chart_fingerprint(
+        series, payloads[0].get("current"), place if isinstance(place, str) else ""
+    ) + ".svg"
+    if served != expected:
+        return False, (
+            f"the image is /chart/{served} but this payload's series hashes to "
+            f"{expected} - the graph is not the forecast that was returned"
+        )
+    return True, f"the image is this payload's, over {len(series['time'])} hours"
+
+
+def _chart_fingerprint(hourly: dict, current: Any, place: str) -> str:
+    """The 16-hex name the renderer gives this exact chart.
+
+    Duplicated from :func:`chart.svg_fingerprint` for the same reason
+    :data:`_CHART_URL_RE` is spelled out here -- this file runs under a system
+    ``python3`` with no business importing the agent package. And it is a *bigger*
+    duplication than a glyph set: it is a canonical JSON serialisation plus a digest, so
+    a change to either half of ``svg_fingerprint``'s input encoding would leave this
+    computing a name the renderer never emits, and the check would report every healthy
+    turn as fabricated.
+
+    ``test_the_chart_name_this_check_computes_is_the_one_the_renderer_produces`` is what
+    makes that safe, and it deliberately asserts against **real** inputs -- a payload and
+    a ``current`` -- rather than asserting that two implementations of the same idea look
+    alike. A parity test that both sides agree is only as good as the fixtures it compares.
+    """
+    raw = json.dumps(
+        {"hourly": hourly, "current": current if isinstance(current, dict) else {},
+         "place": place, "width": 720},
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _now_is_answered_from_the_hour_containing_now(turn: Turn) -> tuple[bool, str]:
+    """The live defect, as a check.
+
+    Session ``9c40b78b``, asked *"Qual a temperatura agora em Osasco?"*: the agent
+    reported the day's **mean** and hedged honestly -- *"a fonte fornece valores do dia, nao
+    uma leitura instantanea"* -- which is a correct description of the wrong number. The
+    daily block has no time axis in it, so nothing in the old payload could answer "now"
+    at all; the hourly series and the ``current`` reading were added for this.
+
+    Three assertions, and the middle one is the defect itself. The payload must carry a
+    ``current``; the answer must name the hour it is reporting, because a temperature
+    "now" without an hour is the same gap one layer up; and **the current reading's
+    temperature must appear in the answer**. That last one is what catches the recorded
+    turn, and a payload-only check would miss it entirely -- the model choosing the mean
+    over the hour is a *prose* failure, so it has to be read off the prose.
+
+    The tolerance is 0.5 °C so a model that rounds "19,2" to "19" passes; below that the
+    two readings are indistinguishable and the earlier guard reports it instead of
+    pretending to tell them apart.
+    """
+    payloads = _forecast_payloads(turn)
+    if not payloads:
+        return False, "no weather_forecast payload"
+    current = payloads[0].get("current")
+    if not isinstance(current, dict) or "temperature_c" not in current:
+        return False, (
+            "the payload carries no `current` reading, so 'now' cannot be answered "
+            "from anything but a daily aggregate"
+        )
+    hour = current.get("hour")
+    body = turn.answer
+    if hour and hour not in body:
+        return False, f"the answer never names the hour it is reporting ({hour})"
+    mean = (payloads[0].get("forecast") or [{}])[0].get("temperature_mean_c")
+    now = float(current["temperature_c"])
+    if mean is not None and abs(float(mean) - now) < 0.05:
+        return False, f"the current reading equals the daily mean ({mean}) - check the floor"
+    # The graph is code-rendered and its *alt text* does carry the reading, so it is
+    # stripped rather than read around: what is being asked is whether the *prose*
+    # reports the hour. Leaving the image in would let this check pass on an answer whose
+    # only mention of the reading is the alt text of a graph the renderer drew from the
+    # very number being asserted -- a tautology wearing a passing check.
+    prose = _CHART_URL_RE.sub("", body)
+    quoted = [float(m.replace(",", ".")) for m in re.findall(r"(-?\d+(?:[.,]\d+)?)\s*°C", prose)]
+    if quoted and not any(abs(q - now) <= 0.5 for q in quoted):
+        return False, (
+            f"the answer reports {quoted} °C but the {hour} reading is {now} °C - "
+            f"the {mean} °C mean is not 'now'"
+        )
+    if not quoted:
+        return False, "the answer quotes no temperature at all, so nothing answers 'now'"
+    return True, f"reported the {hour} reading ({now} °C), not the {mean} °C mean"
 
 
 def _does_not_invent_showings(turn: Turn) -> tuple[bool, str]:
@@ -1028,6 +1204,55 @@ SCENARIOS: list[Scenario] = [
             "Springfield matches eight US cities and none of them wins. The tool "
             "refuses and returns candidates with NO forecast key, so the model has "
             "nothing to quote but the candidates -- it must ask, not pick one."
+        ),
+        tags=["weather"],
+    ),
+    Scenario(
+        name="weather_now_is_the_hour_and_not_the_day_mean",
+        prompt="Qual a temperatura agora em Osasco?",
+        check=_all(
+            [
+                _no_error,
+                _no_cache_hit,
+                _called("weather_forecast"),
+                _now_is_answered_from_the_hour_containing_now,
+                _the_reader_ends_on_the_forecast,
+                _no_second_brain_note,
+            ]
+        ),
+        note=(
+            "The prompt that found the defect, verbatim. Session 9c40b78b answered this "
+            "with the day's MEAN and said so honestly -- 'a fonte fornece valores do dia, "
+            "nao uma leitura instantanea' -- which is a correct description of the wrong "
+            "number. The daily block has no time axis, so nothing in the old payload could "
+            "answer 'now'; the hourly series and the `current` reading exist for this."
+        ),
+        tags=["weather", "regression"],
+    ),
+    Scenario(
+        name="weather_the_curve_rides_in_the_answer",
+        prompt="como fica o tempo em Osasco hoje hora a hora?",
+        check=_all(
+            [
+                _no_error,
+                _no_cache_hit,
+                _called("weather_forecast"),
+                _called("log_conversation"),
+                _the_curve_rides_in_the_answer,
+                _the_curve_is_drawn_from_the_payload,
+                _weather_resolved_to_the_city_that_was_asked_about,
+                _no_second_brain_note,
+            ]
+        ),
+        note=(
+            "The graph is drawn in code from the tool's own payload, so the model writes "
+            "one token and nothing else. Two ways this can pass a reader and still be "
+            "wrong, which is why there are two checks: the fence proves the *renderer* "
+            "produced it rather than the model, and the last-message requirement is the "
+            "`flow-r5` shape -- a trailing block on a message of its own leaves the turn "
+            "ending on a graph with nothing above it. `_final_answer_has_a_body` is not "
+            "composed in here, for the same reason the other weather scenario leaves it "
+            "out: it passes on the recorded 41-character stub."
         ),
         tags=["weather"],
     ),

@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 from google.adk.tools.function_tool import FunctionTool
 
 
-def current_datetime(timezone_name: str = "local") -> str:
+def current_datetime(timezone_name: str = "local", tool_context: Any | None = None) -> str:
     """The current date and time as JSON. Use this whenever the answer depends on when it is.
 
     Call it before answering anything involving "today", "yesterday", "this week",
@@ -41,17 +42,37 @@ def current_datetime(timezone_name: str = "local") -> str:
         timezone_name: "local" for the server's timezone, "utc" for UTC. A named
             IANA zone such as "Europe/Lisbon" is accepted if the host has tzdata.
     """
-    if timezone_name.strip().lower() in ("", "local"):
+    # Prefer session state timezone when caller asks for "local" and we have one.
+    tz = timezone_name.strip().lower()
+    chosen = timezone_name.strip()
+    if tz in ("", "local") and tool_context is not None:
+        try:
+            state = getattr(tool_context, "state", None)
+            stored = None
+            if isinstance(state, dict):
+                stored = state.get("user_timezone")
+            else:
+                try:
+                    stored = state.get("user_timezone")
+                except Exception:
+                    stored = None
+            if isinstance(stored, str) and stored.strip():
+                chosen = stored.strip()
+                tz = chosen.lower()
+        except Exception:
+            pass
+
+    if tz in ("", "local"):
         moment = datetime.now().astimezone()
         zone = str(moment.tzinfo) if moment.tzinfo else "local"
-    elif timezone_name.strip().lower() == "utc":
+    elif tz == "utc":
         moment = datetime.now(UTC)
         zone = "UTC"
     else:
         try:
             from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-            zone = timezone_name.strip()
+            zone = chosen
             moment = datetime.now(ZoneInfo(zone))
         except (ImportError, ZoneInfoNotFoundError, ValueError, KeyError):
             # A bad zone name is not worth failing a turn over: fall back to local
