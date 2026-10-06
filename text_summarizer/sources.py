@@ -74,9 +74,12 @@ import os
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 __all__ = [
+    "CHART_FENCE",
+    "CHART_TOKEN",
     "MODEL_TOKEN",
     "SOURCES_HEADING",
     "SOURCE_BULLET",
@@ -93,7 +96,9 @@ __all__ = [
     "note_href",
     "render_sources",
     "resolve_vault_name",
+    "render_chart",
     "served_model_from_events",
+    "strip_chart_block",
     "summary_only",
 ]
 
@@ -111,9 +116,17 @@ MODEL_TOKEN = "@@ADK_MODEL@@"
 #: collision-proof construction as the other two.
 WEB_TOKEN = "@@ADK_WEB@@"
 
+#: Sentinel the model copies verbatim in place of a chart of the hourly series.
+#:
+#: Asked of the model as a *placeholder* and drawn in code, never as a chart to draw:
+#: the rendered curve comes from the tool's own payload, which is the only place the
+#: numbers exist, and a free-tier model asked to plot is a source of token debris
+#: (the ``com最大值 de 19,4 °C`` kind of artefact) rather than of a graph.
+CHART_TOKEN = "@@ADK_CHART@@"
+
 # One alternation over every sentinel. Built from a tuple rather than written out,
 # so adding a token cannot leave a place that still only knows about two.
-_TOKENS = (VAULT_TOKEN, MODEL_TOKEN, WEB_TOKEN)
+_TOKENS = (VAULT_TOKEN, MODEL_TOKEN, WEB_TOKEN, CHART_TOKEN)
 _TOKEN_RE = re.compile("|".join(re.escape(token) for token in _TOKENS))
 
 SOURCES_HEADING = "**Sources**"
@@ -128,6 +141,48 @@ SOURCE_KIND = "obsidian"
 #: provider rather than a vault name -- slot two means "where this came from", and
 #: both kinds answer that question the same way.
 WEB_KIND = "web"
+
+# --- the hourly curve ---------------------------------------------------------
+
+#: Info string on the fence of a rendered chart. It is the **strip marker**: the text
+#: of a code fence is rendered verbatim but its info string is not shown, so this both
+#: identifies the block for `summary_only` and stays invisible to the reader.
+#:
+#: A marker in the *text* could not do this job. The obvious candidate -- a line reading
+#: "Curva horária" -- is a phrase a model writes in prose, and a stripper keyed on it
+#: would eat the rest of the answer. A fence labelled `adk-chart` is not something any
+#: model emits by accident, which is the same collision-proof property the sentinels
+#: above are chosen for.
+CHART_FENCE = "adk-chart"
+
+#: Eight block-drawing levels, lowest first. Distinct glyphs rather than the "▁▂▃▄▅▆▇█"
+#: gradient run because a *flat* series then has to read as flat: a single value maps to
+#: the middle level, so a day at a constant 19.2 °C is one row of `▄` and not a
+#: full-range ramp of noise pretending to be a trend.
+_CURVE_LEVELS = "▁▂▃▄▅▆▇█"
+_CURVE_FLAT_INDEX = len(_CURVE_LEVELS) // 2
+
+#: The series drawn: row label, payload key, unit. The temperature is the curve a
+#: reader asks for by name; rain chance is the second thing anyone wants hour by hour,
+#: and it is what turns "will it rain" from a daily percentage into a time.
+_CURVE_SERIES = (
+    ("°C", "temperature_c", "°C"),
+    ("rain %", "rain_chance_pct", "%"),
+)
+
+#: Width of the row-label column: the widest label (``rain %``) plus one space, so
+#: every row's cells start at the same column and the chart reads as a chart.
+_CHART_LABEL_WIDTH = 7
+
+#: Hour columns are three characters wide -- a two-digit hour or one glyph, then a
+#: space -- so a 24-hour day is 72 characters and fits inside an 800px message column in
+#: a monospace face. Packing to one character per column would collide the axis labels
+#: with their neighbours, and there are 24 of them.
+_CHART_CELL = 3
+
+#: Below this many points there is no curve to draw -- a single reading is not a shape,
+#: and a one-column "graph" is a number wearing a graph's clothes.
+_CHART_MIN_POINTS = 2
 
 #: Every kind the grammar recognises. ``_KIND_RE`` is built from this, so a line
 #: the renderer emits is always a line the parser can read back.
@@ -744,6 +799,7 @@ def render_sources(
     vault_root: str | None = None,
     web_provider: str | None = None,
     allowed_web_urls: Iterable[str] | None = None,
+    chart: str | None = None,
 ) -> str:
     """Re-emit the model's Sources block with the real vault and model names.
 
@@ -768,12 +824,20 @@ def render_sources(
     invented URLs on every hallucinated claim. Pass ``None`` to accept every web
     line; pass an empty collection to accept none.
 
+    ``chart`` is the rendered hourly curve (``render_chart``), substituted for
+    :data:`CHART_TOKEN` **where the model put it** rather than appended, so the graph
+    lands next to the prose that explains it. A token with no chart behind it is
+    dropped rather than left behind as a blank line: on a turn where no weather tool
+    ran there is no series, and a gap where the reader expected a graph is a worse
+    answer than no graph. Pass ``None`` to substitute nothing.
+
     Returns the input unchanged (modulo stray sentinel tokens) when it contains
     no Sources block.
     """
     text = text or ""
     if not text.strip():
         return text
+    chart = (chart or "").strip()
 
     vault = _sanitize_identifier(vault_name or "") or UNKNOWN
     model = _sanitize_identifier(model_name or "") or UNKNOWN
@@ -789,6 +853,7 @@ def render_sources(
     entries: list[SourceEntry] = []
     anchor: int | None = None
     in_block = False
+    dropped_chart_line = False
 
     for line in lines:
         if in_block:
@@ -798,6 +863,27 @@ def render_sources(
                     entries.append(parsed)
                 continue
             in_block = False
+
+        if dropped_chart_line:
+            # The blank line that separated the dropped placeholder from what follows
+            # is now a second gap. Taken here rather than by collapsing every run of
+            # blanks afterwards, which would reformat answers that never mentioned a
+            # chart at all.
+            dropped_chart_line = False
+            if not line.strip() and out and not out[-1].strip():
+                continue
+
+        if CHART_TOKEN in line:
+            # Substituted in place, so the curve lands where the model put it rather
+            # than at the end of the answer -- and a turn with no hourly series this
+            # time drops the placeholder instead of leaving a blank line where a graph
+            # would have been. `_scrub` would remove the token anyway; dropping the
+            # line is what removes the gap.
+            if chart:
+                out.extend(chart.split("\n"))
+            else:
+                dropped_chart_line = True
+            continue
 
         if _HEADING_RE.match(line) or _starts_source_block(line):
             if anchor is None:
@@ -860,5 +946,212 @@ def strip_sources_block(text: str) -> str:
 
 
 def summary_only(text: str) -> str:
-    """The response as the quality metrics should see it: bullets, no Sources."""
-    return strip_sources_block(text)
+    """The response as the quality metrics should see it: bullets, no Sources.
+
+    Strips the rendered chart as well, and for the same reason the Sources block is
+    stripped: `quality.bullet_score` counts bullets and `lexical_recall` compares the
+    answer against the *user's* words, so a rendered chart would move both. Left in, a
+    row of `▂▃▄▅` glyphs is counted as prose the model wrote, which is a presentation
+    artefact changing a measurement -- the same drift `strip_bot_name` exists to stop,
+    and it would be invisible because the scores would simply read a little differently
+    on weather turns than on every other turn.
+    """
+    return strip_chart_block(strip_sources_block(text))
+
+
+def _chart_scale(values: list[Any]) -> tuple[list[str], str]:
+    """One series as level glyphs, one per reading, plus its scale label.
+
+    Each row is scaled to **its own** min and max, because the two series on the chart
+    have nothing in common numerically -- temperature around 19 and rain chance around 0
+    -- and one shared scale would flatten the smaller one into a straight line, which is
+    a chart that lies about the thing it is drawn to show.
+
+    A missing reading is a blank cell rather than a level: the provider returns ``null``
+    for hours it cannot serve, and plotting those as "the lowest value" invents a
+    reading. A series with no reading at all still gets its row, blank, with ``no data``
+    as its label -- silence about a series is worse than saying it has none.
+    """
+    blanks = [" " * _CHART_CELL] * len(values)
+    numbers = [
+        float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)
+    ]
+    if not numbers:
+        return blanks, "no data"
+
+    low = min(numbers)
+    high = max(numbers)
+    span = high - low
+    cells: list[str] = []
+    for value in values:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            cells.append(" " * _CHART_CELL)
+            continue
+        # A flat series maps to the middle level, so a constant 19.2 °C reads as one
+        # row of the same glyph rather than a full-range ramp of noise.
+        index = (
+            _CURVE_FLAT_INDEX
+            if span == 0
+            else int((value - low) / span * (len(_CURVE_LEVELS) - 1))
+        )
+        cells.append(_CURVE_LEVELS[max(0, min(len(_CURVE_LEVELS) - 1, index))].ljust(_CHART_CELL))
+    return cells, f"{_fmt_chart_number(low)}..{_fmt_chart_number(high)}"
+
+
+def _fmt_chart_number(value: float) -> str:
+    """A number as short as it can be without lying: ``19.2``, ``20``, ``0``."""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.1f}"
+
+
+def _chart_hour_label(iso: str) -> str:
+    """``2026-10-05T16:00`` -> ``16``. The date is on the title line instead."""
+    tail = iso.split("T")[-1] if "T" in iso else iso
+    head = tail.split(":")[0]
+    return head.zfill(2) if head.isdigit() else tail
+
+
+def _chart_row(label: str, cells: list[str]) -> str:
+    """One labelled row, cells padded to a fixed width and the label left-aligned."""
+    width = _CHART_LABEL_WIDTH + _CHART_CELL * len(cells)
+    return ("".join([label.ljust(_CHART_LABEL_WIDTH)] + cells)).ljust(width)
+
+
+def render_chart(hourly: Any, current: Any = None, place: Any = None) -> str:
+    """The hourly series as a markdown code block, or ``""`` when there is nothing to draw.
+
+    Drawn here, from the tool's own payload, for the reason the **Sources** block is
+    drawn in code rather than asked for: this is the only place the numbers exist, and a
+    model asked to plot them invents them. The output is a pure function of its
+    arguments, which is what makes a second `render_sources` pass over an already
+    rendered answer reproduce it byte for byte -- the block carries no sentinel of its
+    own, so there is nothing for that pass to substitute twice.
+
+    Two rows share one axis, temperature and rain chance, because those are what a
+    reader asks hour by hour and one row cannot carry both. Each row is scaled to its
+    own range; see `_chart_scale`.
+
+    **The wording is fixed English, and that is deliberate.** Everything that can be
+    language-free is: the rows are labelled by unit (``°C``, ``rain %``) rather than by a
+    word, and the hour axis is digits. Only ``Hourly`` and ``now`` are words, and they
+    are the same trade ``weather.WEATHER_CONDITIONS`` makes for the same reason -- the
+    answer's language follows the user, but this block cannot, because choosing it would
+    mean translating a chart. Two English words inside a Portuguese answer is a smaller
+    cost than a graph rendered in the wrong language or invented by the model.
+    """
+    if not isinstance(hourly, dict):
+        return ""
+    times = hourly.get("time")
+    if not isinstance(times, list) or len(times) < _CHART_MIN_POINTS:
+        return ""
+
+    axis: list[str] = ["hora".ljust(_CHART_LABEL_WIDTH)]
+    for index, stamp in enumerate(times):
+        label = _chart_hour_label(str(stamp))
+        # The last cell is not padded, so no line ends in whitespace.
+        axis.append(label.ljust(_CHART_CELL) if index < len(times) - 1 else label)
+
+    scales: list[str] = []
+    rows: list[str] = []
+    for label, key, _unit in _CURVE_SERIES:
+        column = hourly.get(key)
+        if not isinstance(column, list) or len(column) < len(times):
+            continue
+        cells, scale = _chart_scale(list(column[: len(times)]))
+        rows.append(_chart_row(label, cells).rstrip())
+        # The label already carries the unit, so it is not repeated on this line.
+        scales.append(f"{label} {scale}")
+
+    day = str(times[0]).split("T")[0]
+    # A title must be a title. `place` is whatever the caller had to hand, and f-stringing
+    # a non-string into a chart's heading would print "Hourly - 17" -- which reads as a
+    # place, not as a bug, and a reader has no way to tell it is the latter.
+    name = place.strip() if isinstance(place, str) else ""
+    title = f"Hourly - {name}, {day}, local time" if name else f"Hourly - {day}, local time"
+    # The scales sit on their own line rather than at the end of each row: appended to
+    # a row they push a 24-hour day to 94 characters, which wraps in the dev UI's 800px
+    # message column, and a wrapped chart is not a chart.
+    body = "\n".join([title, *([ "  ·  ".join(scales)] if scales else []), "".join(axis), *rows])
+    reading = _current_line(current)
+    if reading:
+        body = f"{body}\n{reading}"
+
+    return f"```{CHART_FENCE}\n{body}\n```"
+
+
+def _current_line(current: Any) -> str:
+    """The hour containing now, as one labelled line of the block.
+
+    Floored to the hour that contains the moment rather than rounded, and reported as
+    its own line rather than marked on the curve with a caret: a caret has to sit under
+    exactly the right column, and column alignment depends on the monospace face the
+    *reader's* browser falls back to, which this module cannot guarantee. A labelled
+    line cannot be misread.
+    """
+    if not isinstance(current, dict):
+        return ""
+    stamp = _field_text(current.get("hour"))
+    temperature = current.get("temperature_c")
+    chance = current.get("rain_chance_pct")
+    parts = ["now", stamp] if stamp else ["now"]
+    if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
+        parts.append(f"{_fmt_chart_number(float(temperature))} °C")
+    if isinstance(chance, (int, float)) and not isinstance(chance, bool):
+        parts.append(f"rain {_fmt_chart_number(float(chance))}%")
+    return "  ".join(part for part in parts if part)
+
+
+def _field_text(value: Any) -> str:
+    """A short plain-text field, or ``""`` for anything that is not one."""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _is_chart_fence(line: str) -> bool:
+    """True for the opening fence of a rendered chart.
+
+    The info string is matched **exactly**, and that is a deliberate narrowing of
+    ``\\b``: ``\\b`` after ``adk-chart`` matches before a hyphen, so ``adk-chart-2``
+    read as a chart and ``summary_only`` would delete a fenced block the model wrote.
+    The renderer emits one string and one string only, so requiring the whole info
+    string costs nothing and removes the near-miss.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("```"):
+        return False
+    return re.fullmatch(r"`{3,}" + re.escape(CHART_FENCE), stripped) is not None
+
+
+def strip_chart_block(text: str) -> str:
+    """Remove every rendered chart block, leaving everything else alone.
+
+    Needed for the same reason `strip_sources_block` exists: the quality heuristics
+    count bullets and compare words, and a chart's rows are neither the answer's prose
+    nor anything the user typed. Left in, it would move `quality.bullet_score` on every
+    weather answer -- a presentation artefact changing a measurement, which is exactly
+    the drift `strip_bot_name` exists to prevent.
+
+    The whole fenced block goes, opening fence through closing fence, including
+    anything a model wrote inside it. An unterminated fence is treated as running to
+    the end of the text rather than leaking the rest of the answer into the strip.
+    """
+    if not text or CHART_FENCE not in text:
+        return text
+    out: list[str] = []
+    inside = False
+    for line in text.split("\n"):
+        if not inside:
+            if _is_chart_fence(line):
+                inside = True
+            else:
+                out.append(line)
+            continue
+        if line.strip().startswith("```"):
+            inside = False
+    # Collapse a blank line the removal may have left at the splice point.
+    collapsed: list[str] = []
+    for line in out:
+        if not line.strip() and collapsed and not collapsed[-1].strip():
+            continue
+        collapsed.append(line)
+    return "\n".join(collapsed)

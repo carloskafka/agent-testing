@@ -112,6 +112,39 @@ def test_no_rule_at_all_says_the_very_end():
     )
 
 
+# --- the graph, which is a third trailing block ---------------------------------
+
+
+def test_the_graph_placeholder_is_placed_inside_the_answer_message():
+    """Same failure as the citations, from the same cause, so it is stated the same way.
+
+    ``flow-r5``: the model put its citation lines on a message of their own *after* a
+    tool call, and the turn ended on a stub -- a Sources block with nothing above it. The
+    hourly graph is a third block that is supposed to sit between the prose and the
+    citation, and it is the newest of the three, so it is where that mistake comes back.
+
+    "BEFORE the source line" is what makes it a *position* in the answer rather than an
+    instruction to produce a graph; the two are not interchangeable, because a model told
+    only "show a graph" will happily write one in a final message of its own.
+    """
+    rule = _rule(17)
+    assert "@@ADK_CHART@@" in rule
+    assert "BEFORE the source line" in rule
+
+
+def test_a_graph_instruction_never_leaves_drawing_the_graph_to_the_model():
+    """The chart is drawn in code, and the rule has to say so rather than imply it.
+
+    Every other formatted block this agent emits is code-rendered from data the tool
+    returned -- the **Sources** template, the name stamp -- and rule 17 has to carry the
+    same instruction for the graph. "Show the hour as a graph" on its own is exactly the
+    instruction that produces 24 numbers generated from memory.
+    """
+    rule = _rule(17)
+    assert "do NOT draw the graph yourself" in rule
+    assert "replaced with a drawn curve" in rule
+
+
 # --- the shape it must not regress into ---------------------------------------
 
 

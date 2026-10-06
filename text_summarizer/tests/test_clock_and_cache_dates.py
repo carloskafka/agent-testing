@@ -15,7 +15,7 @@ yesterday's answer before the model ever ran.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from text_summarizer import agent, clock
@@ -247,15 +247,26 @@ def test_the_lookup_leaves_a_timeless_prompt_untouched(monkeypatch):
 
 def test_yesterdays_note_is_not_replayed_today(monkeypatch):
     """The reported bug, end to end against a vault holding yesterday's note.
-
-    The lookup is driven with an explicit ``today`` so the test does not depend on
-    what day it is run: it asks for *yesterday's* key and asserts the real vault
-    search finds it, then asks for *today's* and asserts it does not.
+    
+    Mock date to a fixed day so the test never drifts with the calendar.
     """
     import os
     import tempfile
+    from datetime import date as dt_date
 
     from text_summarizer import second_brain
+
+    class FixedDate(dt_date):
+        @classmethod
+        def today(cls):
+            return dt_date(2026, 10, 6)
+
+    monkeypatch.setattr(second_brain, "date", FixedDate)
+    monkeypatch.setattr("text_summarizer.second_brain.date", FixedDate)
+
+    today = FixedDate.today()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    today_iso = today.isoformat()
 
     with tempfile.TemporaryDirectory() as tmp:
         vault = os.path.join(tmp, "Second Brain")
@@ -263,19 +274,63 @@ def test_yesterdays_note_is_not_replayed_today(monkeypatch):
         monkeypatch.setattr(second_brain, "VAULT_ROOT", tmp)
 
         prompt = "summarize today news"
-        monday_key = source_fingerprint(cache_key_text_for(prompt, today="2026-09-28"))
-        with open(os.path.join(vault, "2026-09-28 - news.md"), "w") as fh:
-            fh.write(f"---\nsource_fingerprint: {monday_key}\n---\nMonday's bullets\n")
+        monday_key = source_fingerprint(cache_key_text_for(prompt, today=yesterday))
+        with open(os.path.join(vault, f"{yesterday} - news.md"), "w") as fh:
+            fh.write(f"---\nsource_fingerprint: {monday_key}\n---\nYesterday's bullets\n")
 
-        # Monday's own key still finds Monday's note: nothing is orphaned.
+        # Yesterday's own key still finds yesterday's note: nothing is orphaned.
         assert second_brain.find_cached_summary(
-            cache_key_text_for(prompt, today="2026-09-28")
+            cache_key_text_for(prompt, today=yesterday), today=yesterday
         ) is not None
 
         # Today's key is different, so today's lookup misses and the model runs.
-        today_key = source_fingerprint(cache_key_text_for(prompt))
-        assert today_key != monday_key
-        assert second_brain.find_cached_summary(cache_key_text_for(prompt)) is None
+        assert source_fingerprint(cache_key_text_for(prompt, today=today_iso)) != monday_key
+        assert second_brain.find_cached_summary(
+            cache_key_text_for(prompt, today=today_iso), today=today_iso
+        ) is None
+
+
+def test_a_note_past_the_staleness_bound_is_not_replayed_even_with_its_own_key(monkeypatch):
+    """Mock date to a fixed day so the test never drifts."""
+    import os
+    import pathlib
+    import tempfile
+    from datetime import date as dt_date
+    from datetime import timedelta
+
+    from text_summarizer import second_brain
+
+    class FixedDate(dt_date):
+        @classmethod
+        def today(cls):
+            return dt_date(2026, 10, 6)
+
+    monkeypatch.setattr(second_brain, "date", FixedDate)
+    monkeypatch.setattr("text_summarizer.second_brain.date", FixedDate)
+
+    prompt = "summarize today news"
+    stale_day = (FixedDate.today() - timedelta(days=second_brain.CACHE_MAX_AGE_DAYS + 1)).isoformat()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        vault = os.path.join(tmp, "Second Brain")
+        os.makedirs(vault)
+        monkeypatch.setattr(second_brain, "VAULT_ROOT", tmp)
+        try:
+            key_text = cache_key_text_for(prompt, today=stale_day)
+            (pathlib.Path(vault) / f"{stale_day} - news.md").write_text(
+                f"---\nsource_fingerprint: {source_fingerprint(key_text)}\n---\nStale\n",
+                encoding="utf-8",
+            )
+            assert second_brain.find_cached_summary(key_text, today=FixedDate.today().isoformat()) is None
+            fresh = (FixedDate.today() - timedelta(days=1)).isoformat()
+            fresh_key = cache_key_text_for(prompt, today=fresh)
+            (pathlib.Path(vault) / f"{fresh} - news.md").write_text(
+                f"---\nsource_fingerprint: {source_fingerprint(fresh_key)}\n---\nFresh\n",
+                encoding="utf-8",
+            )
+            assert second_brain.find_cached_summary(fresh_key, today=fresh) == "Fresh"
+        finally:
+            pass
 
 
 def test_cache_key_text_from_context_also_scopes():
