@@ -42,6 +42,9 @@ def current_datetime(timezone_name: str = "local", tool_context: Any | None = No
         timezone_name: "local" for the server's timezone, "utc" for UTC. A named
             IANA zone such as "Europe/Lisbon" is accepted if the host has tzdata.
     """
+    # The TZ environment variable is respected by Python's datetime.astimezone().
+    # When timezone_name is "local" or "", datetime.now().astimezone() will use
+    # the TZ environment variable if set, otherwise the system default.
     # Prefer session state timezone when caller asks for "local" and we have one.
     tz = timezone_name.strip().lower()
     chosen = timezone_name.strip()
