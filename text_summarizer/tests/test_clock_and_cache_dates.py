@@ -293,9 +293,10 @@ def test_yesterdays_note_is_not_replayed_today(monkeypatch):
 def test_a_note_past_the_staleness_bound_is_not_replayed_even_with_its_own_key(monkeypatch):
     """Mock date to a fixed day so the test never drifts."""
     import os
-    import tempfile
     import pathlib
-    from datetime import date as dt_date, timedelta
+    import tempfile
+    from datetime import date as dt_date
+    from datetime import timedelta
 
     from text_summarizer import second_brain
 
