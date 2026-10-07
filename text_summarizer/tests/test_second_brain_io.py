@@ -729,7 +729,7 @@ def _read_cost(what) -> int:
     return cost
 
 
-def test_a_cache_hit_still_replays_the_whole_summary(monkeypatch, tmp_path):
+def test_a_cache_hit_still_replays_the_whole_summary(monkeypatch, tmp_path, time_machine):
     """Bounding the *scan* must not bound what a hit returns.
 
     The prefix is the filter; the note that matched is read in full to produce the
@@ -746,7 +746,8 @@ def test_a_cache_hit_still_replays_the_whole_summary(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    replayed = find_cached_summary(prompt)
+    with time_machine("2026-09-29"):
+        replayed = find_cached_summary(prompt)
 
     assert replayed is not None
     assert replayed == bullets
@@ -754,7 +755,7 @@ def test_a_cache_hit_still_replays_the_whole_summary(monkeypatch, tmp_path):
 
 
 def test_a_note_whose_fingerprint_is_far_into_a_long_frontmatter_is_not_missed(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, time_machine
 ):
     """The bound is generous, and this is the shape that would break it.
 
@@ -773,4 +774,5 @@ def test_a_note_whose_fingerprint_is_far_into_a_long_frontmatter_is_not_missed(
         encoding="utf-8",
     )
 
-    assert find_cached_summary(prompt) == "- the answer"
+    with time_machine("2026-09-29"):
+        assert find_cached_summary(prompt) == "- the answer"

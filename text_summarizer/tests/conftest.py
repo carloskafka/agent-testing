@@ -31,7 +31,11 @@ would otherwise change whether the cache callback is even wired up.
 """
 
 import os
+import sys
 import tempfile
+from datetime import date as _date
+
+import pytest
 
 #: Credentials for the optional Gmail MCP server. Blanked so ``build_gmail_tools()``
 #: takes its disabled path during collection on every machine.
@@ -99,3 +103,70 @@ os.environ["VAULT_NAME"] = ""
 
 #: Pinned, not defaulted: read at import time by ``agent.py``.
 os.environ["CACHE_ENABLED"] = "true"
+
+
+# --- Time machine -------------------------------------------------------------
+
+
+class TimeMachine:
+    """Context manager that freezes ``date.today()`` to a specific day.
+
+    Some tests use hardcoded dates in note filenames (e.g. ``2026-09-29 - news.md``)
+    and rely on the cache's 7-day staleness window. Without a time machine, those
+    tests become time bombs: they pass when written but fail once the real date
+    drifts more than 7 days past the hardcoded one.
+
+    Usage::
+
+        with TimeMachine("2026-09-29"):
+            ...
+
+    Any code that calls ``date.today()`` during the ``with`` block sees the frozen
+    date. The real ``date.today()`` is restored on exit.
+    """
+
+    def __init__(self, frozen_date: str | _date):
+        if isinstance(frozen_date, str):
+            frozen_date = _date.fromisoformat(frozen_date)
+        self.frozen = frozen_date
+        self._patched: list[tuple[object, str]] = []
+
+    def __enter__(self):
+        frozen = self.frozen
+
+        class _FrozenDate(_date):
+            @classmethod
+            def today(cls):
+                return frozen
+
+        # ``second_brain`` (and friends) did ``from datetime import date`` at
+        # import time, so patching ``datetime.date`` would change nothing. Each
+        # consumer holds its own reference, so walk the loaded modules and swap
+        # every one that still points at the real class.
+        for module in list(sys.modules.values()):
+            try:
+                if getattr(module, "date", None) is _date:
+                    module.date = _FrozenDate
+                    self._patched.append((module, "date"))
+            except Exception:
+                continue
+        return self
+
+    def __exit__(self, *exc):
+        for module, _attr in self._patched:
+            module.date = _date
+        self._patched.clear()
+        return False
+
+
+@pytest.fixture
+def time_machine():
+    """Fixture that returns the TimeMachine context manager.
+
+    Usage::
+
+        def test_something(time_machine):
+            with time_machine("2026-09-29"):
+                ...
+    """
+    return TimeMachine
