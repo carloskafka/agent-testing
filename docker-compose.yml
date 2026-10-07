@@ -31,6 +31,8 @@ services:
       # service never sees .env and every value in it silently fell back to the
       # script's own 37842 default.
       OBSIDIAN_MCP_PORT: ${OBSIDIAN_MCP_PORT:-37842}
+      # Same zone as the agent, so file timestamps and logs agree across the pair.
+      TZ: ${TZ:-America/Sao_Paulo}
     volumes:
       # Host directory whose children are Obsidian vaults (auto-created as
       # "agent-vault" if empty). Override with OBSIDIAN_VAULT_PARENT_HOST in .env.
@@ -66,6 +68,11 @@ services:
       # OBSIDIAN_VAULT_NAME in .env to choose; run.sh can prompt for it.
       SECOND_BRAIN_VAULT: /vaults
       OBSIDIAN_VAULT_NAME: ${OBSIDIAN_VAULT_NAME:-}
+      # The container's wall clock. `current_datetime("local")` and the day-scoped
+      # cache key both read it, and an image defaults to UTC, which is the wrong
+      # day for several hours every evening in Sao Paulo (UTC-3). The standard TZ
+      # variable rather than a project-specific one: libc and Python both honour it.
+      TZ: ${TZ:-America/Sao_Paulo}
       # Headless-browser renderer, for pages a plain HTTP GET cannot read. A
       # SEPARATE compose project (~/Downloads/apps/chromium) reached over the same
       # bridge, for the same reason SearXNG is: a service name on a private network
